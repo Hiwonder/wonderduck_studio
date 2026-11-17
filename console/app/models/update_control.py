@@ -14,10 +14,11 @@ REST_TIMEOUT = 120
 
 
 class UpdateControl:
-    def __init__(self, endpoint):
+    def __init__(self, endpoint, *, deadline=None):
+        self.deadline = deadline
         self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.connection.settimeout(5)
         try:
+            self.connection.settimeout(self._timeout(5))
             self.connection.connect(str(endpoint))
             self.stream = self.connection.makefile('rwb')
         except BaseException:
@@ -31,7 +32,17 @@ class UpdateControl:
         self.next_id = 1
         self.closed = False
 
+    def _timeout(self, maximum):
+        if self.deadline is None:
+            return maximum
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('等待机器人休息完成超时')
+        return min(maximum, remaining)
+
     def _call(self, method, params):
+        if self.deadline is not None:
+            self.connection.settimeout(self._timeout(self.connection.gettimeout() or 5))
         request_id = self.next_id
         self.next_id += 1
         message = dict(jsonrpc='2.0', id=request_id, method=method, params=params)
@@ -58,6 +69,8 @@ class UpdateControl:
     def __enter__(self):
         try:
             deadline = time.monotonic() + REST_TIMEOUT
+            if self.deadline is not None:
+                deadline = min(deadline, self.deadline)
             while True:
                 policy = self._call('robot.policies', {})
                 if policy.get('rest_phase') not in ('idle', 'resting', 'rested', 'failed'):
@@ -66,7 +79,7 @@ class UpdateControl:
                     break
                 if time.monotonic() >= deadline:
                     raise ValueError('等待当前休息完成超时')
-                time.sleep(.25)
+                time.sleep(min(.25, max(0, deadline - time.monotonic())))
             maintenance = self._call('robot.maintenance', {'action': 'status'})
             if maintenance.get('phase') != 'idle':
                 raise ValueError('舵机维护或标定正在进行，暂不能更新模型')
@@ -78,6 +91,8 @@ class UpdateControl:
             self._accepted(self._call('robot.stop', {}), '无法停止当前控制')
             self._accepted(self._human('register'), '无法登记更新控制会话')
             deadline = time.monotonic() + ACQUIRE_TIMEOUT
+            if self.deadline is not None:
+                deadline = min(deadline, self.deadline)
             while True:
                 result = self._human('acquire')
                 if result.get('accepted') is True and result.get('owner') == self.source:
@@ -87,7 +102,7 @@ class UpdateControl:
                     raise ValueError(f'无法取得模型更新控制权：{reason or "结果未确认"}')
                 if reason in ('busy', 'tracking_active'):
                     self._accepted(self._call('robot.stop', {}), '无法停止当前控制')
-                time.sleep(.1)
+                time.sleep(min(.1, max(0, deadline - time.monotonic())))
             self.worker = threading.Thread(target=self._heartbeat, name='model-control-lease', daemon=True)
             self.worker.start()
             return self
@@ -119,7 +134,7 @@ class UpdateControl:
         with self.lock:
             if self.failure is not None:
                 raise ValueError(f'模型更新控制会话失效：{self.failure}') from self.failure
-            self.connection.settimeout(timeout)
+            self.connection.settimeout(self._timeout(timeout))
             self._refresh()
             return {method: self._call(method, params) for method, params in calls}
 
@@ -132,7 +147,8 @@ class UpdateControl:
             self.worker.join(timeout=6)
         try:
             with self.lock:
-                if self.source is not None and self.worker is not None and self.failure is None:
+                if (self.source is not None and self.worker is not None and self.failure is None
+                        and (self.deadline is None or time.monotonic() < self.deadline)):
                     self._human('abandon')
         except Exception as error:
             logging.warning('Cannot release model update control: %s', error)

@@ -12,7 +12,7 @@ import time
 from app.robot.robotd_state import MAX_LINE_BYTES, RobotdController
 from app.robot.manual_page_guard import ManualPageGuard
 from app.robot.protocol import IDS
-from app.robot.workspace_rest import ensure_rest, rest_status
+from app.robot.workspace_rest import ensure_rest
 
 
 MAINTENANCE_WORKSPACES = frozenset(("action", "debug", "calibration"))
@@ -20,6 +20,8 @@ WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "control", "target", 
 MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "maze", "person", "target"))
 REST_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status",))
 CLIENT_TIMEOUT = 30
+REST_INVALIDATING_ACTIONS = frozenset(("move", "move_direct", "write_register", "offset_direct",
+                                       "center_all", "home_all", "run_targets"))
 
 
 class MaintenanceLease:
@@ -50,7 +52,7 @@ class MaintenanceLease:
             return self.request("status")
         if not result.get("accepted"):
             raise RuntimeError(f"robotd 维护请求被拒绝：{result.get('reason') or result.get('phase')}")
-        expected = "active" if action in ("acquire", "acquire_status", "status_read_begin", "status_read_complete", "status_read_timeout") else "idle"
+        expected = "active" if action in ("acquire", "acquire_status", "status_read_begin", "status_read_complete", "status_read_timeout", "invalidate_rest") else "idle"
         if result.get("phase") != expected:
             raise RuntimeError(f"robotd 维护交接未完成：{result.get('phase')}")
         return result
@@ -95,12 +97,14 @@ class StudioController:
         self.manual_page_guard = ManualPageGuard(path)
         self.manual_guard_error = None
         self.rest_transition_client = None
+        self.rest_unconfirmed = set()
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
         self.owner = None
         self.workspace = None
         self.controller = None
         self.lease = None
+        self.rest_invalidated = False
         self.last_seen = 0
         self.error = None
         self.library_owner = None
@@ -151,6 +155,15 @@ class StudioController:
         with self.lock:
             if self.rest_transition_client is not None:
                 raise RuntimeError("机器人正在休息，请等待页面切换完成")
+            if client in self.rest_unconfirmed:
+                # Permit navigation while keeping the manual guard. The daemon's
+                # emergency gate remains closed until a release is verified.
+                self.manual_page_guard.ensure(client, status=False)
+                if client in self.status_viewers:
+                    self._set_status_viewer(client, False)
+                self.client_workspaces[client] = (workspace, time.monotonic())
+                return dict(workspace=workspace, maintenance=False, ready=False,
+                            error="卸力未确认，请点击设备状态、动作编辑、舵机调试或 IMU 校准重试")
             previous = self.client_workspaces.get(client)
             previous_status_seen = self.status_viewers.get(client)
             previously_disabled = bool(previous and previous[0] in MANUAL_DISABLED_WORKSPACES)
@@ -191,10 +204,7 @@ class StudioController:
             if self.rest_transition_client is not None:
                 raise RuntimeError("机器人正在休息，请等待页面切换完成")
             previous = self.client_workspaces.get(client)
-            if previous is not None and previous[0] == workspace:
-                return self.switch(client, workspace)
-            phase, _ = rest_status(self.path)
-            if phase == "rested":
+            if previous is not None and previous[0] == workspace and client not in self.rest_unconfirmed:
                 return self.switch(client, workspace)
             if self.owner not in (None, client):
                 raise PermissionError("另一浏览器正在使用维护工作区")
@@ -221,10 +231,33 @@ class StudioController:
         try:
             # Do not hold the Studio lock while the robot is sitting: state
             # snapshots and unrelated status requests must remain responsive.
-            ensure_rest(self.path)
+            fallback = False
+            try:
+                ensure_rest(self.path)
+            except Exception as error:
+                logging.warning("休息未完成，准备关闭策略并卸力：%s", error)
+                try:
+                    self._robotd_emergency_release()
+                except Exception as release_error:
+                    message = f"休息未完成，关闭策略和卸力未确认：{release_error}"
+                    logging.error("%s", message)
+                    with self.lock:
+                        self.rest_transition_client = None
+                        self.rest_unconfirmed.add(client)
+                        self.client_workspaces[client] = (workspace, time.monotonic())
+                        try:
+                            self.manual_page_guard.ensure(client, status=workspace == "status")
+                        except (OSError, RuntimeError, ValueError) as guard_error:
+                            message += f"；手动控制限制未确认：{guard_error}"
+                    return dict(workspace=workspace, maintenance=False, ready=False, error=message)
+                fallback = True
             with self.lock:
                 self.rest_transition_client = None
-                return self.switch(client, workspace)
+                self.rest_unconfirmed.discard(client)
+                result = self.switch(client, workspace)
+                if fallback:
+                    result["rest_fallback"] = True
+                return result
         except BaseException:
             with self.lock:
                 self.rest_transition_client = None
@@ -294,6 +327,7 @@ class StudioController:
                         self._set_status_viewer(client, True)
                     raise
                 self.lease = lease
+                self.rest_invalidated = False
                 self.owner = client
             self.workspace = workspace
             self.last_seen = time.monotonic()
@@ -344,6 +378,8 @@ class StudioController:
                 return
             workspace, _ = entry
             self.client_workspaces[client] = (workspace, time.monotonic())
+            if client in self.rest_unconfirmed:
+                return
             self._set_status_viewer(client, visible and workspace == "status")
 
     def heartbeat(self, client):
@@ -366,6 +402,7 @@ class StudioController:
                 self.library_active = False
                 self.library_result = dict(state="error", frame=None, count=0, error=reason)
             self.owner = self.workspace = None
+            self.rest_invalidated = False
             self.last_seen = 0
             self.error = reason
             self.observer.set_stream_suspended(False)
@@ -391,6 +428,7 @@ class StudioController:
             except (OSError, ValueError) as error:
                 logging.warning("关闭维护会话失败：%s", error)
             self.lease = None
+            self.rest_invalidated = False
             self.observer.set_stream_suspended(False)
         self.owner = None
         self.workspace = None
@@ -417,6 +455,7 @@ class StudioController:
             try:
                 self.switch(client, "action")
                 self.controller.arm(client, True)
+                self._invalidate_rest_for_maintenance()
                 self.library_result = self.controller.action_task(
                     dict(operation="start", document=document, loop=False, locked_ids=[]), client)
                 return dict(self.library_result, active=True)
@@ -471,16 +510,19 @@ class StudioController:
                 finally:
                     if library_active:
                         self._leave()
-            try:
-                response = self.observer.query((("robot.emergencyRelax", {}),), timeout=30)
-                result = response["robot.emergencyRelax"]
-            except (OSError, TimeoutError, KeyError, TypeError, ValueError) as error:
-                raise RuntimeError(f"卸力请求连接中断或超时，结果未确认：{error}") from error
-            if not isinstance(result, dict) or type(result.get("accepted")) is not bool:
-                raise RuntimeError("卸力结果格式无效，结果未确认")
-            if not result["accepted"]:
-                raise RuntimeError(result.get("reason") or "设备未确认卸力")
-            return dict(verified=True, source="robotd")
+            return self._robotd_emergency_release()
+
+    def _robotd_emergency_release(self):
+        try:
+            response = self.observer.query((("robot.emergencyRelax", {}),), timeout=30)
+            result = response["robot.emergencyRelax"]
+        except (OSError, TimeoutError, KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"卸力请求连接中断或超时，结果未确认：{error}") from error
+        if not isinstance(result, dict) or type(result.get("accepted")) is not bool:
+            raise RuntimeError("卸力结果格式无效，结果未确认")
+        if not result["accepted"]:
+            raise RuntimeError(result.get("reason") or "设备未确认卸力")
+        return dict(verified=True, source="robotd")
 
     def shutdown(self, client):
         if not client:
@@ -515,15 +557,32 @@ class StudioController:
         else:
             allowed = {"action", "debug"}
         with self.lock:
-            return self._require(client, allowed).submit(command, client)
+            controller = self._require(client, allowed)
+            if (action in REST_INVALIDATING_ACTIONS or action == "torque" and command.get("on") is True
+                    or action == "servo_debug" and command.get("enabled") is True):
+                self._invalidate_rest_for_maintenance()
+            return controller.submit(command, client)
+
+    def _invalidate_rest_for_maintenance(self):
+        # Maintenance writes bypass robotd, so it must forget its old rest result
+        # before any operation that could enable torque or move a joint. Notify
+        # once per lease; if the request fails, no servo command is issued.
+        if not self.rest_invalidated:
+            self.lease.request("invalidate_rest")
+            self.rest_invalidated = True
 
     def parameter_task(self, command, client):
         with self.lock:
-            return self._require(client, {"debug"}).parameter_task(command, client)
+            controller = self._require(client, {"debug"})
+            if command.get("operation") == "start":
+                self._invalidate_rest_for_maintenance()
+            return controller.parameter_task(command, client)
 
     def action_task(self, command, client):
         with self.lock:
             controller = self._require(client, {"action"})
+            if command.get("operation") in ("start", "send_frame"):
+                self._invalidate_rest_for_maintenance()
             if command.get("operation") != "send_frame":
                 return controller.action_task(command, client)
             future = controller.action_task(command, client, defer_frame=True)
@@ -625,6 +684,7 @@ class StudioController:
                     logging.error("设备状态串口交接失败：%s", error)
                 self.client_workspaces = {client: entry for client, entry in self.client_workspaces.items()
                                           if client == self.rest_transition_client or now - entry[1] <= CLIENT_TIMEOUT}
+                self.rest_unconfirmed.intersection_update(self.client_workspaces)
                 for client in list(self.manual_page_guard.leases):
                     if client == self.rest_transition_client:
                         continue

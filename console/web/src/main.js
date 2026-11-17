@@ -302,6 +302,7 @@ const resumePages = new Set(['status', 'action', 'debug', ...restrictedPages]);
 let switchingWorkspace = false;
 let pendingWorkspaceResume = false, workspaceRestoreInFlight = false;
 let workspaceRetryRequired = false;
+let queuedWorkspace = null, workspaceQueueTimer = null;
 
 function restoreWorkspaceOnVisible() {
   if (!info?.studio || document.hidden || !token || workspaceRetryRequired || !resumePages.has(workspace)) return;
@@ -613,37 +614,97 @@ function clearDebugFrame() {
   if (frame.getAttribute('src') !== 'about:blank') frame.src = 'about:blank';
 }
 
+function previewWorkspace(page, message, ready = false) {
+  document.body.dataset.workspace = page;
+  for (const choice of document.querySelectorAll('button[data-workspace]')) {
+    const active = choice.dataset.workspace === page;
+    choice.classList.toggle('active', active);
+    if (active) choice.setAttribute('aria-current', 'page'); else choice.removeAttribute('aria-current');
+  }
+  $('control-workspace').hidden = !controlPages.has(page);
+  $('control-workspace').inert = !ready;
+  $('monitor').hidden = controlPages.has(page) || page === 'network' || page === 'models';
+  $('network-workspace').hidden = page !== 'network';
+  $('network-workspace').inert = !ready;
+  $('models-workspace').hidden = page !== 'models';
+  $('models-workspace').inert = !ready;
+  for (const panel of document.querySelectorAll('[data-workspace-panel]')) {
+    panel.hidden = panel.dataset.workspacePanel !== page;
+    panel.inert = !ready;
+  }
+  const notice = $('workspace-notice');
+  notice.hidden = !message;
+  notice.textContent = message || '';
+}
+
+function queueWorkspace(page) {
+  queuedWorkspace = page;
+  delete document.body.dataset.studioReady;
+  setArmed(false);
+  previewWorkspace(page, '正在准备页面，设备操作暂不可用');
+  if (workspaceQueueTimer) return;
+  const retry = () => {
+    workspaceQueueTimer = null;
+    if (switchingWorkspace || servoDebugMode.busy() || controlActionStarting) {
+      workspaceQueueTimer = setTimeout(retry, 200);
+      return;
+    }
+    const target = queuedWorkspace;
+    queuedWorkspace = null;
+    if (target) selectWorkspace(target);
+  };
+  workspaceQueueTimer = setTimeout(retry, 0);
+}
+
 async function selectWorkspace(next) {
-  if (servoDebugMode.busy()) { toast('请等待舵机调试模式操作完成', true); return; }
-  if (controlActionStarting) { toast('动作启动中，请稍候', true); return; }
-  if (switchingWorkspace || next === workspace && (!info?.studio || document.body.dataset.studioReady)) return;
+  if (switchingWorkspace || servoDebugMode.busy() || controlActionStarting) { queueWorkspace(next); return; }
+  if (next === workspace && (!info?.studio || document.body.dataset.studioReady)) return;
   switchingWorkspace = true;
   sidebarTransitionPending = !!state && state.online && stateFresh();
   servoDebugMode.update();
   const previous = workspace;
-  const restBefore = !!info?.studio && previous !== next && restBeforeWorkspace.has(next);
+  const wasReady = !!document.body.dataset.studioReady;
+  const restBefore = !!info?.studio && restBeforeWorkspace.has(next) && (previous !== next || !wasReady);
   if (previous !== next) advanceHeadSubscription();
   const pauseCalibration = previous === 'calibration' && previous !== next;
   if (pauseCalibration) calibrationCharts.setActive(false);
-  let workspaceRequestSent = false;
-  if (info?.studio && previous !== next && controlPages.has(previous)) $('control-workspace').inert = true;
-  for (const button of document.querySelectorAll('button[data-workspace]')) button.disabled = true;
+  let restFallback = false;
+  if (info?.studio) {
+    delete document.body.dataset.studioReady;
+    controlGeneration++;
+    setArmed(false);
+    if (previous === 'debug' && previous !== next) clearDebugFrame();
+    previewWorkspace(next, '正在准备页面，设备操作暂不可用');
+  }
   try {
-    if (previous === 'control' && previous !== next && controlActionActive) await stopControlAction(false);
-    if (previous === 'action' && previous !== next) await servoDebugMode.closeOnLeave();
+    if (previous === 'control' && previous !== next && controlActionActive) {
+      try { await stopControlAction(false); } catch (error) { console.warn('停止动作时切换页面', error); }
+    }
+    if (previous === 'action' && previous !== next) {
+      try { await servoDebugMode.closeOnLeave(); } catch (error) { console.warn('关闭舵机调试模式时切换页面', error); }
+    }
     if (info?.studio) {
-      if (previous === 'action' && previous !== next && document.body.dataset.studioReady) await releaseControl();
-      if (previous !== next && controlPages.has(previous)) await leaveControlWorkspace();
+      if (previous === 'action' && previous !== next && wasReady) await releaseControl();
+      if (previous !== next && controlPages.has(previous)) {
+        try { await leaveControlWorkspace(); } catch (error) { console.warn('退出操控页面时继续交接', error); }
+      }
       if (previous === 'debug' && previous !== next) clearDebugFrame();
       if (previous !== next) cameraPreview?.stop();
-      workspaceRequestSent = true;
       if (restBefore) toast('正在准备进入页面，请稍候', false, { routine: true });
       const result = await request('workspace', { workspace: next, ...(restBefore ? { rest_before: true } : {}) });
+      restFallback = result?.rest_fallback === true;
+      if (result?.ready === false) throw new Error(result.error || '设备操作尚未就绪');
       if (next === 'status' && result?.ready !== true) throw new Error(result?.error || '设备状态采集尚未就绪');
-      if ((next === 'action' || next === 'debug') && result?.maintenance !== true) throw new Error('维护工作区尚未就绪');
+      if (maintenancePages.has(next) && result?.maintenance !== true) throw new Error(result?.error || '维护工作区尚未就绪');
       info = await request('info');
       token = info.token;
     }
+    if (queuedWorkspace && queuedWorkspace !== next) {
+      workspace = next;
+      workspaceRetryRequired = false;
+      return;
+    }
+    if (queuedWorkspace === next) queuedWorkspace = null;
     const control = $('control-workspace');
     if (controlPages.has(next) && (!control.src || control.src === 'about:blank')) {
       const url = new URL(location.href);
@@ -656,15 +717,11 @@ async function selectWorkspace(next) {
       $('debug-frame').classList.remove('frame-clearing');
     }
     workspace = next;
-    document.body.dataset.workspace = workspace;
     document.body.dataset.studioReady = 'true';
-    if (restBefore) toast('页面已就绪', false, { routine: true });
+    previewWorkspace(workspace, '', true);
+    if (restFallback) toast('休息未完成，已关闭策略并卸力');
+    else if (restBefore) toast('页面已就绪', false, { routine: true });
     workspaceRetryRequired = false;
-    for (const choice of document.querySelectorAll('button[data-workspace]')) {
-      const active = choice.dataset.workspace === workspace;
-      choice.classList.toggle('active', active);
-      if (active) choice.setAttribute('aria-current', 'page'); else choice.removeAttribute('aria-current');
-    }
     control.hidden = !controlPages.has(workspace);
     $('monitor').hidden = controlPages.has(workspace) || workspace === 'network' || workspace === 'models';
     $('network-workspace').hidden = workspace !== 'network';
@@ -698,46 +755,29 @@ async function selectWorkspace(next) {
     if (state && info) renderState();
     drawChart();
   } catch (error) {
-    let message = error.message;
-    if (restBefore) toast('页面切换未完成', true, { routine: true });
+    const message = `${error.message}；设备操作暂不可用，重新点击当前页面可重试`;
     if (next === 'debug' || previous === 'debug') clearDebugFrame();
     if (controlPages.has(next) && !controlPages.has(previous)) $('control-workspace').src = 'about:blank';
-    if (info?.studio && workspaceRequestSent && previous !== next) {
-      // Even a failed or timed-out switch may have changed the server session.
-      // Restore the page guard and lease only; the user explicitly retries the
-      // page before controls or motion can be enabled again.
-      advanceHeadSubscription();
-      try { await request('workspace', { workspace: previous }, 15000); }
-      catch (restoreError) {
-        message = `${message}；恢复原工作区失败：${restoreError.message}`;
-      }
-    }
-    if (info?.studio) {
-      delete document.body.dataset.studioReady;
-      workspaceRetryRequired = true;
-      if (previous === 'action') await releaseControl();
-      else setArmed(false);
-      message = `${message}；请重新点击当前页面重试`;
-    }
+    workspace = next;
+    delete document.body.dataset.studioReady;
+    workspaceRetryRequired = true;
+    setArmed(false);
+    if (queuedWorkspace && queuedWorkspace !== next) return;
+    if (queuedWorkspace === next) queuedWorkspace = null;
+    previewWorkspace(workspace, message);
+    networkControls.setActive(false);
+    modelControls.setActive(false);
+    cameraPreview?.stop();
+    calibrationCharts.setActive(false);
+    calibrationView.setActive(workspace === 'calibration');
+    updateReferenceView();
+    if (state && info) renderState();
     toast(message, true);
-    if (pauseCalibration && (!info?.studio || document.body.dataset.studioReady)) calibrationCharts.setActive(true);
-    updateCameraPreview();
-    if ((!info?.studio || document.body.dataset.studioReady) && controlPages.has(previous)) {
-      const control = $('control-workspace');
-      if (control.src && control.src !== 'about:blank') notifyFrames('studio-workspace', { page: previous });
-      else {
-        const url = new URL(location.href);
-        url.port = location.protocol === 'https:' ? '9444' : '8081'; url.pathname = '/';
-        url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=0`; url.hash = '';
-        control.src = url.href;
-      }
-    }
   } finally {
     switchingWorkspace = false;
     if (sidebarTransitionPending) sidebarTransitionCompleted = performance.now();
     servoDebugMode.update();
     $('control-workspace').inert = !!info?.studio && !document.body.dataset.studioReady;
-    for (const button of document.querySelectorAll('button[data-workspace]')) button.disabled = false;
     if (pendingWorkspaceResume) {
       pendingWorkspaceResume = false;
       restoreWorkspaceOnVisible();

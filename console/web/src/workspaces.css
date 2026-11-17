@@ -50,6 +50,7 @@ body.studio-shell #toast{transition:left 240ms ease,max-width 240ms ease}
 #calibration-workspace{background:#f7f9f8;contain:paint}
 html[data-theme=dark] #calibration-workspace{background:#11161b}
 #control-workspace,#debug-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:transparent}
+.workspace-notice{position:fixed;z-index:30;top:12px;right:20px;max-width:min(580px,calc(100vw - 40px));padding:9px 13px;border-radius:5px;background:#755d22;color:#fff;font-size:13px;box-shadow:0 2px 8px #0003}
 body:is([data-workspace=control],[data-workspace=target],[data-workspace=person],[data-workspace=maze],[data-workspace=system]) main{height:100dvh}
 #debug-workspace{overflow:hidden;padding:0;background:#f7f9f8}
 html[data-theme=dark] #debug-workspace{background:#11161b}
