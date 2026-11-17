@@ -67,6 +67,22 @@ const BODY_MAX_Z_UP: f64 = 0.010;
 const BODY_MAX_Z_DOWN: f64 = 0.025;
 const BODY_MAX_ANGLE: f64 = 0.2618;
 
+fn studio_source_revision(marker: &str) -> Option<String> {
+    let data: serde_json::Value = serde_json::from_str(marker).ok()?;
+    if data.get("install_status")?.as_str()? != "installed" {
+        return None;
+    }
+    let revision = data.get("studio_revision")?.as_str()?;
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    Some(revision.to_owned())
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "webpadd",
@@ -512,7 +528,14 @@ fn router(state: AppState, media_port: u16) -> Router {
         .route("/console.css", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], include_str!("../web/console.css")) }))
         .route("/console.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/console.js")) }))
         .route("/action-library.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/action-library.js")) }))
-        .route("/licenses/apache-2.0.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../../LICENSE")) }))
+        .route("/licenses/agpl-3.0.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../../LICENSE")) }))
+        .route("/licenses/apache-2.0.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../web/licenses/apache-2.0.txt")) }))
+        .route("/licenses/source-info", get(|| async {
+            let revision = std::fs::read_to_string(".runtime-release.json")
+                .ok()
+                .and_then(|marker| studio_source_revision(&marker));
+            axum::Json(serde_json::json!({ "revision": revision }))
+        }))
         .route("/licenses/three.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../web/licenses/three.txt")) }))
         .route("/licenses/lucide.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../web/licenses/lucide.txt")) }))
         .route("/licenses/onnxruntime.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../web/licenses/onnxruntime.txt")) }))
@@ -1169,5 +1192,20 @@ async fn config_worker(path: PathBuf, control: Arc<Mutex<ControlState>>) {
                 tracing::error!(%error, "controller config reload rejected; previous validated config remains active")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod license_tests {
+    use super::studio_source_revision;
+
+    #[test]
+    fn source_link_uses_only_a_complete_installed_revision() {
+        let revision = "1234567890abcdef1234567890abcdef12345678";
+        let installed = format!(r#"{{"install_status":"installed","studio_revision":"{revision}"}}"#);
+        assert_eq!(studio_source_revision(&installed).as_deref(), Some(revision));
+        assert_eq!(studio_source_revision(&installed.replace("installed", "installing")), None);
+        assert_eq!(studio_source_revision(&installed.replace(revision, "../../bad")), None);
+        assert_eq!(studio_source_revision("not json"), None);
     }
 }

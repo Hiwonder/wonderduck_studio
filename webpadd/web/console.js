@@ -4,6 +4,15 @@
   const expanded = matchMedia('(min-width: 1100px) and (min-height: 740px)');
   const notify = () => window.dispatchEvent(new CustomEvent('console-view-change'));
   const isVisionPage = page => page === 'target' || page === 'person';
+  fetch('/licenses/source-info').then(response => response.ok ? response.json() : null).then(data => {
+    if (!/^[0-9a-f]{40}$/.test(data?.revision || '')) return;
+    document.querySelectorAll('[data-studio-source]').forEach(link => {
+      const base = link.dataset.studioSource === 'gitee'
+        ? 'https://gitee.com/hiwonder_official/wonderduck_studio'
+        : 'https://github.com/Hiwonder/wonderduck_studio';
+      link.href = `${base}/tree/${data.revision}`;
+    });
+  }).catch(() => {});
   const licensesDialog = document.querySelector('#licenses-dialog');
   document.querySelector('#licenses-open').addEventListener('click', () => licensesDialog.showModal());
   const closeLicenses = () => { if (licensesDialog.open) licensesDialog.close(); };

@@ -201,8 +201,8 @@
 <div><dt>硬件版本</dt><dd id="device-hardware-version">--</dd></div>
 <div><dt>镜像版本</dt><dd id="device-image-version">--</dd></div>
 <div><dt>固件版本</dt><dd id="device-imu-firmware-version">--</dd></div>
-<div><dt>版权说明</dt><dd>© 2026 Hiwonder。保留所有权利。</dd></div>
-<div><dt>第三方许可证</dt><dd><button class="action" id="licenses-open" type="button">查看许可证</button></dd></div>
+<div><dt>版权说明</dt><dd>© 2026 Hiwonder</dd></div>
+<div><dt>软件许可证</dt><dd><button class="action" id="licenses-open" type="button">查看许可证</button> <a data-studio-source="github" href="https://github.com/Hiwonder/wonderduck_studio" target="_blank" rel="noopener">源代码</a></dd></div>
 </dl></section>
 <section class="settings-card reset-card"><div class="subsection-heading"><h3>恢复默认</h3></div><p class="parameter-note">将所有可调参数恢复默认并自动保存。</p><button class="action" id="reset-settings" type="button" disabled="">恢复默认</button></section>
 </section>
@@ -217,10 +217,11 @@
 <dialog aria-labelledby="motion-blocked-title" class="relax-confirm" id="motion-blocked"><form method="dialog"><h2 id="motion-blocked-title">请先启动</h2><p id="motion-blocked-text">机器人已休息，请点击启动后再操控。</p><div class="relax-confirm-actions"><button class="action primary" value="ok">知道了</button></div></form></dialog>
 <dialog aria-labelledby="shutdown-confirm-title" class="relax-confirm" id="shutdown-confirm"><form method="dialog"><h2 id="shutdown-confirm-title">确认关机</h2><p>机器人将先坐下并收回姿态，然后关闭系统。</p><div class="relax-confirm-actions"><button class="action" value="cancel">取消</button><button class="action primary" value="confirm">确认关机</button></div></form></dialog>
 <dialog aria-labelledby="licenses-title" class="licenses-dialog" id="licenses-dialog">
-<h2 id="licenses-title">第三方许可证</h2>
-<p>本软件包含以下主要第三方组件。点击许可证名称可查看原文。</p>
+<h2 id="licenses-title">软件许可证</h2>
+<p>点击许可证名称可查看原文。</p>
 <ul class="licenses-list">
-<li><strong>机器人控制与网页服务</strong><span>Apache-2.0，版权归各贡献者所有。<a href="/licenses/apache-2.0.txt" target="_blank" rel="noopener">查看许可证</a></span></li>
+<li><strong>WonderDuck Studio</strong><span>AGPL-3.0-only。<a href="/licenses/agpl-3.0.txt" target="_blank" rel="noopener">查看许可证</a> · 源代码：<a data-studio-source="github" href="https://github.com/Hiwonder/wonderduck_studio" target="_blank" rel="noopener">GitHub</a> / <a data-studio-source="gitee" href="https://gitee.com/hiwonder_official/wonderduck_studio" target="_blank" rel="noopener">Gitee</a></span></li>
+<li><strong>机器人控制及 Apache 组件</strong><span>Apache-2.0，版权归各贡献者所有。<a href="/licenses/apache-2.0.txt" target="_blank" rel="noopener">查看许可证</a></span></li>
 <li><strong>three.js</strong><span>MIT，© 2010–2025 three.js 作者。<a href="/licenses/three.txt" target="_blank" rel="noopener">查看许可证</a></span></li>
 <li><strong>Lucide Icons</strong><span>ISC；部分 Feather 图标适用 MIT。<a href="/licenses/lucide.txt" target="_blank" rel="noopener">查看许可证</a></span></li>
 <li><strong>ONNX Runtime</strong><span>MIT，© Microsoft Corporation。<a href="/licenses/onnxruntime.txt" target="_blank" rel="noopener">查看许可证</a></span></li>
