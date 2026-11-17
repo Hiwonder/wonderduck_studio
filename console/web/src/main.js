@@ -1,0 +1,1357 @@
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { modelConfigUrl } from './model-resource.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { createIcons, Bot, Power, PowerOff, Menu, PanelLeftClose, Crosshair, Play, SlidersHorizontal, LayoutGrid, RotateCcw, Undo2,
+  Lock, LockOpen, Plus, Minus, ListPlus, RefreshCw, Download, Trash2, ArrowUp, ArrowDown, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
+  FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery } from 'lucide';
+import { SAMPLE_MAX_AGE_MS, auxImuStatus, deviceFresh, imuTraceContinues, sampleFresh, servoStatus, tofStatus } from './state-status.js';
+import './style.css';
+import './simple-controls.css';
+import './theme.css';
+import './workspaces.css';
+import './network.css';
+import './models.css';
+import './font.css';
+import './calibration-view.css';
+import './notifications.css';
+import './interaction.css';
+import { createCalibrationControls } from './calibration-controls.js';
+import { createCalibrationCharts } from './calibration-charts.js';
+import { createDeviceStatus } from './device-status.js';
+import { createConnectionStatus, createLowVoltageIndicator, createNotifications, createSidebar, lowVoltageWarning, renderSidebarVoltage } from './sidebar.js';
+import { createServoPanel } from './servo-panel.js';
+import { createServoDebugMode } from './servo-debug-mode.js';
+import { createActionEditor } from './action-editor.js';
+import { createCameraPreview } from './camera-preview.js';
+import { createMediaPreview } from './media-preview.js';
+import { createViewerEnvironment } from './viewer-environment.js';
+import { centerTrunkOnPlatform, createFootHeightAligner, positionForPose } from './ground-placement.js';
+import { createNetworkControls } from './network.js';
+import { createModelControls } from './models.js';
+import { createCalibrationView } from './calibration-view.js';
+import { createActionReferenceView } from './action-reference-view.js';
+import { createReleaseConfirmation } from './release-confirm.js';
+import { version as appVersion } from '../package.json';
+
+const $ = (id) => document.getElementById(id);
+const setText = (id, value) => {
+  const element = $(id), text = String(value);
+  if (element.textContent !== text) element.textContent = text;
+};
+const fontFamily = getComputedStyle(document.documentElement).fontFamily;
+const client = sessionStorage.getItem('console-client') || crypto.randomUUID?.() || `client-${Date.now()}-${Math.random()}`;
+sessionStorage.setItem('console-client', client);
+let info, state, selected = [], armed = false;
+let workspace = 'action';
+let token = '', lastImuKey = '', lastGood = 0, responseSequence = 0, lastAuxSequence = -1;
+let auxValid = false;
+let lowVoltageActive = false, lastLowVoltageNotice = -Infinity;
+let connectionError = '';
+let stateRequestPending = false;
+let resourceRequestPending = false, nextResourceRequest = 0;
+let previousStateStarted = 0, statePollInterval = 0, stateRequestDuration = 0, stateRenderDuration = 0;
+let lastHeadDiagnostic = -Infinity;
+let servoDebugMode;
+let controlPending = false, controlGeneration = 0, nextControlAttempt = 0, controlUpdatedAt = 0, lastControlError = '';
+let controlRelease = Promise.resolve();
+let controlReleasePending = false;
+let sessionRefresh = null;
+const savedHeadSubscriptionRevision = Number(sessionStorage.getItem('head-subscription-revision'));
+let headSubscriptionRevision = Number.isSafeInteger(savedHeadSubscriptionRevision) && savedHeadSubscriptionRevision >= 0
+  ? savedHeadSubscriptionRevision : 0;
+function advanceHeadSubscription() {
+  headSubscriptionRevision++;
+  sessionStorage.setItem('head-subscription-revision', String(headSubscriptionRevision));
+}
+const samples = [], auxSamples = [];
+const fmt = (n, digits = 1) => Number.isFinite(n) ? n.toFixed(digits) : '--';
+const iconsRefresh = () => {
+  createIcons({ icons: { Bot, Power, PowerOff, Menu, PanelLeftClose, Crosshair, Play,
+    SlidersHorizontal, LayoutGrid, RotateCcw, Undo2, Lock, LockOpen, Plus, Minus, ListPlus, RefreshCw, Download, Trash2, ArrowUp, ArrowDown, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
+    FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery }, attrs: { 'stroke-width': 1.8 } });
+  // Lucide retains this attribute on rendered SVGs and would otherwise replace them again.
+  document.querySelectorAll('svg[data-lucide]').forEach(icon => icon.removeAttribute('data-lucide'));
+};
+iconsRefresh();
+$('app-version').textContent = `v${appVersion}`;
+
+const sampleElapsed = () => Math.max(0, performance.now() - lastGood);
+const stateFresh = () => sampleFresh(state, sampleElapsed(), connectionError);
+
+const setConnectionStatus = createConnectionStatus($);
+const setSidebarOpen = createSidebar($, iconsRefresh);
+const toast = createNotifications($);
+const updateLowVoltage = createLowVoltageIndicator();
+const confirmRelease = createReleaseConfirmation();
+
+async function confirmAction(title, text) {
+  $('confirm-title').textContent = title;
+  $('confirm-text').textContent = text;
+  const dialog = $('confirm');
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'ok'), { once: true }));
+}
+
+const requestHeaders = () => ({ 'Content-Type': 'application/json', 'X-Console-Token': token, 'X-Console-Client': client,
+  'X-Studio-Workspace': workspace,
+  'X-Head-Subscription-Revision': String(headSubscriptionRevision),
+  ...(workspace === 'calibration' ? { 'X-Calibration-Source': calibrationControls.source() } : {}) });
+let cameraPreview;
+function updateCameraPreview() {
+  const available = workspace === 'status';
+  $('camera-enabled').closest('label').hidden = !available;
+  const enabled = available && $('camera-enabled').checked;
+  $('camera-preview').hidden = !enabled;
+  if (!cameraPreview) return;
+  if (enabled && info) cameraPreview.start(); else cameraPreview.stop();
+}
+$('camera-enabled').addEventListener('change', updateCameraPreview);
+
+async function request(path, body, timeoutMs = null) {
+  const headers = requestHeaders();
+  if (path === 'state' && document.hidden && workspace === 'status') headers['X-Studio-Workspace'] = '';
+  const response = await fetch(`/api/${path}`, {
+    method: body ? 'POST' : 'GET',
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(timeoutMs ?? (path === 'workspace' && body?.rest_before ? 150000 : path === 'workspace' || path === 'emergency-release' || body?.action === 'servo_debug' || path === 'control-actions' && body?.operation !== 'list' ? 60000 : path.startsWith('models/online') && body ? 30000 : path === 'network/scan' ? 20000 : path === 'camera/offer' ? 14000 : 6500)), cache: 'no-store',
+  });
+  const responseStarted = performance.now();
+  const data = await response.json();
+  if (!response.ok) {
+    if (response.status === 403 && data.error === '会话无效，请刷新页面' && path !== 'info') {
+      await refreshSession();
+      throw new Error('服务已重启，控制会话正在恢复');
+    }
+    throw Object.assign(new Error(data.error || `HTTP ${response.status}`), { status: response.status });
+  }
+  if (path === 'state') {
+    // The server computes each age after acquiring its snapshot; request wait time is not sample age.
+    const readTime = performance.now() - responseStarted;
+    if (Number.isFinite(data.age_ms)) data.age_ms += readTime;
+    if (Number.isFinite(data.device_report_age_ms)) data.device_report_age_ms += readTime;
+    for (const device of [...(data.servos || []), ...(data.control_servos || []), data.imu]) {
+      if (Number.isFinite(device?.age_ms)) device.age_ms += readTime;
+      if (Number.isFinite(device?.observation_age_ms)) device.observation_age_ms += readTime;
+    }
+    if (Number.isFinite(data.aux_imu?.age_ms)) data.aux_imu.age_ms += readTime;
+    if (Number.isFinite(data.aux_imu?.sample?.age_us)) data.aux_imu.sample.age_us += readTime * 1000;
+    for (const calibration of [data.calibration, data.head_calibration]) {
+      if (Number.isFinite(calibration?.sample_age_ms)) calibration.sample_age_ms += readTime;
+    }
+  }
+  return data;
+}
+
+function refreshSession() {
+  if (!sessionRefresh) {
+    setArmed(false);
+    sessionRefresh = request('info').then(updated => {
+      info = updated;
+      token = updated.token;
+      applyMode();
+      servoPanel.reset(updated.joints);
+      actionEditor.render();
+    }).finally(() => { sessionRefresh = null; });
+  }
+  return sessionRefresh;
+}
+
+function handle(id, fn) {
+  $(id).addEventListener('click', async () => { try { await fn(); } catch (error) { toast(error.message, true); } });
+}
+
+function updateControls() { servoPanel.update(); actionEditor.update(); servoDebugMode?.update(); }
+
+function setArmed(value) {
+  if (!value) servoPanel.cancel();
+  armed = value;
+  updateControls();
+}
+
+async function renewControl() {
+  if (!info || info.readonly || sidebarReleaseBusy || (info.studio && (workspace !== 'action' || !document.body.dataset.studioReady)) || document.hidden || workspaceRestoreInFlight || controlPending || performance.now() < nextControlAttempt) return;
+  const playbackSamplingPaused = state?.action_playback?.state === 'playing' &&
+    state.online && !state.error && !connectionError;
+  if (state && !stateFresh() && !playbackSamplingPaused) return;
+  const generation = controlGeneration;
+  controlPending = true;
+  try {
+    await controlRelease;
+    if (generation !== controlGeneration || document.hidden) return;
+    const result = await request('arm', { on: true });
+    if (generation !== controlGeneration || document.hidden) { releaseControl(); return; }
+    controlUpdatedAt = performance.now();
+    nextControlAttempt = performance.now() + 10000;
+    lastControlError = '';
+    setArmed(result.armed);
+  } catch (error) {
+    if (generation === controlGeneration) {
+      setArmed(false);
+      nextControlAttempt = performance.now() + 2000;
+      if (lastControlError !== error.message) toast(error.message, true);
+      lastControlError = error.message;
+    }
+  } finally { controlPending = false; }
+}
+
+function releaseControl() {
+  controlGeneration++;
+  nextControlAttempt = 0;
+  setArmed(false);
+  if (!token || info?.readonly) return Promise.resolve();
+  const sendRelease = () => fetch('/api/arm', {
+    method: 'POST', headers: requestHeaders(), body: JSON.stringify({ on: false }),
+    keepalive: true, signal: AbortSignal.timeout(2500),
+  });
+  const pending = controlReleasePending ? controlRelease.then(sendRelease) : sendRelease();
+  controlReleasePending = true;
+  controlRelease = pending.then(() => {}, () => {});
+  const currentRelease = controlRelease;
+  currentRelease.then(() => { if (currentRelease === controlRelease) controlReleasePending = false; });
+  return controlRelease;
+}
+
+const servoPanel = createServoPanel({
+  request, toast, iconsRefresh, confirmRelease,
+  context: () => ({ info, state, armed, fresh: stateFresh(), elapsed: sampleElapsed(), connectionError,
+    active: !info?.studio || (workspace === 'action' && !!document.body.dataset.studioReady) }),
+  select: ids => { selected = ids; highlightSelectedJoints(); },
+  onPose: alignPoseToPlatform,
+});
+const actionEditor = createActionEditor({ request, toast, confirmAction, iconsRefresh, servoPanel,
+  context: () => ({ info, state, armed, fresh: stateFresh(), connectionError }) });
+setInterval(renewControl, 1000);
+document.addEventListener('visibilitychange', () => {
+  if (info?.studio && token && (workspace === 'status' || !document.hidden && resumePages.has(workspace))) {
+    advanceHeadSubscription();
+    if (document.hidden && workspace === 'status') request('state').catch(error => console.debug('设备状态采集切换失败', error.message));
+  }
+  if (document.hidden) releaseControl();
+  else if (info?.studio && resumePages.has(workspace)) restoreWorkspaceOnVisible();
+  else renewControl();
+});
+window.addEventListener('pagehide', releaseControl);
+window.addEventListener('pageshow', () => {
+  if (info?.studio && resumePages.has(workspace)) {
+    advanceHeadSubscription();
+    restoreWorkspaceOnVisible();
+  } else renewControl();
+});
+
+function quaternionAngles(q) {
+  const [w, x, y, z] = q;
+  return [Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)),
+    Math.asin(Math.max(-1, Math.min(1, 2 * (w * y - z * x)))),
+    Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))].map(v => v * 180 / Math.PI);
+}
+
+function validQuaternion(q) { return Array.isArray(q) && q.length === 4 && q.every(Number.isFinite) && Math.abs(Math.hypot(...q) - 1) < .05; }
+
+function fmtVector(values, digits = 3) {
+  return Array.isArray(values) && values.length === 3 && values.every(Number.isFinite)
+    ? values.map(value => fmt(value, digits)).join(', ') : '--';
+}
+
+function renderImuComparison() {
+  const visible = state.imu_source === 'compare';
+  $('imu-comparison').hidden = !visible;
+  if (!visible) return;
+  const sources = state.imu_sources || {};
+  for (const [key, label] of [['id200', 'id200'], ['i2c', 'i2c']]) {
+    const imu = sources[key] || {};
+    const hasValues = stateFresh() && validQuaternion(imu.quaternion_wxyz);
+    const angles = hasValues ? quaternionAngles(imu.quaternion_wxyz) : null;
+    setText(`compare-${label}-rpy`, angles ? fmtVector(angles, 2) : '--');
+    setText(`compare-${label}-gyro`, hasValues ? fmtVector(imu.gyro_rad_s) : '--');
+    setText(`compare-${label}-gravity`, hasValues ? fmtVector(imu.gravity) : '--');
+    setText(`compare-${label}-quaternion`, hasValues
+      ? `[${imu.quaternion_wxyz.map(value => fmt(value, 4)).join(', ')}]` : '--');
+    setText(`compare-${label}-status`, imu.valid ? '有效' : (imu.error || '未就绪'));
+  }
+  const delta = state.imu_comparison;
+  setText('imu-compare-delta', Number.isFinite(delta?.orientation_delta_deg)
+    ? `${delta.valid ? '两路有效数据差值' : '当前解码值差异（至少一路未就绪）'}：重力方向差 ${fmt(delta.gravity_angle_deg, 2)}° · 角速度差 ${fmt(delta.gyro_delta_rad_s, 3)} rad/s · 重力向量差 ${fmt(delta.gravity_delta, 3)} · 完整姿态差（含航向）${fmt(delta.orientation_delta_deg, 2)}° · 读取间隔 ${fmt(delta.read_offset_ms, 2)} ms。六轴融合的两路航向零点独立。`
+    : `差值待两路有效 · 主机读取窗口间隔 ${fmt(delta?.read_offset_ms, 2)} ms`);
+}
+
+const calibrationControls = createCalibrationControls({ request, confirmAction, toast });
+const calibrationCharts = createCalibrationCharts({ request, context: () => ({ info, connectionError, elapsed: sampleElapsed() }),
+  onError: message => toast(message, true), onStatus: message => toast(message), onClear: toast.dismiss });
+document.addEventListener('calibration-source-change', event => {
+  calibrationCharts.setSource(event.detail);
+  advanceHeadSubscription();
+  if (info?.studio && workspace === 'calibration' && token) {
+    request('state').catch(error => console.debug('头部 IMU 采集切换失败', error.message));
+  }
+});
+const deviceStatus = createDeviceStatus({ toast });
+const networkControls = createNetworkControls({ request, confirmAction, iconsRefresh, toast });
+const modelControls = createModelControls({ request, requestHeaders, refreshSession, confirmAction, toast,
+  supportsUpdates: () => !!info?.supports_model_update_resume,
+  supportsOnline: () => !!info?.supports_model_update_resume && !!info?.supports_online_models
+    && !!info?.supports_online_model_rest && !!info?.supports_model_version_gate });
+document.body.dataset.workspace = workspace;
+const controlPages = new Set(['control', 'target', 'person', 'maze', 'system']);
+const maintenancePages = new Set(['action', 'debug', 'calibration']);
+const restBeforeWorkspace = new Set(['status', 'action', 'debug', 'calibration']);
+const restrictedPages = new Set(['maze', 'person', 'target']);
+const resumePages = new Set(['status', 'action', 'debug', ...restrictedPages]);
+let switchingWorkspace = false;
+let pendingWorkspaceResume = false, workspaceRestoreInFlight = false;
+let workspaceRetryRequired = false;
+
+function restoreWorkspaceOnVisible() {
+  if (!info?.studio || document.hidden || !token || workspaceRetryRequired || !resumePages.has(workspace)) return;
+  if (switchingWorkspace || workspaceRestoreInFlight) { pendingWorkspaceResume = true; return; }
+  const target = workspace, revision = headSubscriptionRevision;
+  const frame = target === 'debug' ? $('debug-frame') : controlPages.has(target) ? $('control-workspace') : null;
+  let restored = false;
+  workspaceRestoreInFlight = true;
+  delete document.body.dataset.studioReady;
+  if (frame) frame.inert = true;
+  if (target === 'debug' && frame) frame.src = 'about:blank';
+  setArmed(false);
+  request('workspace', { workspace: target }).then(async result => {
+    if (document.hidden || switchingWorkspace || workspace !== target || headSubscriptionRevision !== revision) return;
+    if (target === 'status' && result?.ready !== true) throw new Error(result?.error || '设备状态采集尚未就绪');
+    if ((target === 'action' || target === 'debug') && result?.maintenance !== true) throw new Error('维护工作区尚未就绪');
+    if (target === 'debug' && frame) {
+      await loadWorkspaceFrame(frame, '/debug.html');
+      if (document.hidden || switchingWorkspace || workspace !== target || headSubscriptionRevision !== revision) {
+        frame.src = 'about:blank';
+        return;
+      }
+    }
+    restored = true;
+    document.body.dataset.studioReady = 'true';
+    if (frame) frame.inert = false;
+    if (target === 'debug') notifyFrames('studio-workspace', { page: target });
+    updateControls();
+    if (target === 'status') request('state').catch(error => console.debug('设备状态采集恢复失败', error.message));
+  }).catch(error => {
+    if (!document.hidden && !switchingWorkspace && workspace === target && headSubscriptionRevision === revision) {
+      delete document.body.dataset.studioReady;
+      if (frame) frame.inert = true;
+      updateControls();
+      toast(`恢复当前工作区失败：${error.message}`, true);
+    }
+  }).finally(() => {
+    workspaceRestoreInFlight = false;
+    if (pendingWorkspaceResume && !switchingWorkspace) {
+      pendingWorkspaceResume = false;
+      restoreWorkspaceOnVisible();
+    } else if (restored && !document.hidden && workspace === 'action') renewControl();
+  });
+}
+let sidebarTransitionPending = false;
+let sidebarTransitionCompleted = 0;
+const waitingForFirstSample = value => value?.online === false && value.sequence == null
+  && !value.error && !value.calibration?.active;
+let leaveRequestId = 0;
+let controlActionActive = false, controlActionStarting = false, controlActionPollBusy = false;
+let controlActionTimer = null;
+let controlActionGeneration = 0, controlActionRunId = null, controlActionPageHidden = false;
+let controlActionStartSent = false, controlActionSettled = Promise.resolve();
+servoDebugMode = createServoDebugMode({ request, toast, confirmAction,
+  context: () => ({ info, state, armed, workspace, switchingWorkspace,
+    ready: !info?.studio || !!document.body.dataset.studioReady }) });
+const servoToolbar = document.querySelector('.servo-section .section-bar');
+const actionHeading = document.querySelector('.action-heading');
+const actionAlignment = new ResizeObserver(() => $('action-editor').style.setProperty('--action-top-offset',
+  `${Math.max(0, servoToolbar.offsetHeight - actionHeading.offsetHeight)}px`));
+actionAlignment.observe(servoToolbar);
+actionAlignment.observe(actionHeading);
+
+function leaveControlWorkspace() {
+  const frame = $('control-workspace');
+  if (!frame.contentWindow || !frame.src || frame.src === 'about:blank') return Promise.resolve();
+  const origin = new URL(frame.src).origin;
+  const requestId = ++leaveRequestId;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error('操控页面退出超时，请重试')), 12000);
+    function receive(event) {
+      if (event.source !== frame.contentWindow || event.origin !== origin
+          || event.data?.type !== 'studio-leave-result' || event.data.requestId !== requestId) return;
+      finish(event.data.accepted ? null : new Error(event.data.reason || '操控页面退出失败'));
+    }
+    function finish(error) {
+      clearTimeout(timeout);
+      window.removeEventListener('message', receive);
+      if (error) reject(error); else resolve();
+    }
+    window.addEventListener('message', receive);
+    frame.contentWindow.postMessage({ type: 'studio-leave', requestId }, origin);
+  });
+}
+
+function notifyFrames(type, data = {}) {
+  const control = $('control-workspace');
+  if (control.contentWindow && control.src && control.src !== 'about:blank') {
+    control.contentWindow.postMessage({ type, ...data }, new URL(control.src).origin);
+  }
+  const debug = $('debug-frame');
+  if (debug.contentWindow && debug.src && debug.src !== 'about:blank') {
+    debug.contentWindow.postMessage({ type, ...data }, location.origin);
+  }
+}
+
+function syncDebugMode() {
+  notifyFrames('studio-debug-mode', { enabled: false });
+}
+
+function notifyControlAction(result) {
+  const frame = $('control-workspace');
+  if (frame.contentWindow && frame.src && frame.src !== 'about:blank') {
+    frame.contentWindow.postMessage({ type: 'studio-action-state', result }, new URL(frame.src).origin);
+  }
+}
+
+function finishControlAction(result, resume = true) {
+  controlActionActive = false;
+  clearInterval(controlActionTimer);
+  controlActionTimer = null;
+  notifyControlAction(result);
+  if (resume && workspace === 'control') notifyFrames('studio-workspace', { page: workspace });
+}
+
+async function stopControlAction(resume = true) {
+  const result = await request('control-actions', { operation: 'stop', run_id: controlActionRunId });
+  if (!result.active) finishControlAction(result, resume);
+  return result;
+}
+
+function pollControlAction() {
+  if (!controlActionActive || controlActionPollBusy || switchingWorkspace) return;
+  controlActionPollBusy = true;
+  request('control-actions', { operation: 'status', run_id: controlActionRunId }).then(result => {
+    if (!controlActionActive) return;
+    if (result.active) notifyControlAction(result);
+    else finishControlAction(result);
+  }).catch(error => toast(`动作状态读取失败：${error.message}`, true))
+    .finally(() => { controlActionPollBusy = false; });
+}
+
+async function controlAction(event) {
+  const { operation, requestId, name } = event.data;
+  const reply = data => event.source.postMessage({ type: 'studio-action-result', requestId, ...data }, event.origin);
+  try {
+    if (!Number.isSafeInteger(requestId) || workspace !== 'control' || switchingWorkspace || controlActionPageHidden) {
+      throw new Error('请先打开运动控制');
+    }
+    let result;
+    if (operation === 'list') {
+      result = await request('control-actions', { operation });
+    } else if (operation === 'stop') {
+      result = await stopControlAction();
+    } else if (operation === 'start') {
+      if (controlActionStarting || controlActionActive) throw new Error('动作正在执行');
+      controlActionStarting = true;
+      const generation = ++controlActionGeneration;
+      controlActionRunId = crypto.randomUUID?.() || `${client}-${Date.now()}-${Math.random()}`;
+      let settleStart;
+      controlActionSettled = new Promise(resolve => { settleStart = resolve; });
+      let suspended = false, leaveAttempted = false;
+      try {
+        leaveAttempted = true;
+        await leaveControlWorkspace();
+        suspended = true;
+        if (generation !== controlActionGeneration) throw new Error('动作请求已取消');
+        controlActionStartSent = true;
+        result = await request('control-actions', { operation, name, run_id: controlActionRunId });
+        if (generation !== controlActionGeneration) {
+          await stopControlAction(false);
+          throw new Error('动作请求已取消');
+        }
+        controlActionActive = result.active;
+        if (controlActionActive) controlActionTimer = setInterval(pollControlAction, 1000);
+        else finishControlAction(result);
+      } catch (error) {
+        if (suspended && !error.status) {
+          try { await stopControlAction(false); }
+          catch (stopError) {
+            controlActionActive = true;
+            controlActionTimer = setInterval(pollControlAction, 1000);
+            throw new Error(`动作启动结果未知：${error.message}；停止确认失败：${stopError.message}`);
+          }
+        }
+        if (leaveAttempted && generation === controlActionGeneration && workspace === 'control') {
+          notifyFrames('studio-workspace', { page: workspace });
+        }
+        throw error;
+      } finally {
+        controlActionStarting = false;
+        controlActionStartSent = false;
+        settleStart();
+      }
+    } else {
+      throw new Error('未知动作库操作');
+    }
+    reply({ result });
+  } catch (error) {
+    if (error.message === '动作请求已取消') reply({ result: { state: 'stopped', active: false } });
+    else reply({ error: error.message, active: controlActionActive });
+  }
+}
+
+let sidebarReleaseBusy = false;
+let sidebarShutdownBusy = false;
+function updateSidebarShutdown() {
+  const button = $('sidebar-shutdown');
+  button.hidden = !info?.supports_shutdown;
+  button.disabled = sidebarShutdownBusy || !info?.supports_shutdown;
+}
+
+$('sidebar-shutdown').addEventListener('click', async () => {
+  if (sidebarShutdownBusy || !info?.supports_shutdown || $('confirm').open) return;
+  if (!await confirmAction('确认关机', '机器人将先坐下并收回姿态，然后关闭系统。')) return;
+  sidebarShutdownBusy = true;
+  updateSidebarShutdown();
+  try {
+    await request('shutdown', {});
+    toast('已发送关机请求');
+  } catch (error) {
+    toast(error.message, true);
+    sidebarShutdownBusy = false;
+    updateSidebarShutdown();
+  }
+});
+
+function updateSidebarRelease() {
+  $('sidebar-release').disabled = sidebarReleaseBusy || !info || info.readonly;
+}
+
+$('sidebar-release').addEventListener('click', async () => {
+  if (sidebarReleaseBusy) return;
+  if (!await confirmRelease()) return;
+  sidebarReleaseBusy = true;
+  updateSidebarRelease();
+  controlGeneration++;
+  setArmed(false);
+  notifyFrames('studio-emergency-release', { active: true });
+  const hadAction = controlActionActive || controlActionStarting;
+  const runId = hadAction && (controlActionActive || controlActionStartSent) ? controlActionRunId : null;
+  const settled = controlActionSettled;
+  if (hadAction) controlActionGeneration++;
+  const resumeControl = () => {
+    if (workspace === 'control' && !switchingWorkspace && !controlActionPageHidden) {
+      notifyFrames('studio-workspace', { page: workspace });
+    }
+  };
+  try {
+    const result = await request('emergency-release', runId ? { run_id: runId } : {});
+    if (result.verified !== true) {
+      const failures = Object.entries(result.results || {}).filter(([, value]) => value !== '已读回关闭')
+        .map(([id, value]) => `ID ${id}: ${value}`).join('；');
+      throw new Error(failures || result.error || '未确认全部舵机卸力');
+    }
+    if (hadAction) {
+      finishControlAction({ state: 'stopped', active: false, error: '已请求卸力' }, false);
+      if (controlActionStarting) settled.then(resumeControl); else resumeControl();
+    }
+    const message = result.already_released ? '校准前已确认关节卸力' : '关节已卸力并读回确认';
+    $('last-command').textContent = message;
+    toast(message);
+  } catch (error) {
+    if (hadAction && controlActionRunId) {
+      let stopped = false;
+      try { stopped = !(await stopControlAction(false)).active; }
+      catch (stopError) { error = new Error(`${error.message}；动作停止未确认：${stopError.message}`); }
+      if (stopped) {
+        if (controlActionStarting) settled.then(resumeControl); else resumeControl();
+      }
+    }
+    toast(`关节卸力失败：${error.message}`, true);
+  } finally {
+    sidebarReleaseBusy = false;
+    notifyFrames('studio-emergency-release', { active: false });
+    updateSidebarRelease();
+  }
+});
+
+window.addEventListener('message', event => {
+  const debug = $('debug-frame'), control = $('control-workspace');
+  if (event.origin === location.origin && event.source === debug.contentWindow && workspace === 'debug') {
+    if (event.data?.type === 'studio-servo-selected' && Number.isInteger(event.data.id)) {
+      selected = [event.data.id];
+      highlightSelectedJoints();
+    } else if (event.data?.type === 'studio-debug-size' && Number.isFinite(event.data.height)
+        && window.matchMedia('(max-width:999px)').matches) {
+      debug.style.height = `${Math.ceil(event.data.height)}px`;
+    } else if (event.data?.type === 'studio-feedback' && typeof event.data.text === 'string' && typeof event.data.error === 'boolean') {
+      toast(event.data.text, event.data.error, { routine: event.data.routine === true });
+    }
+  } else if (controlPages.has(workspace) && control.src && control.src !== 'about:blank'
+      && event.source === control.contentWindow && event.origin === new URL(control.src).origin) {
+    if (event.data?.type === 'studio-feedback' && typeof event.data.text === 'string' && typeof event.data.error === 'boolean') {
+      toast(event.data.text, event.data.error, { routine: event.data.routine === true });
+    } else if (event.data?.type === 'studio-action-request') {
+      controlAction(event);
+    }
+  }
+});
+
+function loadWorkspaceFrame(frame, url) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error('页面加载超时，请重试')), 15000);
+    function finish(error) {
+      clearTimeout(timer);
+      frame.removeEventListener('load', loaded);
+      if (error) reject(error); else resolve();
+    }
+    function loaded() { finish(); }
+    frame.addEventListener('load', loaded);
+    frame.src = url;
+  });
+}
+
+function clearDebugFrame() {
+  const frame = $('debug-frame');
+  frame.classList.add('frame-clearing');
+  if (frame.getAttribute('src') !== 'about:blank') frame.src = 'about:blank';
+}
+
+async function selectWorkspace(next) {
+  if (servoDebugMode.busy()) { toast('请等待舵机调试模式操作完成', true); return; }
+  if (controlActionStarting) { toast('动作启动中，请稍候', true); return; }
+  if (switchingWorkspace || next === workspace && (!info?.studio || document.body.dataset.studioReady)) return;
+  switchingWorkspace = true;
+  sidebarTransitionPending = !!state && state.online && stateFresh();
+  servoDebugMode.update();
+  const previous = workspace;
+  const restBefore = !!info?.studio && previous !== next && restBeforeWorkspace.has(next);
+  if (previous !== next) advanceHeadSubscription();
+  const pauseCalibration = previous === 'calibration' && previous !== next;
+  if (pauseCalibration) calibrationCharts.setActive(false);
+  let workspaceRequestSent = false;
+  if (info?.studio && previous !== next && controlPages.has(previous)) $('control-workspace').inert = true;
+  for (const button of document.querySelectorAll('button[data-workspace]')) button.disabled = true;
+  try {
+    if (previous === 'control' && previous !== next && controlActionActive) await stopControlAction(false);
+    if (previous === 'action' && previous !== next) await servoDebugMode.closeOnLeave();
+    if (info?.studio) {
+      if (previous === 'action' && previous !== next && document.body.dataset.studioReady) await releaseControl();
+      if (previous !== next && controlPages.has(previous)) await leaveControlWorkspace();
+      if (previous === 'debug' && previous !== next) clearDebugFrame();
+      if (previous !== next) cameraPreview?.stop();
+      workspaceRequestSent = true;
+      if (restBefore) toast('正在准备进入页面，请稍候', false, { routine: true });
+      const result = await request('workspace', { workspace: next, ...(restBefore ? { rest_before: true } : {}) });
+      if (next === 'status' && result?.ready !== true) throw new Error(result?.error || '设备状态采集尚未就绪');
+      if ((next === 'action' || next === 'debug') && result?.maintenance !== true) throw new Error('维护工作区尚未就绪');
+      info = await request('info');
+      token = info.token;
+    }
+    const control = $('control-workspace');
+    if (controlPages.has(next) && (!control.src || control.src === 'about:blank')) {
+      const url = new URL(location.href);
+      url.port = location.protocol === 'https:' ? '9444' : '8081'; url.pathname = '/';
+      url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=0`; url.hash = '';
+      await loadWorkspaceFrame(control, url.href);
+    }
+    if (next === 'debug' && (previous !== 'debug' || !$('debug-frame').src || $('debug-frame').src === 'about:blank')) {
+      await loadWorkspaceFrame($('debug-frame'), '/debug.html');
+      $('debug-frame').classList.remove('frame-clearing');
+    }
+    workspace = next;
+    document.body.dataset.workspace = workspace;
+    document.body.dataset.studioReady = 'true';
+    if (restBefore) toast('页面已就绪', false, { routine: true });
+    workspaceRetryRequired = false;
+    for (const choice of document.querySelectorAll('button[data-workspace]')) {
+      const active = choice.dataset.workspace === workspace;
+      choice.classList.toggle('active', active);
+      if (active) choice.setAttribute('aria-current', 'page'); else choice.removeAttribute('aria-current');
+    }
+    control.hidden = !controlPages.has(workspace);
+    $('monitor').hidden = controlPages.has(workspace) || workspace === 'network' || workspace === 'models';
+    $('network-workspace').hidden = workspace !== 'network';
+    networkControls.setActive(workspace === 'network');
+    $('models-workspace').hidden = workspace !== 'models';
+    modelControls.setActive(workspace === 'models');
+    if (controlPages.has(workspace)) {
+      notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
+      syncDebugMode();
+      notifyFrames('studio-workspace', { page: workspace });
+      notifyFrames('studio-device-versions', { versions: info?.device_versions || null });
+    }
+    for (const panel of document.querySelectorAll('[data-workspace-panel]')) panel.hidden = panel.dataset.workspacePanel !== workspace;
+    if (controlPages.has(previous) && !controlPages.has(workspace)) control.src = 'about:blank';
+    if (previous === 'debug' && workspace !== 'debug') {
+      clearDebugFrame();
+      $('debug-frame').style.height = '';
+      selected = [];
+      highlightSelectedJoints();
+    }
+    if (workspace === 'debug') notifyFrames('studio-workspace', { page: workspace });
+    updateCameraPreview();
+    calibrationCharts.setActive(workspace === 'calibration');
+    calibrationView.setActive(workspace === 'calibration');
+    updateReferenceView();
+    if (workspace === 'action') {
+      renewControl();
+      if (info?.studio) actionEditor.refreshGroups().catch(error => toast(error.message, true));
+    }
+    if (window.matchMedia('(max-width:720px)').matches) setSidebarOpen(false);
+    if (state && info) renderState();
+    drawChart();
+  } catch (error) {
+    let message = error.message;
+    if (restBefore) toast('页面切换未完成', true, { routine: true });
+    if (next === 'debug' || previous === 'debug') clearDebugFrame();
+    if (controlPages.has(next) && !controlPages.has(previous)) $('control-workspace').src = 'about:blank';
+    if (info?.studio && workspaceRequestSent && previous !== next) {
+      // Even a failed or timed-out switch may have changed the server session.
+      // Restore the page guard and lease only; the user explicitly retries the
+      // page before controls or motion can be enabled again.
+      advanceHeadSubscription();
+      try { await request('workspace', { workspace: previous }, 15000); }
+      catch (restoreError) {
+        message = `${message}；恢复原工作区失败：${restoreError.message}`;
+      }
+    }
+    if (info?.studio) {
+      delete document.body.dataset.studioReady;
+      workspaceRetryRequired = true;
+      if (previous === 'action') await releaseControl();
+      else setArmed(false);
+      message = `${message}；请重新点击当前页面重试`;
+    }
+    toast(message, true);
+    if (pauseCalibration && (!info?.studio || document.body.dataset.studioReady)) calibrationCharts.setActive(true);
+    updateCameraPreview();
+    if ((!info?.studio || document.body.dataset.studioReady) && controlPages.has(previous)) {
+      const control = $('control-workspace');
+      if (control.src && control.src !== 'about:blank') notifyFrames('studio-workspace', { page: previous });
+      else {
+        const url = new URL(location.href);
+        url.port = location.protocol === 'https:' ? '9444' : '8081'; url.pathname = '/';
+        url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=0`; url.hash = '';
+        control.src = url.href;
+      }
+    }
+  } finally {
+    switchingWorkspace = false;
+    if (sidebarTransitionPending) sidebarTransitionCompleted = performance.now();
+    servoDebugMode.update();
+    $('control-workspace').inert = !!info?.studio && !document.body.dataset.studioReady;
+    for (const button of document.querySelectorAll('button[data-workspace]')) button.disabled = false;
+    if (pendingWorkspaceResume) {
+      pendingWorkspaceResume = false;
+      restoreWorkspaceOnVisible();
+    }
+  }
+}
+
+$('control-workspace').addEventListener('load', () => {
+  if (!controlPages.has(workspace)) return;
+  notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
+  syncDebugMode();
+  notifyFrames('studio-workspace', { page: workspace });
+  notifyFrames('studio-device-versions', { versions: info?.device_versions || null });
+});
+$('debug-frame').addEventListener('load', () => notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme }));
+for (const button of document.querySelectorAll('button[data-workspace]')) {
+  button.addEventListener('click', () => selectWorkspace(button.dataset.workspace));
+}
+
+setInterval(() => {
+  if (info?.studio && document.body.dataset.studioReady && maintenancePages.has(workspace) && !document.hidden && !switchingWorkspace && !workspaceRestoreInFlight) {
+    request('workspace', { operation: 'heartbeat' }).catch(error => { setArmed(false); toast(error.message, true); });
+  }
+}, 5000);
+window.addEventListener('pageshow', () => { controlActionPageHidden = false; });
+window.addEventListener('pagehide', () => {
+  controlActionPageHidden = true;
+  controlActionGeneration++;
+  if ((controlActionActive || controlActionStarting) && controlActionRunId && token) {
+    fetch('/api/control-actions', { method: 'POST', headers: requestHeaders(),
+      body: JSON.stringify({ operation: 'stop', run_id: controlActionRunId }), keepalive: true })
+      .catch(error => console.debug('动作停止请求未送达', error.message));
+  }
+  if (info?.studio && (workspace === 'status' || maintenancePages.has(workspace) || restrictedPages.has(workspace)) && token) {
+    advanceHeadSubscription();
+    fetch('/api/workspace', { method: 'POST', headers: requestHeaders(), body: JSON.stringify({ workspace: 'system' }), keepalive: true })
+      .catch(error => console.debug('工作区关闭请求未送达', error.message));
+  }
+});
+
+function renderTof() {
+  const tof = tofStatus(state?.tof, sampleElapsed(), connectionError, info?.studio === true);
+  $('tof-reading').dataset.status = tof.kind;
+  $('tof-reading').title = [tof.detail, tof.raw].filter(Boolean).join(' · ');
+  const hasDistance = tof.kind === 'ok';
+  const value = hasDistance ? tof.distance : tof.label;
+  if ($('tof-distance').textContent !== value) $('tof-distance').textContent = value;
+}
+
+function renderState() {
+  if (state.joints.length !== info.joints.length) { info.joints = state.joints; servoPanel.reset(info.joints); actionEditor.render(); }
+  calibrationControls.render(state.calibration, info?.demo, state.imu_source, state.head_calibration, state.aux_imu);
+  calibrationCharts.updateState(state, connectionError);
+  calibrationView.update(state, sampleElapsed(), connectionError);
+  const fresh = stateFresh();
+  const valid = deviceFresh(state.imu, state, sampleElapsed(), connectionError) && validQuaternion(state.imu.quaternion_wxyz);
+  const deviceReportsFresh = state.online && Number.isFinite(state.device_report_age_ms) &&
+    state.device_report_age_ms + sampleElapsed() < SAMPLE_MAX_AGE_MS;
+  const sidebarState = state.control_servos ? { ...state, online: state.control_online, error: state.control_error,
+    servos: state.control_servos } : state;
+  const sidebarFresh = sampleFresh(sidebarState, sampleElapsed(), connectionError);
+  const servoKinds = sidebarState.servos.map(servo => servoStatus(servo, sidebarState, sampleElapsed(), connectionError).kind);
+  const faults = servoKinds.includes('fault');
+  const communication = servoKinds.includes('communication');
+  const missing = servoKinds.filter(kind => kind === 'offline').length;
+  const invalid = servoKinds.includes('invalid');
+  const stale = servoKinds.includes('stale');
+  // A handoff can block requests or return a controller before its first sample.
+  const transitionHandoff = switchingWorkspace || (sidebarTransitionPending
+    && performance.now() - sidebarTransitionCompleted < SAMPLE_MAX_AGE_MS);
+  const playbackSamplingPaused = state.action_playback?.state === 'playing' && state.online && !state.error && !connectionError;
+  const handoff = transitionHandoff || stateRequestPending || playbackSamplingPaused;
+  const measuredVoltages = workspace === 'status' && !state.device_paused
+    ? state.servos.filter(servo => deviceFresh(servo, state, sampleElapsed(), connectionError)).map(servo => servo.voltage)
+    : [];
+  const lowVoltage = updateLowVoltage(state.robot?.low_voltage, measuredVoltages, performance.now());
+  if (!(handoff && !connectionError && ((state.online && !fresh) || waitingForFirstSample(state)))) {
+    const voltage = state.robot?.health?.battery?.volts;
+    const calibrating = !!state.calibration?.active || !!state.head_calibration?.active;
+    const warning = lowVoltageWarning(lowVoltage);
+    renderSidebarVoltage($, { calibrating, voltage, fresh: sidebarFresh, lowVoltage });
+    if (warning && !lowVoltageActive && performance.now() - lastLowVoltageNotice >= 10000) {
+      lastLowVoltageNotice = performance.now();
+      toast(lowVoltage?.display_only ? '电压过低，请及时充电'
+        : '电压过低，请及时充电；持续低压将坐下并卸力', true);
+    }
+    lowVoltageActive = warning;
+    const connectionStatus = connectionError ? '连接中断' : calibrating ? '设备在线' : !sidebarState.online ? '采集异常' : !sidebarFresh ? '数据过期'
+      : faults ? '舵机故障' : communication ? '总线通信异常' : missing === info.joints.length ? '舵机无回复' : missing ? '部分舵机无回复'
+        : invalid ? '舵机数据异常' : stale ? '设备数据过期'
+          : (info.readonly ? 'robotd · 只读' : info.demo ? '演示连接' : '设备在线');
+    setConnectionStatus(connectionStatus, !connectionError && (calibrating || sidebarFresh && !faults && !communication && !missing && !invalid && !stale) ? 'live' : 'error',
+      connectionError || sidebarState.error || '');
+  }
+  setText('pose-status', state.device_paused ? '维护占用' : state.calibration?.active ? '标定中'
+    : state.imu_source === 'compare' ? (state.imu_comparison?.valid ? '双路有效' : '对比中')
+      : valid ? '正常' : 'IMU 无效');
+  $('pose-status').title = state.imu_source === 'compare'
+    ? [state.imu_sources?.id200?.error, state.imu_sources?.i2c?.error].filter(Boolean).join('；')
+    : state.imu?.error || state.error || '';
+  const angles = valid ? quaternionAngles(state.imu.quaternion_wxyz) : [null, null, null];
+  const heldAngles = !valid && state.imu?.valid && $('curve-roll').textContent !== '--';
+  $('chart').closest('.chart-layout').classList.toggle('historical', heldAngles);
+  renderTof();
+  for (const [index, id] of ['roll', 'pitch', 'yaw'].entries()) {
+    if (!heldAngles) {
+      const text = fmt(angles[index]);
+      const curve = $(`curve-${id}`);
+      const label = valid ? `${text}°` : '--';
+      if (curve.textContent !== label) curve.textContent = label;
+    }
+  }
+  setText('bus-rate-label', state.readonly ? '状态订阅' : '总线采集');
+  setText('bus-rate', `${state.hz} Hz`);
+  setText('failures-label', state.readonly ? '订阅异常' : '失败轮次');
+  setText('failures', state.failures);
+  renderImuComparison();
+  const auxiliary = auxImuStatus(state.aux_imu, sampleElapsed(), connectionError);
+  if (!document.hidden && (workspace === 'status' || workspace === 'calibration' && calibrationControls.source() === 'head') &&
+      auxiliary.kind === 'stale' && performance.now() - lastHeadDiagnostic >= 10000) {
+    lastHeadDiagnostic = performance.now();
+    console.warn('头部 IMU 过期诊断', { backend_status: state.aux_imu?.status, backend_age_ms: state.aux_imu?.age_ms,
+      elapsed_ms: sampleElapsed(), poll_interval_ms: Math.round(statePollInterval),
+      request_ms: Math.round(stateRequestDuration), render_ms: Math.round(stateRenderDuration) });
+  }
+  const auxChanged = auxValid !== auxiliary.valid;
+  auxValid = auxiliary.valid;
+  if (workspace === 'status') deviceStatus.render(info, state, fresh, sampleElapsed(), connectionError, auxiliary, transitionHandoff, lowVoltage);
+  if (workspace === 'action' && (!info.studio || (state.workspace === 'action' && state.maintenance_owner))) {
+    referenceView?.setTargets(state.pose_targets, info.joints);
+  }
+  updateControls();
+  let chartChanged = auxChanged;
+  const imuKey = `${state.imu?.t_ns ?? state.sequence}:${valid}`;
+  if (imuKey !== lastImuKey) {
+    samples.push({ time: performance.now(), angles: valid ? angles.map(angle => Number(angle.toFixed(1))) : null });
+    lastImuKey = imuKey;
+    while (samples.length && samples[0].time < performance.now() - 20000) samples.shift();
+    chartChanged = true;
+  }
+  if (responseSequence !== lastAuxSequence) {
+    auxSamples.push({ time: performance.now(),
+      angles: auxiliary.valid ? state.aux_imu.rpy_deg.map(value => Number(value.toFixed(1))) : null,
+      reset_count: auxiliary.valid ? state.aux_imu.reset_count : null });
+    lastAuxSequence = responseSequence;
+    while (auxSamples.length && auxSamples[0].time < performance.now() - 20000) auxSamples.shift();
+    chartChanged = true;
+  }
+  if (chartChanged) drawChart();
+  if (valid) {
+    const [w, x, y, z] = state.imu.quaternion_wxyz;
+    attitudeTarget.set(x, y, z, w).normalize();
+  }
+  for (const servo of state.servos) {
+    const joint = rigJoints.get(servo.name);
+    if (joint && deviceFresh(servo, state, sampleElapsed(), connectionError) && Number.isFinite(servo.radians)) {
+      joint.target.setFromAxisAngle(joint.axis, servo.radians);
+    }
+  }
+  if (fresh || deviceReportsFresh) {
+    initializeModelPlacement();
+  }
+}
+
+async function poll() {
+  const started = performance.now();
+  statePollInterval = previousStateStarted ? started - previousStateStarted : 0;
+  previousStateStarted = started;
+  if (!document.hidden && (workspace === 'status' || workspace === 'calibration' && calibrationControls.source() === 'head') &&
+      statePollInterval > 500 && started - lastHeadDiagnostic >= 10000) {
+    lastHeadDiagnostic = started;
+    console.warn('头部 IMU 页面请求间断', { poll_interval_ms: Math.round(statePollInterval),
+      previous_request_ms: Math.round(stateRequestDuration), previous_render_ms: Math.round(stateRenderDuration),
+      backend_status: state?.aux_imu?.status, backend_age_ms: state?.aux_imu?.age_ms });
+  }
+  if (workspace === 'status' && !document.hidden && !resourceRequestPending && started >= nextResourceRequest) {
+    resourceRequestPending = true;
+    nextResourceRequest = started + 5000;
+    request('resources').then(data => deviceStatus.renderResources(data))
+      .catch(() => deviceStatus.renderResources(null))
+      .finally(() => { resourceRequestPending = false; });
+  }
+  stateRequestPending = true;
+  try {
+    state = await request('state');
+    stateRequestDuration = performance.now() - started;
+    stateRequestPending = false;
+    lastGood = performance.now();
+    responseSequence++;
+    connectionError = '';
+    if (!switchingWorkspace && (stateFresh() || (!state.online && !waitingForFirstSample(state)))) {
+      sidebarTransitionPending = false;
+    }
+    if (armed && !state.armed && started > controlUpdatedAt) { setArmed(false); nextControlAttempt = 0; }
+    if (!armed) renewControl();
+    const renderStarted = performance.now();
+    renderState();
+    stateRenderDuration = performance.now() - renderStarted;
+  } catch (e) {
+    stateRequestPending = false;
+    sidebarTransitionPending = false;
+    connectionError = e.message;
+    if (state) renderState(); else renderTof();
+    setConnectionStatus('连接中断', 'error', connectionError);
+    $('pose-status').textContent = '数据已停止';
+    setArmed(false); nextControlAttempt = 0; updateControls();
+  } finally {
+    const period = info?.studio ? 1000 / info.hz : 20;
+    setTimeout(poll, document.hidden ? 1000 : Math.max(0, period - (performance.now() - started)));
+  }
+}
+
+setInterval(() => {
+  if (state && ((!stateFresh() && !state.calibration?.active && !state.head_calibration?.active &&
+      !['数据过期', '采集异常', '连接中断'].includes($('connection').textContent)) ||
+      auxImuStatus(state.aux_imu, sampleElapsed(), connectionError).valid !== auxValid)) renderState();
+}, 100);
+
+function drawChart() {
+  drawTrace($('chart'), samples);
+  drawTrace($('aux-chart'), auxValid ? auxSamples : []);
+}
+
+function drawTrace(canvas, history) {
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  if (!width || !height) return;
+  const style = getComputedStyle(document.documentElement);
+  const chartColor = name => style.getPropertyValue(name).trim();
+  const axisColors = ['--chart-roll', '--chart-pitch', '--chart-yaw'].map(chartColor);
+  const dpr = Math.min(devicePixelRatio, 1.5);
+  const pixelWidth = Math.floor(width * dpr), pixelHeight = Math.floor(height * dpr);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth; canvas.height = pixelHeight;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const points = history.filter(p => p.time > performance.now() - 20000);
+  const left = 6, right = width - 38, laneHeight = (height - 20) / 3;
+  const now = performance.now();
+  for (let axis = 0; axis < 3; axis++) {
+    const values = points.filter(p => p.angles).map(p => p.angles[axis]);
+    const minimum = values.length ? Math.min(...values) : -5;
+    const maximum = values.length ? Math.max(...values) : 5;
+    const middle = (minimum + maximum) / 2;
+    const halfRange = Math.max(5, (maximum - minimum) * .6);
+    const top = axis * laneHeight + 5, bottom = (axis + 1) * laneHeight - 5;
+    const center = (top + bottom) / 2;
+    ctx.strokeStyle = chartColor('--chart-grid'); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(left, center); ctx.lineTo(right, center); ctx.stroke();
+    ctx.font = `11px ${fontFamily}`; ctx.fillStyle = chartColor('--chart-text'); ctx.textAlign = 'right';
+    ctx.fillText(fmt(middle + halfRange), width - 1, top + 8);
+    ctx.fillText(fmt(middle - halfRange), width - 1, bottom);
+    ctx.save(); ctx.beginPath(); ctx.rect(left, top, right - left, bottom - top); ctx.clip();
+    ctx.strokeStyle = axisColors[axis]; ctx.lineWidth = 1.5; ctx.beginPath();
+    let prev = null;
+    for (const p of points) {
+      if (!p.angles) { prev = null; continue; }
+      const x = left + (right - left) * (1 - (now - p.time) / 20000);
+      const y = center - (p.angles[axis] - middle) / halfRange * (bottom - top) / 2;
+      if (!imuTraceContinues(prev, p, axis)) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+      prev = p;
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.font = `11px ${fontFamily}`; ctx.fillStyle = chartColor('--chart-text'); ctx.textAlign = 'left';
+  ctx.fillText('-20 s', left, height - 3); ctx.fillText('0 s', right - 17, height - 3);
+}
+const viewer = $('viewer');
+let calibrationView;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, 1, .01, 20);
+let renderer, controls, trunk, modelRoot, modelPositionTarget, pendingPoseTargets, referenceView;
+let alignLiveFeet, modelPlatform;
+let modelAsset, modelPlacementReady = false;
+const modelPlacementKey = 'console-model-placement';
+const rigJoints = new Map();
+const jointHighlights = new Map();
+let selectedHighlights = [];
+const attitudeTarget = new THREE.Quaternion();
+function saveModelPlacement(platform) {
+  try {
+    const offset = modelPositionTarget.clone().sub(platform.position).toArray();
+    localStorage.setItem(modelPlacementKey, JSON.stringify({ model: modelAsset, offset }));
+  } catch (error) {
+    console.error('模型位置保存失败', error);
+    toast('模型位置未能保存，刷新后可能需要重新对齐', true);
+  }
+}
+function restoreModelPlacement(platform) {
+  try {
+    const value = localStorage.getItem(modelPlacementKey);
+    if (!value) return;
+    const saved = JSON.parse(value);
+    if (saved.model !== modelAsset) return;
+    if (!Array.isArray(saved.offset) || saved.offset.length !== 3 || !saved.offset.every(Number.isFinite)) {
+      throw new Error('保存的模型位置无效');
+    }
+    modelPositionTarget = new THREE.Vector3(...saved.offset).add(platform.position);
+    modelRoot.position.copy(modelPositionTarget);
+    modelPlacementReady = true;
+  } catch (error) {
+    console.error('模型位置恢复失败', error);
+    toast('无法恢复保存的模型位置', true);
+  }
+}
+function initializeModelPlacement() {
+  if (modelPlacementReady || !modelRoot || !trunk) return;
+  const feet = ['left_ankle', 'right_ankle'].map(name => rigJoints.get(name)?.node);
+  if (!modelPlatform || feet.some(foot => !foot)) return;
+  modelPositionTarget = positionForPose(modelRoot, [], feet, modelPlatform.getWorldPosition(new THREE.Vector3()));
+  modelRoot.position.copy(modelPositionTarget);
+  modelPlacementReady = true;
+}
+function alignPoseToPlatform(targets) {
+  modelPlacementReady = true;
+  pendingPoseTargets = targets;
+  if (!modelRoot || !trunk) return;
+  try {
+    const feet = ['left_ankle', 'right_ankle'].map(name => rigJoints.get(name)?.node);
+    const platform = scene.getObjectByName('display-platform');
+    if (!platform || feet.some(foot => !foot)) throw new Error('模型缺少双脚或展示台');
+    const poses = [];
+    for (const [id, raw] of Object.entries(targets)) {
+      const name = info.joints.find(joint => joint.id === Number(id))?.name;
+      const joint = rigJoints.get(name);
+      if (joint) poses.push({ node: joint.node, rotation: new THREE.Quaternion().setFromAxisAngle(
+        joint.axis, THREE.MathUtils.degToRad(180 - raw * 360 / 4096)) });
+    }
+    modelPositionTarget = positionForPose(modelRoot, poses, feet, platform.getWorldPosition(new THREE.Vector3()));
+    saveModelPlacement(platform);
+    pendingPoseTargets = null;
+  } catch (error) {
+    console.error('模型贴合失败', error);
+    toast(`目标已下发，模型贴合失败：${error.message}`, true);
+  }
+}
+$('model-imu-follow').addEventListener('change', event => {
+  if (!event.target.checked && trunk) trunk.quaternion.identity();
+});
+
+const modelPaletteMaterials = new Map();
+const modelPalettes = {
+  white_orange: { body_deep_blue: '#f2f2f2', body_yellow: '#f28c28', body_foot: '#f28c28', body_mouth: '#f28c28', body_black: '#424548' },
+  yellow_black: { body_deep_blue: '#ffcf29', body_yellow: '#424548', body_foot: '#ffcf29', body_mouth: '#424548', body_black: '#424548' },
+  black_orange: { body_deep_blue: '#424548', body_yellow: '#f28c28', body_foot: '#f28c28', body_mouth: '#f28c28', body_black: '#424548' },
+  navy: { body_deep_blue: '#102c60', body_yellow: '#ffcf29', body_foot: '#ffcf29', body_mouth: '#ffcf29', body_black: '#424548' },
+};
+const separatePaletteVisuals = new Map([
+  ['visual_p_left_ankle_01', 'body_foot'],
+  ['visual_p_right_ankle_01', 'body_foot'],
+  ['visual_p_mouth_01', 'body_mouth'],
+]);
+
+function applyModelPalette() {
+  const palette = modelPalettes[$('model-palette').value];
+  for (const [material, originalColor] of modelPaletteMaterials) {
+    const color = palette[material.name];
+    if (color === null) material.color.copy(originalColor);
+    else material.color.set(color);
+  }
+  referenceView?.invalidate();
+  calibrationView.invalidate();
+}
+$('model-palette').addEventListener('change', applyModelPalette);
+
+function highlightSelectedJoints() {
+  for (const group of selectedHighlights) for (const visual of group.visuals) visual.mesh.material = visual.original;
+  selectedHighlights = selected.map(id => info?.joints.find(joint => joint.id === id)?.name)
+    .map(name => jointHighlights.get(name)).filter(Boolean);
+  for (const group of selectedHighlights) for (const visual of group.visuals) visual.mesh.material = visual.highlight;
+}
+
+function prepareJointHighlights(model) {
+  const owners = new Map();
+  for (const [name, joint] of rigJoints) {
+    const group = { node: joint.node, visuals: [] };
+    jointHighlights.set(name, group);
+    owners.set(joint.node, group);
+  }
+  const mouth = model.getObjectByName('body_mouth');
+  if (mouth && !rigJoints.has('mouth')) {
+    const group = { node: mouth, visuals: [] };
+    jointHighlights.set('mouth', group);
+    owners.set(mouth, group);
+  }
+  model.traverse(mesh => {
+    if (!mesh.isMesh) return;
+    // Associate only this joint's rigid parts, stopping at descendant joint boundaries.
+    let parent = mesh.parent;
+    while (parent && !owners.has(parent)) parent = parent.parent;
+    const group = owners.get(parent);
+    if (!group) return;
+    const makeHighlight = original => {
+      const material = original.clone();
+      material.color.set('#32b83c');
+      if (material.emissive) { material.emissive.set('#105910'); material.emissiveIntensity = .4; }
+      material.toneMapped = false;
+      return material;
+    };
+    const original = mesh.material;
+    const highlight = Array.isArray(original) ? original.map(makeHighlight) : makeHighlight(original);
+    group.visuals.push({ mesh, original, highlight });
+  });
+  highlightSelectedJoints();
+}
+
+createViewerEnvironment(scene);
+scene.add(new THREE.HemisphereLight('#ffffff', '#78887c', 2.8));
+const keyLight = new THREE.DirectionalLight('#fffaf0', 3); keyLight.position.set(.6, 1, .5); scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight('#e0edff', 1.2); fillLight.position.set(-.7, .4, -.6); scene.add(fillLight);
+try {
+  try {
+    renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'low-power', preserveDrawingBuffer: true });
+  } catch (error) {
+    console.warn('3D 初始化失败，正在使用兼容设置重试', error);
+    renderer = new THREE.WebGLRenderer({ alpha: true, antialias: false, preserveDrawingBuffer: true });
+  }
+  renderer.setClearColor(0x000000, 0);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.1;
+  viewer.append(renderer.domElement);
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; controls.minDistance = .24; controls.maxDistance = 2.5;
+  controls.maxPolarAngle = Math.PI * .85;
+  renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); $('model-loading').hidden = false; $('model-loading').textContent = '3D 显示已中断，正在恢复'; toast($('model-loading').textContent, true); });
+  renderer.domElement.addEventListener('webglcontextrestored', () => {
+    $('model-loading').hidden = !!modelRoot;
+    calibrationView?.invalidate();
+    referenceView?.invalidate();
+    resizeViewer();
+  });
+} catch (e) {
+  console.error('3D 初始化失败', e);
+  renderer?.dispose();
+  renderer?.domElement.remove();
+  renderer = controls = undefined;
+  $('model-loading').textContent = '无法初始化 3D 显示，请检查浏览器 WebGL 2 支持';
+  toast($('model-loading').textContent, true);
+}
+
+calibrationView = createCalibrationView({ viewer, renderer, onError: message => toast(message, true), onRelease: resizeViewer });
+
+if (renderer) {
+  referenceView = createActionReferenceView({ viewer, renderer, liveScene: scene, liveCamera: camera,
+    liveControls: controls, onResize: resizeViewer });
+}
+function updateReferenceView() {
+  referenceView?.setActive(workspace === 'action' && $('reference-pose').checked);
+}
+$('reference-pose').addEventListener('change', updateReferenceView);
+
+function resetView() {
+  if (controls) { controls.enableDamping = false; controls.update(); }
+  camera.position.set(.45, .28, .48);
+  controls?.target.set(0, .115, 0);
+  controls?.update();
+  if (controls) controls.enableDamping = true;
+  referenceView?.resetView();
+  const size = referenceView?.liveSize() || { width: viewer.clientWidth, height: viewer.clientHeight };
+  configureViewerCamera(camera, scene, size.width, size.height);
+  referenceView?.resize(configureViewerCamera);
+}
+function framePlatform(viewCamera, viewScene, width, height) {
+  const platform = viewScene.getObjectByName('display-platform');
+  if (!width || !height || !platform) return;
+  viewCamera.clearViewOffset();
+  viewCamera.updateMatrixWorld();
+  const center = platform.getWorldPosition(new THREE.Vector3()).project(viewCamera);
+  if (!Number.isFinite(center.y)) return;
+  const offsetY = ((1 - center.y) / 2 - 3 / 4) * height;
+  viewCamera.setViewOffset(width, height, 0, offsetY, width, height);
+}
+function configureViewerCamera(viewCamera, viewScene, width, height) {
+  if (!width || !height) return;
+  viewCamera.aspect = width / height;
+  viewCamera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(35) / 2)
+    * Math.max(1, .78 / viewCamera.aspect)));
+  framePlatform(viewCamera, viewScene, width, height);
+}
+function renderViewer() {
+  if (referenceView?.render()) return;
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, viewer.clientWidth, viewer.clientHeight);
+  renderer.render(scene, camera);
+}
+function resizeViewer() {
+  if (!renderer || !viewer.clientWidth || workspace === 'calibration') return;
+  const height = Math.max(1, viewer.clientHeight);
+  renderer.domElement.style.top = '0';
+  renderer.domElement.style.height = `${height}px`;
+  const size = referenceView?.liveSize() || { width: viewer.clientWidth, height };
+  configureViewerCamera(camera, scene, size.width, size.height);
+  referenceView?.resize(configureViewerCamera);
+  renderer.setSize(viewer.clientWidth, height, false);
+  renderViewer();
+}
+const viewerObserver = new ResizeObserver(() => { resizeViewer(); drawChart(); });
+viewerObserver.observe(viewer);
+const chartObserver = new ResizeObserver(drawChart);
+chartObserver.observe($('chart'));
+chartObserver.observe($('aux-chart'));
+handle('reset-view', resetView);
+
+async function loadModel() {
+  if (!renderer) return;
+  try {
+    const response = await fetch(modelConfigUrl);
+    if (!response.ok) throw new Error('模型配置读取失败');
+    const config = await response.json();
+    const gltf = await new GLTFLoader().loadAsync(`/assets/imu-viewer-resources/${config.model}`);
+    modelAsset = config.model;
+    modelRoot = gltf.scene;
+    trunk = gltf.scene.getObjectByName(config.root_node);
+    if (!trunk) throw new Error('模型缺少机身节点');
+    gltf.scene.position.y = config.home_trunk_height_m;
+    scene.add(gltf.scene);
+    for (const joint of config.joints) {
+      const node = gltf.scene.getObjectByName(joint.node);
+      if (!node) throw new Error(`模型缺少关节 ${joint.name}`);
+      rigJoints.set(joint.name, { node, axis: new THREE.Vector3(...joint.axis), target: node.quaternion.clone() });
+    }
+    modelPlatform = scene.getObjectByName('display-platform');
+    alignLiveFeet = createFootHeightAligner(modelRoot,
+      ['left_ankle', 'right_ankle'].map(name => rigJoints.get(name)?.node));
+    gltf.scene.traverse(mesh => {
+      if (!mesh.isMesh) return;
+      const paletteName = separatePaletteVisuals.get(mesh.name);
+      if (paletteName) {
+        // Feet and mouth share the body material in the model; color them independently.
+        const separateMaterial = material => {
+          if (material.name !== 'body_yellow') return material;
+          const separate = material.clone();
+          separate.name = paletteName;
+          return separate;
+        };
+        mesh.material = Array.isArray(mesh.material)
+          ? mesh.material.map(separateMaterial) : separateMaterial(mesh.material);
+      }
+      for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+        if (Object.hasOwn(modelPalettes.navy, material.name)) modelPaletteMaterials.set(material, material.color.clone());
+      }
+    });
+    applyModelPalette();
+    referenceView?.setRobotModel(gltf.scene, config);
+    prepareJointHighlights(gltf.scene);
+    calibrationView.setRobotModel(gltf.scene);
+    if (pendingPoseTargets) alignPoseToPlatform(pendingPoseTargets);
+    else {
+      restoreModelPlacement(scene.getObjectByName('display-platform'));
+      initializeModelPlacement();
+    }
+    const center = modelPlatform.getWorldPosition(new THREE.Vector3());
+    alignLiveFeet(center.y);
+    centerTrunkOnPlatform(modelRoot, trunk, center);
+    if (modelPositionTarget) modelPositionTarget.copy(modelRoot.position);
+    $('model-loading').hidden = true;
+    resetView(); resizeViewer();
+  } catch (e) { $('model-loading').textContent = `模型加载失败：${e.message}`; toast($('model-loading').textContent, true); }
+}
+
+let lastFrame = 0;
+function animate(now) {
+  requestAnimationFrame(animate);
+  if (!renderer || document.hidden || $('monitor').hidden || workspace === 'calibration' || cameraPreview?.expanded || now - lastFrame < 1000 / 30) return;
+  const dt = Math.min(.1, (now - lastFrame) / 1000); lastFrame = now;
+  if (trunk) {
+    const fraction = 1 - Math.exp(-22 * dt);
+    if (modelPositionTarget) modelRoot.position.lerp(modelPositionTarget, fraction);
+    if (!$('model-imu-follow').checked) trunk.quaternion.identity();
+    else if (deviceFresh(state?.imu, state, sampleElapsed(), connectionError)) trunk.quaternion.slerp(attitudeTarget, fraction);
+    for (const servo of state?.servos || []) {
+      const joint = rigJoints.get(servo.name);
+      if (joint && deviceFresh(servo, state, sampleElapsed(), connectionError)) joint.node.quaternion.slerp(joint.target, fraction);
+    }
+    if (alignLiveFeet && modelPlatform) {
+      const center = modelPlatform.getWorldPosition(new THREE.Vector3());
+      alignLiveFeet(center.y);
+      centerTrunkOnPlatform(modelRoot, trunk, center);
+      if (modelPositionTarget) modelPositionTarget.copy(modelRoot.position);
+    }
+  }
+  controls?.update();
+  renderViewer();
+}
+requestAnimationFrame(animate);
+loadModel();
+
+function applyMode() {
+  if (info.readonly) calibrationControls.render({}, false, 'robotd');
+  else if (!info.supports_direct_slider) toast('重启控制台服务后启用滑杆直接发送', true);
+  updateSidebarRelease();
+  updateSidebarShutdown();
+  $('demo-badge').hidden = !info.demo;
+  for (const element of document.querySelectorAll('.studio-only')) element.hidden = !info.studio;
+}
+
+async function init() {
+  try {
+    info = await request('info'); token = info.token;
+    const onCameraError = message => toast(message, true);
+    cameraPreview = info.studio ? createMediaPreview({ onError: onCameraError })
+      : createCameraPreview({ request, headers: requestHeaders, onError: onCameraError });
+    initializeModelPlacement();
+    updateCameraPreview();
+    applyMode();
+    servoPanel.reset(info.joints); actionEditor.render();
+    if (info.studio) await selectWorkspace('control'); else await renewControl();
+    poll();
+    if (!info.readonly && !info.studio) actionEditor.refreshGroups().catch(error => toast(error.message, true));
+  } catch (e) { console.error('控制台初始化失败', e); connectionError = e.message; renderTof(); setConnectionStatus('服务不可用', 'error', connectionError); toast(e.message, true); setTimeout(init, 3000); }
+}
+init();

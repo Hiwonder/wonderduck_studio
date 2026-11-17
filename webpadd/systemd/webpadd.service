@@ -1,0 +1,43 @@
+# webpadd -- a lightweight LAN browser intent client.
+#
+# Install to /etc/systemd/system/webpadd.service.
+
+[Unit]
+Description=Robot LAN browser intent client
+After=robotd.service padd.service local-fs.target
+Wants=robotd.service
+# A systemd start stops the gamepad service before the browser service is allowed to run. The
+# shared /run/robotd lock in both binaries also covers direct manual launches.
+Conflicts=padd.service
+
+[Service]
+Type=exec
+ExecStart=/opt/robot/daemon/current/bin/webpadd --listen 0.0.0.0:8081
+
+User=webpadd
+Group=webpadd
+SupplementaryGroups=robot
+
+Restart=always
+RestartSec=5s
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+
+Environment=RUST_LOG=info
+StandardOutput=journal
+StandardError=journal
+RuntimeDirectory=webpadd

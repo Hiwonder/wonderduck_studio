@@ -1,0 +1,6 @@
+html:root {
+  font-family: Montserrat, MiSans, "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --heading-page: 18px;
+  --heading-section: 16px;
+  --heading-subsection: 14px;
+}

@@ -1,0 +1,21 @@
+body #toast {
+  top: 50%;
+  bottom: auto;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  pointer-events: none;
+  text-align: center;
+}
+
+body.studio-shell { --notification-sidebar-width: 176px; }
+body.studio-shell.sidebar-collapsed { --notification-sidebar-width: 52px; }
+body.studio-shell #toast {
+  left: calc(50% + var(--notification-sidebar-width) / 2);
+  max-width: min(600px, calc(100vw - var(--notification-sidebar-width) - 32px));
+}
+
+@media (max-width: 720px) {
+  body.studio-shell { --notification-sidebar-width: 52px; }
+}

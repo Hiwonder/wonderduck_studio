@@ -1,0 +1,17 @@
+/* A text caret belongs in editable fields, not in controls or status messages. */
+body { cursor: default; caret-color: transparent; }
+:where(button, select, summary, label, [role="button"], [role="tab"]) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+:where(input, textarea, [contenteditable]:not([contenteditable="false"])) {
+  -webkit-user-select: text;
+  user-select: text;
+  caret-color: auto;
+}
+:where(input:not([type]), input[type="text"], input[type="number"], input[type="password"],
+  input[type="search"], input[type="email"], input[type="url"], input[type="tel"], textarea,
+  [contenteditable]:not([contenteditable="false"])) { cursor: text; }
+button:focus, input:focus, select:focus, textarea:focus,
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { border-color: var(--green); }

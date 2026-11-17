@@ -1,0 +1,69 @@
+html,body{width:100%;height:100%;margin:0;background:transparent}
+body{display:block;overflow:auto}
+body>.sidebar,body>#sidebar-scrim,.viewer-section,.chart-section,#imu-comparison{display:none!important}
+main{width:100%;max-width:none;height:100%;margin:0;padding:0}
+#monitor,.telemetry-layout,.inspection-section{height:100%;min-height:0}
+.telemetry-layout{display:block}
+.inspection-layout{height:100%;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:12px}
+.servo-section,#parameters{min-height:0}
+.inspection-layout .servo-section{display:grid;grid-template-rows:44px minmax(0,1fr) 48px 160px}
+.inspection-layout #parameters{display:grid;grid-template-rows:44px minmax(0,1fr) 48px 160px}
+.inspection-layout .parameter-editor{grid-row:4}
+.inspection-layout #parameters:has(#parameter-view [data-view=all][aria-pressed=true]) .parameter-table-scroll{grid-row:2 / 4}
+.servo-table-wrap,.parameter-table-scroll{height:auto;max-height:none;min-height:0;overflow:auto}
+.parameter-table-scroll{overflow-x:hidden}
+@media(min-width:701px){.servo-table,.parameter-table{height:100%}}
+@media(min-width:701px) and (max-width:900px){
+  .servo-table{min-width:460px}
+  .servo-table th{font-size:11px}
+  .servo-table td{height:25px;padding:2px 3px;font-size:13px}
+  .parameter-table td{height:28px;padding:2px 3px;font-size:13px}
+  .servo-table td:first-child:has(.servo-select-toggle){font-size:13px;line-height:1.3}
+  .servo-table th:first-child{width:110px}
+  .servo-table th:nth-child(2){width:50px}
+  .servo-table th:nth-child(3){width:44px}
+  .servo-table th:nth-child(4){width:40px}
+  .servo-table th:nth-child(5){width:60px}
+  .servo-table th:nth-child(6){width:41px}
+  .servo-table th:nth-child(7){width:43px}
+  .servo-table th:nth-child(8){width:46px}
+  .servo-table th:last-child{width:36px}
+}
+@media(min-width:701px){
+  /* Share the table height, after both headers and controls, across 15 servo rows. */
+  .servo-table td,.parameter-table td{height:calc((100vh - 288px) / 15)}
+}
+html[data-theme=dark] .servo-table th,html[data-theme=dark] .parameter-table th{background:#405766;color:#eef3f1}
+html[data-theme=dark] .servo-table td,html[data-theme=dark] .parameter-table td{border-color:#42535a}
+html[data-theme=dark] .servo-table tr.selected{background:#376d59;color:#f1f7f3}
+html[data-theme=dark] .servo-table tr.selected .id-label{color:#d3e8dc}
+html[data-theme=dark] .servo-table tr:hover,html[data-theme=dark] .parameter-table tr:hover{background:#344852}
+html[data-theme=dark] .parameter-table tr.selected,html[data-theme=dark] .parameter-table tr.selected:hover{background:#376d59;color:#f1f7f3}
+html[data-theme=dark] #target-value,html[data-theme=dark] #parameter-value{color:#dcebe1}
+@media(max-width:700px){
+  main,#monitor,.telemetry-layout,.inspection-section,.inspection-layout{height:auto}
+  .inspection-layout{grid-template-columns:minmax(0,1fr)}
+  .inspection-layout .servo-section,.inspection-layout #parameters{display:block}
+  .servo-table-wrap{max-height:440px}
+  .parameter-table-scroll{height:360px}
+  .servo-table th:first-child,.servo-table td:first-child{position:sticky;left:0}
+  .servo-table th:first-child{z-index:3;background:#f0f4f2}
+  .servo-table td:first-child{z-index:1;background:#f7f9f8}
+  .servo-table tr:hover td:first-child{background:#eff4f1}
+  .servo-table tr.selected td:first-child,.servo-table tr.selected:hover td:first-child{background:#93c9af}
+  html[data-theme=dark] .servo-table th:first-child{background:#405766}
+  html[data-theme=dark] .servo-table td:first-child{background:#11161b}
+  html[data-theme=dark] .servo-table tr:hover td:first-child{background:#344852}
+  html[data-theme=dark] .servo-table tr.selected td:first-child,html[data-theme=dark] .servo-table tr.selected:hover td:first-child{background:#376d59}
+}
+@media(max-width:280px){
+  #parameters .section-bar{height:auto;min-height:44px;flex-wrap:wrap;padding-bottom:6px}
+  #parameters .section-bar .tools{margin-left:auto}
+  .parameter-table th,.parameter-table td{padding-left:1px;padding-right:1px}
+  .parameter-table th:first-child,.parameter-table td:first-child{padding-left:18px}
+  .parameter-table .mono{font-size:11px;white-space:nowrap}
+  .parameter-table td:nth-child(3),.parameter-table td:last-child{font-size:11px}
+  .slider-heading{flex-wrap:wrap}
+  .slider-heading>label:first-child{flex-basis:100%}
+  .torque-switch{margin-left:0}
+}

@@ -1,0 +1,2 @@
+.release-confirm-option{display:flex;align-items:center;gap:7px;margin:0 0 20px;cursor:pointer}
+.release-confirm-option input{margin:0;accent-color:var(--green)}

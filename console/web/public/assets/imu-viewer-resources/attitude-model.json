@@ -1,0 +1,143 @@
+{
+  "schema_version": 2,
+  "model": "robot-f55f098fef09.glb",
+  "root_node": "body_trunk_base",
+  "home_trunk_height_m": 0.11185268929837174,
+  "joints": [
+    {
+      "name": "left_hip_yaw",
+      "node": "joint_left_hip_yaw",
+      "axis": [
+        -0.0,
+        -0.0,
+        -1.0
+      ]
+    },
+    {
+      "name": "left_hip_roll",
+      "node": "joint_left_hip_roll",
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "left_hip_pitch",
+      "node": "joint_left_hip_pitch",
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "left_knee",
+      "node": "joint_left_knee",
+      "axis": [
+        -0.0,
+        -1.0,
+        -0.0
+      ]
+    },
+    {
+      "name": "left_ankle",
+      "node": "joint_left_ankle",
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "right_hip_yaw",
+      "node": "joint_right_hip_yaw",
+      "axis": [
+        -0.0,
+        -0.0,
+        -1.0
+      ]
+    },
+    {
+      "name": "right_hip_roll",
+      "node": "joint_right_hip_roll",
+      "axis": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "right_hip_pitch",
+      "node": "joint_right_hip_pitch",
+      "axis": [
+        -0.0,
+        -1.0,
+        -0.0
+      ]
+    },
+    {
+      "name": "right_knee",
+      "node": "joint_right_knee",
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "right_ankle",
+      "node": "joint_right_ankle",
+      "axis": [
+        -0.0,
+        -1.0,
+        -0.0
+      ]
+    },
+    {
+      "name": "neck_pitch",
+      "node": "joint_neck_pitch",
+      "axis": [
+        -0.0,
+        -1.0,
+        -0.0
+      ]
+    },
+    {
+      "name": "head_pitch",
+      "node": "joint_head_pitch",
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "head_yaw",
+      "node": "joint_head_yaw",
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "head_roll",
+      "node": "joint_head_roll",
+      "axis": [
+        -1.0,
+        -0.0,
+        -0.0
+      ]
+    },
+    {
+      "name": "mouth",
+      "node": "joint_mouth",
+      "axis": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    }
+  ]
+}

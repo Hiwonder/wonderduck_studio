@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0e12" />
+    <meta name="color-scheme" content="dark" />
+    <title>舵机调试</title>
+  </head>
+  <body>
+    <aside id="sidebar" class="sidebar" aria-label="设备控制侧栏">
+      <button id="sidebar-toggle" class="icon sidebar-toggle" title="展开侧边栏" aria-label="展开侧边栏" aria-expanded="false" aria-controls="sidebar-content"><i data-lucide="menu"></i></button>
+      <div class="brand" title="WonderDuck 设备控制台"><span class="brand-mark"><i data-lucide="bot"></i></span><div class="brand-copy"><strong>WonderDuck</strong><span>设备控制台</span></div></div>
+      <div class="connection"><span id="status-dot" class="dot"></span><span id="connection">连接中</span><span id="demo-badge" hidden>演示数据</span></div>
+      <div id="sidebar-content">
+        <div class="device-status"><div class="imu-source-control"><h2>设备状态</h2><label for="imu-source">IMU 来源</label><select id="imu-source"><option value="id200">ID200</option><option value="i2c">I2C5</option><option value="compare">对比</option></select></div><dl class="device-stats"><div><dt>有效舵机</dt><dd id="servo-count">-- / 15</dd></div><div><dt>总线采集</dt><dd id="bus-rate">--</dd></div><div><dt>采集耗时</dt><dd id="read-time">--</dd></div><div><dt>失败轮次</dt><dd id="failures">--</dd></div><div><dt>IMU处理</dt><dd id="gyro-calibration">--</dd></div><div><dt>IMU</dt><dd id="pose-status">等待 IMU</dd></div></dl></div>
+        <section class="calibration-panel" aria-label="IMU 标定">
+          <h2>IMU 标定</h2>
+          <div class="calibration-buttons"><button id="calibration-accel">加速度六面</button></div>
+          <p id="calibration-status" role="status">未开始</p>
+          <p id="calibration-faces"></p><p id="calibration-check"></p>
+          <div class="calibration-buttons"><button id="calibration-next" disabled>继续</button><button id="calibration-cancel" disabled>取消</button></div>
+          <details><summary>续采 / 重采</summary>
+            <input id="calibration-record" type="text" placeholder="已有记录路径" aria-label="已有加速度记录路径" />
+            <select id="calibration-face" aria-label="重采面"><option value="">缺失面</option><option>+X</option><option>-X</option><option>+Y</option><option>-Y</option><option>+Z</option><option>-Z</option></select>
+            <button id="calibration-resume">开始</button>
+          </details>
+          <div class="calibration-links"><a id="calibration-download" href="/api/calibration/report" download hidden>记录</a></div>
+        </section>
+        <div class="sidebar-meta"><span id="footer-state">HX · UART8 · 1 Mbps</span><span id="last-command">尚无操作</span></div>
+      </div>
+    </aside>
+    <div id="sidebar-scrim" hidden></div>
+    <main>
+      <section id="monitor">
+        <div class="telemetry-layout">
+          <div class="viewer-section">
+            <div id="viewer">
+              <span id="model-loading">模型加载中</span>
+              <select id="model-palette" class="viewer-palette" aria-label="模型配色"><option value="white_orange">白橙</option><option value="yellow_black" selected>黄黑</option><option value="black_orange">黑橙</option><option value="navy">蓝黄</option></select>
+              <button id="ground-feet" class="viewer-ground" title="将当前双脚最低表面贴到地板，仅调整显示高度" disabled>脚贴地</button>
+              <button id="reset-view" class="icon viewer-reset" title="复位视角" aria-label="复位视角"><i data-lucide="rotate-ccw"></i></button>
+              <div id="imu-attitude-panel" class="imu-overlay imu-attitude">
+                <div id="tof-reading" class="distance-reading"><span>TOF 距离</span><strong id="tof-distance">--<small>mm</small></strong></div>
+              </div>
+              <section id="camera-preview" class="camera-preview" aria-label="摄像头实时画面">
+                <video id="camera-video" autoplay muted playsinline aria-label="实时摄像头画面"></video>
+                <div class="camera-toolbar"><span>实时画面</span><button id="camera-expand" type="button" aria-label="摄像头全屏" aria-pressed="false" title="铺满3D视图区">全屏</button></div>
+                <div id="camera-status" class="camera-status" role="status">摄像头连接中</div>
+              </section>
+            </div>
+          </div>
+          <div class="inspection-section">
+            <div class="inspection-layout">
+              <section class="servo-section">
+                <div class="section-bar"><h2>舵机总览 <span id="overview-count" class="muted">15</span></h2></div>
+                <div class="servo-table-wrap"><table class="servo-table"><thead><tr><th><label class="table-select-all"><input id="select-all-servos" type="checkbox" aria-label="全选舵机" title="全选或取消全选舵机" disabled /><span>ID / 关节</span></label></th><th title="当前目标编码器值（步），随目标位置滑杆更新；中位或 Home 成功后更新全部目标">下发目标</th><th>编码器</th><th>角度 °</th><th>速度 rad/s</th><th>负载 %</th><th>电压 V</th><th>温度 °C</th><th title="扭矩开关 / 舵机故障">状态</th></tr></thead><tbody id="servo-rows"></tbody></table></div>
+                <div class="servo-pose-actions" role="group" aria-label="全部舵机控制"><button id="center-all" title="全部舵机回到 2048" aria-label="全部舵机中位" disabled><i data-lucide="crosshair"></i><span>中位</span></button><button id="home-all" title="原配置关节回到 Home；扫描新增舵机不响应" aria-label="原配置关节 Home" disabled><i data-lucide="house"></i><span>Home</span></button><button id="release" class="danger" title="全部卸力" aria-label="全部卸力"><i data-lucide="power-off"></i><span>全部卸力</span></button><button id="scan-servos" title="扫描 1–255；跳过 IMU 200 与保留地址 254/255" disabled>扫描</button></div>
+                <div class="servo-live-controls">
+                  <div class="live-control-heading"><h3 id="selected-name">左髋偏航</h3><span id="selected-meta" class="muted">ID 20</span></div>
+                  <div class="slider-heading"><label for="target-slider">目标位置（编码器）</label><label class="torque-switch"><span>扭矩</span><input id="torque" type="checkbox" role="switch" aria-label="所选舵机扭矩" /></label><output id="target-value" for="target-slider">-- 步</output></div>
+                  <div class="slider-input-row"><input id="target-slider" type="range" step="1" aria-label="目标编码器位置" disabled /><input id="target-input" type="number" step="1" aria-label="输入目标编码器位置" disabled /></div>
+                  <div id="target-limits" class="range-label"></div>
+                </div>
+              </section>
+              <section id="parameters">
+                <div class="section-bar"><h2 id="parameter-title">ID 20 · 舵机参数</h2><div class="tools"><div id="parameter-view" role="group" aria-label="舵机参数展示方式"><button type="button" data-view="compact" aria-pressed="true">精简</button><button type="button" data-view="all" aria-pressed="false">全部</button></div><button id="refresh-params" class="icon" title="重新读取参数" aria-label="重新读取参数"><i data-lucide="refresh-cw"></i></button><button id="load-params" class="icon" title="加载参数 JSON 到草稿；确认后保存" aria-label="加载参数" disabled><i data-lucide="folder-open"></i></button><input id="parameter-file" type="file" accept=".json,application/json" hidden /><button id="export-params" class="icon" title="导出参数" aria-label="导出参数"><i data-lucide="download"></i></button></div></div>
+                <div class="table-scroll parameter-table-scroll"><table class="parameter-table"><thead><tr><th><label class="table-select-all"><input id="select-all-parameters" type="checkbox" aria-label="全选当前显示的可批量保存参数" title="全选或取消当前显示中可批量保存的参数" disabled /><span>地址</span></label></th><th>参数</th><th>区域</th><th>值</th><th>单位</th><th></th></tr></thead><tbody id="parameter-rows"><tr><td colspan="6" class="empty">尚未读取</td></tr></tbody></table></div>
+                <div class="parameter-editor">
+                  <div class="live-control-heading"><h3>参数调整</h3><button id="batch-save" title="将勾选的参数值写入勾选舵机，并逐项读回校验" disabled>批量保存</button><button id="write-parameter" class="icon primary" title="写入并校验" aria-label="写入并校验"><i data-lucide="save"></i></button></div>
+                  <div class="slider-heading"><label id="parameter-name" for="parameter-slider">--</label><output id="parameter-value" for="parameter-slider">--</output></div>
+                  <div class="slider-input-row"><input id="parameter-slider" type="range" step="1" aria-label="参数新值" disabled /><input id="parameter-input" type="number" step="1" aria-label="输入参数新值" disabled /></div>
+                  <div id="parameter-limit" class="range-label"></div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+        <section id="imu-comparison" class="imu-comparison" aria-label="IMU 转换数据对比" hidden>
+          <div class="section-bar"><h2>转换后 IMU 数据</h2><span class="muted">机身坐标 · 角速度 rad/s · 重力方向单位向量</span></div>
+          <div class="imu-comparison-scroll"><table><thead><tr><th>来源</th><th>RPY °</th><th>角速度 XYZ</th><th>重力 XYZ</th><th>四元数 WXYZ</th><th>状态</th></tr></thead><tbody>
+            <tr><th>ID200</th><td id="compare-id200-rpy">--</td><td id="compare-id200-gyro">--</td><td id="compare-id200-gravity">--</td><td id="compare-id200-quaternion">--</td><td id="compare-id200-status">--</td></tr>
+            <tr><th>I2C5</th><td id="compare-i2c-rpy">--</td><td id="compare-i2c-gyro">--</td><td id="compare-i2c-gravity">--</td><td id="compare-i2c-quaternion">--</td><td id="compare-i2c-status">--</td></tr>
+          </tbody></table></div>
+          <p id="imu-compare-delta" role="status">等待两路有效数据</p>
+        </section>
+        <div class="chart-section"><div class="chart-layout"><div class="chart-labels"><div class="curve-label c1"><span>X / Roll</span><output id="curve-roll">--</output></div><div class="curve-label c2"><span>Y / Pitch</span><output id="curve-pitch">--</output></div><div class="curve-label c3"><span>Z / Yaw</span><output id="curve-yaw">--</output></div></div><canvas id="chart" aria-label="IMU 三轴姿态角实时曲线"></canvas></div></div>
+      </section>
+    </main>
+    <div id="toast" role="status" hidden></div>
+    <dialog id="confirm"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div class="dialog-actions"><button value="cancel">取消</button><button value="ok" class="primary">确认</button></div></form></dialog>
+    <script type="module" src="/src/debug/main.js"></script>
+  </body>
+</html>

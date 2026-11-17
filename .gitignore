@@ -1,0 +1,9 @@
+target/
+__pycache__/
+*.pyc
+AGENTS.md
+*.key
+*.pem
+secret*
+.env*
+.venv/

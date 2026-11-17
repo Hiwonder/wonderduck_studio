@@ -1,0 +1,16 @@
+{
+  "name": "wonderduck-robot-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build --outDir build --emptyOutDir false"
+  },
+  "dependencies": {
+    "three": "0.180.0",
+    "lucide": "^0.468.0"
+  },
+  "devDependencies": {
+    "vite": "^6.3.6"
+  }
+}

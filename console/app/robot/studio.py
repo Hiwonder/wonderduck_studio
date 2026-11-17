@@ -1,0 +1,695 @@
+"""Coordinate robotd and the existing maintenance controller."""
+
+import json
+import logging
+import math
+import secrets
+import select
+import socket
+import threading
+import time
+
+from app.robot.robotd_state import MAX_LINE_BYTES, RobotdController
+from app.robot.manual_page_guard import ManualPageGuard
+from app.robot.protocol import IDS
+from app.robot.workspace_rest import ensure_rest, rest_status
+
+
+MAINTENANCE_WORKSPACES = frozenset(("action", "debug", "calibration"))
+WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "control", "target", "person", "maze", "system", "network", "models"))
+MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "maze", "person", "target"))
+REST_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status",))
+CLIENT_TIMEOUT = 30
+
+
+class MaintenanceLease:
+    def __init__(self, path):
+        self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.connection.settimeout(6)
+        self.connection.connect(path)
+        self.stream = self.connection.makefile("rwb")
+        self.next_id = 0
+
+    def request(self, action, **params):
+        self.next_id += 1
+        message = dict(jsonrpc="2.0", id=self.next_id, method="robot.maintenance", params=dict(action=action, **params))
+        try:
+            self.stream.write((json.dumps(message) + "\n").encode())
+            self.stream.flush()
+            line = self.stream.readline(MAX_LINE_BYTES + 1)
+        except OSError as error:
+            self.close()
+            raise ConnectionError("robotd 维护会话通信失败") from error
+        if not line or len(line) > MAX_LINE_BYTES:
+            raise ConnectionError("robotd 维护会话已断开")
+        reply = json.loads(line)
+        if reply.get("id") != self.next_id or reply.get("error") is not None or not isinstance(reply.get("result"), dict):
+            raise RuntimeError(f"robotd 维护请求失败：{reply.get('error')}")
+        result = reply["result"]
+        if action == "release" and not result.get("accepted") and result.get("reason") == "no_maintenance":
+            return self.request("status")
+        if not result.get("accepted"):
+            raise RuntimeError(f"robotd 维护请求被拒绝：{result.get('reason') or result.get('phase')}")
+        expected = "active" if action in ("acquire", "acquire_status", "status_read_begin", "status_read_complete", "status_read_timeout") else "idle"
+        if result.get("phase") != expected:
+            raise RuntimeError(f"robotd 维护交接未完成：{result.get('phase')}")
+        return result
+
+    def alive(self):
+        if self.connection.fileno() < 0:
+            return False
+        readable, _, _ = select.select([self.connection], [], [], 0)
+        if not readable:
+            return True
+        try:
+            return bool(self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT))
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+
+    def close(self):
+        try:
+            self.stream.close()
+        finally:
+            self.connection.close()
+
+
+class StudioController:
+    readonly = False
+    demo = False
+    full_servo_range = False
+
+    def __init__(self, path, hz, controller_factory, lease_factory=MaintenanceLease, demo=False,
+                 status_hardware_factory=None):
+        self.path, self.hz = str(path), hz
+        self.controller_factory, self.lease_factory = controller_factory, lease_factory
+        self.demo = demo
+        self.observer = RobotdController(path, hz, include_details=True)
+        self.status_viewers = {}
+        self.status_hardware_factory = status_hardware_factory
+        self.status_lease = None
+        self.status_error = None
+        self.status_retry_at = 0.0
+        self.client_workspaces = {}
+        self.manual_page_guard = ManualPageGuard(path)
+        self.manual_guard_error = None
+        self.rest_transition_client = None
+        self.token = secrets.token_urlsafe(32)
+        self.lock = threading.RLock()
+        self.owner = None
+        self.workspace = None
+        self.controller = None
+        self.lease = None
+        self.last_seen = 0
+        self.error = None
+        self.library_owner = None
+        self.library_id = None
+        self.library_active = False
+        self.library_cancelled = set()
+        self.library_result = dict(state="idle", frame=None, count=0, error=None)
+        self.stop = threading.Event()
+        self.watchdog = threading.Thread(target=self._watch, name="studio-session", daemon=True)
+        self.watchdog.start()
+
+    @property
+    def joints(self):
+        return self.controller.joints if self.controller else self.observer.joints
+
+    @property
+    def imu_source(self):
+        return self.controller.imu_source if self.controller else "robotd"
+
+    @property
+    def calibration(self):
+        if self.controller is None:
+            raise RuntimeError("没有活动的标定工作区")
+        return self.controller.calibration
+
+    def _require(self, client, workspaces):
+        if not client or self.owner != client or self.workspace not in workspaces or self.controller is None:
+            raise PermissionError("当前浏览器没有此工作区的维护控制权")
+        if self.lease is None or not self.lease.alive():
+            raise PermissionError("robotd 维护会话已断开")
+        self.last_seen = time.monotonic()
+        return self.controller
+
+    def authorize(self, client, path, workspace):
+        with self.lock:
+            if workspace != self.workspace:
+                raise PermissionError("工作区已切换，请重新操作")
+            if path in ("/api/action-document", "/api/action-playback"):
+                self._require(client, {"action"})
+            elif path in ("/api/parameter-batch", "/api/export-targets", "/api/list-targets", "/api/load-targets"):
+                self._require(client, {"debug"})
+            elif path == "/api/head-imu/calibration":
+                self._require(client, {"calibration"})
+
+    def switch(self, client, workspace):
+        if not client or workspace not in WORKSPACES:
+            raise ValueError("工作区无效")
+        with self.lock:
+            if self.rest_transition_client is not None:
+                raise RuntimeError("机器人正在休息，请等待页面切换完成")
+            previous = self.client_workspaces.get(client)
+            previous_status_seen = self.status_viewers.get(client)
+            previously_disabled = bool(previous and previous[0] in MANUAL_DISABLED_WORKSPACES)
+            disabled = workspace in MANUAL_DISABLED_WORKSPACES
+            try:
+                if disabled:
+                    self.manual_page_guard.ensure(client)
+                    if workspace == "status":
+                        self.manual_page_guard.ensure(client, status=True)
+                    elif previous and previous[0] == "status":
+                        self.manual_page_guard.ensure(client, status=False)
+                result = self._switch_workspace(client, workspace)
+            except BaseException:
+                if previous is None:
+                    self.client_workspaces.pop(client, None)
+                else:
+                    self.client_workspaces[client] = previous
+                if previous_status_seen is None:
+                    self.status_viewers.pop(client, None)
+                else:
+                    self.status_viewers[client] = previous_status_seen
+                if previously_disabled:
+                    self.manual_page_guard.ensure(client, status=previous[0] == "status")
+                else:
+                    self.manual_page_guard.release(client)
+                raise
+            if not disabled:
+                self.manual_page_guard.release(client)
+            elif workspace != "status":
+                self.manual_page_guard.ensure(client, status=False)
+            return result
+
+    def switch_after_rest(self, client, workspace):
+        """Rest once before a user-initiated servo workspace transition."""
+        if not client or workspace not in REST_WORKSPACES:
+            raise ValueError("工作区无效")
+        with self.lock:
+            if self.rest_transition_client is not None:
+                raise RuntimeError("机器人正在休息，请等待页面切换完成")
+            previous = self.client_workspaces.get(client)
+            if previous is not None and previous[0] == workspace:
+                return self.switch(client, workspace)
+            phase, _ = rest_status(self.path)
+            if phase == "rested":
+                return self.switch(client, workspace)
+            if self.owner not in (None, client):
+                raise PermissionError("另一浏览器正在使用维护工作区")
+            if any(other != client and self.manual_page_guard.status_enabled(other)
+                   for other in self.manual_page_guard.leases):
+                raise RuntimeError("其他页面正在采集设备状态，暂时无法休息")
+            previous_status_seen = self.status_viewers.get(client)
+            self.rest_transition_client = client
+            try:
+                if self.owner == client and (self.controller is not None or self.lease is not None):
+                    self._leave()
+                if previous_status_seen is not None:
+                    self._set_status_viewer(client, False)
+                self.manual_page_guard.ensure(client, status=False)
+            except BaseException:
+                self.rest_transition_client = None
+                if previous and previous[0] in MANUAL_DISABLED_WORKSPACES:
+                    self.manual_page_guard.ensure(client, status=previous[0] == "status")
+                else:
+                    self.manual_page_guard.release(client)
+                if previous_status_seen is not None:
+                    self._set_status_viewer(client, True)
+                raise
+        try:
+            # Do not hold the Studio lock while the robot is sitting: state
+            # snapshots and unrelated status requests must remain responsive.
+            ensure_rest(self.path)
+            with self.lock:
+                self.rest_transition_client = None
+                return self.switch(client, workspace)
+        except BaseException:
+            with self.lock:
+                self.rest_transition_client = None
+                if previous and previous[0] in MANUAL_DISABLED_WORKSPACES:
+                    self.manual_page_guard.ensure(client, status=previous[0] == "status")
+                else:
+                    self.manual_page_guard.release(client)
+                if previous_status_seen is not None:
+                    self._set_status_viewer(client, True)
+            raise
+
+    def _switch_workspace(self, client, workspace):
+        if not client or workspace not in WORKSPACES:
+            raise ValueError("工作区无效")
+        with self.lock:
+            if workspace not in MAINTENANCE_WORKSPACES:
+                previous_workspace = self.client_workspaces.get(client)
+                was_viewing_status = client in self.status_viewers
+                if self.owner == client:
+                    self._leave()
+                self.client_workspaces[client] = (workspace, time.monotonic())
+                self._set_status_viewer(client, workspace == "status")
+                result = dict(workspace=workspace, maintenance=False)
+                if workspace == "status":
+                    paused = self.controller is not None or self.lease is not None
+                    result.update(ready=not paused, error="维护占用，采集暂停" if paused else None)
+                return result
+            if self.lease is not None and not self.lease.alive():
+                # A disconnected lease cannot protect an active serial worker.
+                # Stop that worker before discarding the connection or trying to
+                # acquire a new lease. If it cannot stop, leave ownership intact.
+                if self.controller is not None:
+                    self.controller.close()
+                    self.controller = None
+                self._discard_lease("robotd 维护会话已断开")
+            if self.owner not in (None, client):
+                raise PermissionError("另一浏览器正在使用维护工作区")
+            if self.owner == client and self.workspace == workspace and self.controller:
+                # A close which timed out may have already stopped accepting work.
+                # Finish closing it before the user retries the same workspace.
+                stop = getattr(self.controller, "stop", None)
+                if stop is None or not stop.is_set():
+                    self._require(client, {workspace})
+                    return dict(workspace=workspace, maintenance=True)
+                self.controller.close()
+                self.controller = None
+            was_viewing_status = client in self.status_viewers
+            previous_workspace = self.client_workspaces.get(client)
+            self.client_workspaces[client] = (workspace, time.monotonic())
+            self._set_status_viewer(client, False)
+            # Maintenance pauses the shared status subscription until it leaves.
+            self._stop_status()
+            if self.controller is not None:
+                self.controller.close()
+                self.controller = None
+            if self.lease is None:
+                lease = self.lease_factory(self.path)
+                self.observer.set_stream_suspended(True)
+                try:
+                    lease.request("acquire")
+                except BaseException:
+                    self.observer.set_stream_suspended(False)
+                    lease.close()
+                    if previous_workspace is not None:
+                        self.client_workspaces[client] = previous_workspace
+                    if was_viewing_status:
+                        self._set_status_viewer(client, True)
+                    raise
+                self.lease = lease
+                self.owner = client
+            self.workspace = workspace
+            self.last_seen = time.monotonic()
+            try:
+                self.controller = self.controller_factory()
+            except Exception:
+                self._leave()
+                if previous_workspace is not None:
+                    self.client_workspaces[client] = previous_workspace
+                if was_viewing_status:
+                    self._set_status_viewer(client, True)
+                raise
+            self.error = None
+            return dict(workspace=workspace, maintenance=True)
+
+    def _set_status_viewer(self, client, active):
+        previous = self.status_viewers.get(client)
+        if active:
+            self.status_viewers[client] = time.monotonic()
+        else:
+            self.status_viewers.pop(client, None)
+        try:
+            self._sync_status()
+        except BaseException:
+            if previous is None:
+                self.status_viewers.pop(client, None)
+            else:
+                self.status_viewers[client] = previous
+            raise
+
+    def _stop_status(self):
+        self.observer.set_devices_enabled(False)
+        if self.lease is None:
+            self.observer.set_stream_suspended(False)
+
+    def _sync_status(self):
+        enabled = bool(self.status_viewers) and self.lease is None and self.controller is None
+        self.observer.set_devices_enabled(enabled)
+        if enabled:
+            self.observer.set_stream_suspended(False)
+
+    def set_status_visible(self, client, visible):
+        with self.lock:
+            if client == self.rest_transition_client:
+                return
+            entry = self.client_workspaces.get(client)
+            if entry is None:
+                return
+            workspace, _ = entry
+            self.client_workspaces[client] = (workspace, time.monotonic())
+            self._set_status_viewer(client, visible and workspace == "status")
+
+    def heartbeat(self, client):
+        with self.lock:
+            self._require(client, MAINTENANCE_WORKSPACES)
+            return dict(workspace=self.workspace, maintenance=True)
+
+    def _discard_lease(self, reason):
+        """Drop a lease only after its serial controller has stopped."""
+        if self.controller is not None:
+            raise RuntimeError("维护任务尚未结束，串口不能交回")
+        lease, self.lease = self.lease, None
+        try:
+            if lease is not None:
+                lease.close()
+        except (OSError, ValueError) as error:
+            logging.warning("关闭维护会话失败：%s", error)
+        finally:
+            if self.library_active and self.library_owner == self.owner:
+                self.library_active = False
+                self.library_result = dict(state="error", frame=None, count=0, error=reason)
+            self.owner = self.workspace = None
+            self.last_seen = 0
+            self.error = reason
+            self.observer.set_stream_suspended(False)
+
+    def _leave(self):
+        library = self.library_active and self.library_owner == self.owner
+        if library and self.controller is not None:
+            self.library_result = self.controller.action_task(dict(operation="stop"), self.library_owner)
+        if self.controller is not None:
+            self.controller.close()
+            self.controller = None
+        if self.lease is not None:
+            try:
+                self.lease.request("release")
+            except (OSError, RuntimeError, ValueError) as error:
+                # The serial worker is stopped, but the release result may be
+                # unknown. Closing the connection asks robotd to reclaim its
+                # bus; never keep an owner whose controller no longer exists.
+                self._discard_lease(f"维护串口交接未确认：{error}")
+                raise RuntimeError(self.error) from error
+            try:
+                self.lease.close()
+            except (OSError, ValueError) as error:
+                logging.warning("关闭维护会话失败：%s", error)
+            self.lease = None
+            self.observer.set_stream_suspended(False)
+        self.owner = None
+        self.workspace = None
+        self.last_seen = 0
+        if library:
+            self.library_active = False
+            self.client_workspaces[self.library_owner] = ("control", time.monotonic())
+            self.manual_page_guard.release(self.library_owner)
+        self._sync_status()
+
+    def start_library_action(self, client, document, run_id):
+        with self.lock:
+            if not client or not isinstance(run_id, str) or not run_id:
+                raise ValueError("动作请求标识无效")
+            key = (client, run_id)
+            if key in self.library_cancelled:
+                self.library_cancelled.remove(key)
+                raise RuntimeError("动作请求已取消")
+            if self.owner is not None or self.lease is not None:
+                raise RuntimeError("维护工作区正在使用，请先结束当前操作")
+            self.library_owner = client
+            self.library_id = run_id
+            self.library_active = True
+            try:
+                self.switch(client, "action")
+                self.controller.arm(client, True)
+                self.library_result = self.controller.action_task(
+                    dict(operation="start", document=document, loop=False, locked_ids=[]), client)
+                return dict(self.library_result, active=True)
+            except Exception as error:
+                try:
+                    if self.owner == client and self.lease is not None:
+                        self._leave()
+                except Exception as cleanup_error:
+                    raise RuntimeError(f"动作启动失败：{error}；维护资源释放失败：{cleanup_error}") from error
+                self.library_active = False
+                self.library_result = dict(state="error", frame=None, count=0, error=str(error))
+                raise
+
+    def library_action(self, client, operation, run_id):
+        with self.lock:
+            if not client or not isinstance(run_id, str) or not run_id:
+                raise ValueError("动作请求标识无效")
+            if operation == "stop" and (self.library_owner != client or self.library_id != run_id):
+                self.library_cancelled.add((client, run_id))
+                return dict(state="stopped", frame=None, count=0, error=None, active=False)
+            if self.library_owner != client or self.library_id != run_id:
+                raise PermissionError("当前浏览器没有动作控制权")
+            if operation == "stop":
+                if self.library_active:
+                    self._leave()
+            elif operation == "status":
+                if self.library_active:
+                    controller = self._require(client, {"action"})
+                    controller.arm(client, True)
+                    self.library_result = controller.action_task(dict(operation="status"), client)
+                    if self.library_result["state"] in ("completed", "stopped", "error"):
+                        self._leave()
+            else:
+                raise ValueError("未知动作播放操作")
+            return dict(self.library_result, active=self.library_active)
+
+    def emergency_release(self, client, run_id=None):
+        if not client:
+            raise PermissionError("会话无效，请刷新页面")
+        if run_id is not None and (not isinstance(run_id, str) or not run_id):
+            raise ValueError("动作请求标识无效")
+        with self.lock:
+            self._stop_status()
+            if run_id is not None and (self.library_owner != client or self.library_id != run_id):
+                self.library_cancelled.add((client, run_id))
+            if self.controller is not None:
+                if self.lease is None or not self.lease.alive():
+                    raise RuntimeError("维护会话已断开，卸力结果未确认")
+                library_active = self.library_active
+                try:
+                    return self.controller.emergency_release()
+                finally:
+                    if library_active:
+                        self._leave()
+            try:
+                response = self.observer.query((("robot.emergencyRelax", {}),), timeout=30)
+                result = response["robot.emergencyRelax"]
+            except (OSError, TimeoutError, KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(f"卸力请求连接中断或超时，结果未确认：{error}") from error
+            if not isinstance(result, dict) or type(result.get("accepted")) is not bool:
+                raise RuntimeError("卸力结果格式无效，结果未确认")
+            if not result["accepted"]:
+                raise RuntimeError(result.get("reason") or "设备未确认卸力")
+            return dict(verified=True, source="robotd")
+
+    def shutdown(self, client):
+        if not client:
+            raise PermissionError("会话无效，请刷新页面")
+        with self.lock:
+            self.status_viewers.clear()
+            self._stop_status()
+            if self.controller is not None or self.lease is not None:
+                self._leave()
+            try:
+                result = self.observer.query((("robot.shutdown", {}),), timeout=3)["robot.shutdown"]
+            except (OSError, TimeoutError, KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(f"关机请求未确认：{error}") from error
+            if not isinstance(result, dict) or type(result.get("accepted")) is not bool:
+                raise RuntimeError("关机请求结果无效")
+            if not result["accepted"]:
+                raise RuntimeError(result.get("reason") or "机器人拒绝关机")
+            return dict(accepted=True)
+
+    def arm(self, client, on):
+        with self.lock:
+            if not on and self.owner != client:
+                return dict(armed=False)
+            return self._require(client, {"action", "debug"}).arm(client, on)
+
+    def submit(self, command, client):
+        action = command.get("action")
+        if action == "servo_debug":
+            allowed = {"action"}
+        elif action in ("imu_sample", "calibration_start", "calibration_restore", "calibration_next", "calibration_cancel"):
+            allowed = {"calibration"}
+        else:
+            allowed = {"action", "debug"}
+        with self.lock:
+            return self._require(client, allowed).submit(command, client)
+
+    def parameter_task(self, command, client):
+        with self.lock:
+            return self._require(client, {"debug"}).parameter_task(command, client)
+
+    def action_task(self, command, client):
+        with self.lock:
+            controller = self._require(client, {"action"})
+            if command.get("operation") != "send_frame":
+                return controller.action_task(command, client)
+            future = controller.action_task(command, client, defer_frame=True)
+        # Waiting for the serial write must not block state snapshots or the rest of Studio.
+        return controller.finish_action_frame(future)
+
+    def maintenance_voltage_snapshot(self):
+        """Expose only an already sampled, complete maintenance voltage snapshot."""
+        def finite_number(value):
+            if type(value) not in (int, float):
+                return False
+            try:
+                return math.isfinite(value)
+            except OverflowError:
+                return False
+
+        unavailable = dict(available=False)
+        if not self.lock.acquire(blocking=False):
+            return unavailable
+        try:
+            if (self.demo or self.owner is None or self.workspace not in ("action", "debug")
+                    or self.controller is None or self.lease is None or not self.lease.alive()):
+                return unavailable
+            state = self.controller.snapshot(None)
+            calibration = state.get("calibration")
+            playback = state.get("action_playback")
+            if (state.get("demo") is not False or state.get("online") is not True
+                    or state.get("maintenance_voltage_ready") is not True
+                    or state.get("parameter_batch_active") is not False
+                    or not isinstance(calibration, dict) or calibration.get("active") is not False
+                    or not isinstance(playback, dict)
+                    or playback.get("state") not in ("idle", "completed", "stopped", "error")):
+                return unavailable
+            now = time.monotonic()
+            sampled = state.get("sampled_monotonic")
+            sequence = state.get("sequence")
+            rows = state.get("servos")
+            if (type(sequence) is not int or sequence <= 0 or not isinstance(rows, list)
+                    or not finite_number(sampled)
+                    or not 0 <= now - sampled <= .25):
+                return unavailable
+            expected = set(IDS)
+            selected = {}
+            for row in rows:
+                if not isinstance(row, dict) or type(row.get("id")) is not int:
+                    return unavailable
+                device_id = row["id"]
+                if device_id not in expected:
+                    continue
+                voltage, observed = row.get("voltage"), row.get("sampled_monotonic")
+                if (device_id in selected or row.get("online") is not True or row.get("valid") is not True
+                        or row.get("error") is not None
+                        or not finite_number(voltage) or not 0 < voltage <= 25.5
+                        or not finite_number(observed)
+                        or not 0 <= now - observed <= .25):
+                    return unavailable
+                selected[device_id] = dict(id=device_id, voltage=voltage, sampled_monotonic=observed)
+            if set(selected) != expected:
+                return unavailable
+            return dict(available=True, sequence=sequence, servos=[selected[device_id] for device_id in IDS])
+        finally:
+            self.lock.release()
+
+    def snapshot(self, client):
+        with self.lock:
+            observed = self.observer.snapshot(client, include_devices=client in self.status_viewers)
+            if client in self.status_viewers:
+                state = observed
+                paused = self.controller is not None or self.lease is not None
+                state.update(device_paused=paused)
+                if paused:
+                    message = "维护占用，独立采集暂停"
+                    state.update(imu=dict(valid=False, error=message),
+                                 servos=[dict(joint, online=False, valid=False, error=message)
+                                         for joint in self.joints])
+            else:
+                state = self.controller.snapshot(client) if self.controller else observed
+            state.update(robot=observed.get("robot", {}), tof=observed.get("tof"),
+                         workspace=self.workspace, maintenance_owner=self.owner == client,
+                         maintenance_active=self.owner is not None, maintenance_error=self.error)
+            return state
+
+    def _watch(self):
+        while not self.stop.wait(1):
+            with self.lock:
+                now = time.monotonic()
+                expired_viewers = [client for client, seen in self.status_viewers.items()
+                                   if client != self.rest_transition_client and now - seen > CLIENT_TIMEOUT]
+                for client in expired_viewers:
+                    try:
+                        self._set_status_viewer(client, False)
+                    except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+                        self.status_error = str(error)
+                        logging.error("设备状态采集停止失败：%s", error)
+                try:
+                    self._sync_status()
+                except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+                    self.status_error = str(error)
+                    logging.error("设备状态串口交接失败：%s", error)
+                self.client_workspaces = {client: entry for client, entry in self.client_workspaces.items()
+                                          if client == self.rest_transition_client or now - entry[1] <= CLIENT_TIMEOUT}
+                for client in list(self.manual_page_guard.leases):
+                    if client == self.rest_transition_client:
+                        continue
+                    entry = self.client_workspaces.get(client)
+                    if entry is None or entry[0] not in MANUAL_DISABLED_WORKSPACES:
+                        try:
+                            self.manual_page_guard.release(client)
+                        except (OSError, ValueError, RuntimeError) as error:
+                            logging.warning("Cannot release manual control restriction: %s", error)
+                for client, (workspace, _) in self.client_workspaces.items():
+                    if client == self.rest_transition_client:
+                        continue
+                    if workspace not in MANUAL_DISABLED_WORKSPACES:
+                        continue
+                    try:
+                        self.manual_page_guard.ensure(client, status=workspace == "status")
+                        self.manual_guard_error = None
+                    except (OSError, ValueError, RuntimeError) as error:
+                        message = str(error)
+                        if self.manual_guard_error != message:
+                            logging.warning("Cannot restore manual control restriction: %s", error)
+                            self.manual_guard_error = message
+                if self.lease is None:
+                    continue
+                lost = not self.lease.alive()
+                expired = time.monotonic() - self.last_seen > CLIENT_TIMEOUT
+                if not lost and not expired:
+                    if self.library_active and self.controller is not None:
+                        self.library_result = self.controller.action_task(
+                            dict(operation="status"), self.library_owner)
+                        if self.library_result["state"] in ("completed", "stopped", "error"):
+                            try:
+                                self._leave()
+                            except (OSError, RuntimeError) as error:
+                                self.error = f"动作完成后串口交接失败：{error}"
+                                logging.error("%s", self.error)
+                    continue
+                reason = "robotd 维护会话断开" if lost else "浏览器维护会话已过期"
+                try:
+                    if self.library_active:
+                        self.library_result = dict(state="error", frame=None, count=0, error=reason)
+                        self.library_active = False
+                    if lost:
+                        if self.controller is not None:
+                            self.controller.close()
+                            self.controller = None
+                        self._discard_lease(reason)
+                        self._sync_status()
+                    else:
+                        self._leave()
+                    self.error = reason
+                    logging.warning("%s；维护已停止", reason)
+                except (OSError, RuntimeError) as error:
+                    self.error = f"{reason}；串口交接失败：{error}"
+                    logging.error("%s", self.error)
+
+    def close(self):
+        self.stop.set()
+        self.watchdog.join(timeout=3)
+        with self.lock:
+            try:
+                self.status_viewers.clear()
+                self._stop_status()
+                if self.lease is not None:
+                    self._leave()
+            finally:
+                self.manual_page_guard.close()
+                self.observer.close()

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0e12" />
+    <meta name="color-scheme" content="dark" />
+    <title>WonderDuck Studio</title>
+  </head>
+  <body class="studio-shell">
+    <aside id="sidebar" class="sidebar" aria-label="设备控制侧栏">
+      <div class="brand" title="WonderDuck Studio"><span class="brand-mark"><i data-lucide="bot"></i></span><div class="brand-copy"><strong>WonderDuck</strong><span>Studio <small id="app-version"></small></span></div></div>
+      <div id="sidebar-content">
+        <nav class="workspace-nav" aria-label="控制台页面">
+          <button type="button" data-workspace="control" class="studio-only" title="运动控制" hidden><i data-lucide="gamepad-2"></i><span>运动控制</span></button>
+          <button type="button" data-workspace="target" class="studio-only" title="目标追踪" hidden><i data-lucide="crosshair"></i><span>目标追踪</span></button>
+          <button type="button" data-workspace="person" class="studio-only" title="行人跟随" hidden><i data-lucide="user-round-search"></i><span>行人跟随</span></button>
+          <button type="button" data-workspace="maze" class="studio-only" title="避障行走" hidden><i data-lucide="radar"></i><span>避障行走</span></button>
+          <button type="button" data-workspace="status" title="设备状态"><i data-lucide="activity"></i><span>设备状态</span></button>
+          <button type="button" data-workspace="action" class="active" aria-current="page" title="动作编辑"><i data-lucide="sliders-horizontal"></i><span>动作编辑</span></button>
+          <button type="button" data-workspace="debug" class="studio-only" title="舵机调试" hidden><i data-lucide="wrench"></i><span>舵机调试</span></button>
+          <button type="button" data-workspace="calibration" title="IMU 校准"><i data-lucide="gauge"></i><span>IMU 校准</span></button>
+          <button type="button" data-workspace="models" class="studio-only" title="模型管理" hidden><i data-lucide="files"></i><span>模型管理</span></button>
+          <button type="button" data-workspace="network" class="studio-only" title="网络管理" hidden><i data-lucide="wifi"></i><span>网络管理</span></button>
+          <button type="button" data-workspace="system" class="studio-only" title="系统设置" hidden><i data-lucide="settings"></i><span>系统设置</span></button>
+        </nav>
+      </div>
+      <div class="sidebar-footer">
+        <div class="sidebar-actions">
+          <button id="sidebar-release" class="sidebar-footer-button" type="button" title="关节卸力" aria-label="关节卸力" disabled><i data-lucide="power-off"></i><span>关节卸力</span></button>
+          <button id="sidebar-shutdown" class="sidebar-footer-button" type="button" title="关机" aria-label="关机" hidden disabled><i data-lucide="power"></i><span>关机</span></button>
+          <button id="sidebar-toggle" class="sidebar-footer-button" type="button" title="收起侧边栏" aria-label="收起侧边栏" aria-expanded="true" aria-controls="sidebar-content"><i data-lucide="panel-left-close"></i><span>收起</span></button>
+        </div>
+        <div id="sidebar-telemetry" class="sidebar-voltage" title="电池电压"><i id="sidebar-battery-icon" data-lucide="battery" aria-hidden="true"></i><i id="sidebar-sampling-icon" data-lucide="activity" aria-hidden="true" hidden></i><output id="sidebar-voltage" aria-label="电池电压">--</output></div>
+        <div id="device-connection" class="connection" role="status" aria-label="连接中" title="连接中"><span class="sidebar-device-icon" aria-hidden="true"><i data-lucide="bot"></i><span id="status-dot" class="dot"></span></span><span id="connection">连接中</span><span id="demo-badge" hidden>演示数据</span></div>
+        <div class="sidebar-meta"><span id="last-command" role="status" aria-live="polite">尚无操作</span></div>
+      </div>
+    </aside>
+    <div id="sidebar-scrim" hidden></div>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <main>
+      <iframe id="control-workspace" title="机器人操控" allow="microphone" hidden></iframe>
+      <section id="models-workspace" class="models-workspace" aria-label="模型管理" hidden>
+        <div class="models-heading"><h1>模型管理</h1></div>
+        <section class="models-section" aria-label="当前模型">
+          <div class="models-picker"><label class="models-select" for="models-select"><span>当前模型</span><select id="models-select" disabled><option>等待加载</option></select></label><button id="models-refresh" type="button"><i data-lucide="refresh-cw"></i><span>刷新</span></button></div>
+          <h2 class="models-details-heading">当前模型信息</h2>
+          <dl class="models-details">
+            <div class="models-full models-compact"><dt>加载状态</dt><dd id="models-loaded">--</dd></div>
+            <div class="models-full models-compact"><dt>与默认模型</dt><dd id="models-default">--</dd></div>
+            <div class="models-full"><dt>文件大小</dt><dd id="models-size">--</dd></div>
+            <div class="models-full"><dt>模型名称</dt><dd id="models-name">--</dd></div>
+            <div class="models-full models-wide"><dt>当前路径</dt><dd id="models-path">--</dd></div>
+            <div class="models-full models-wide"><dt>SHA-256</dt><dd id="models-sha256">--</dd></div>
+            <div id="models-error-row" class="models-full" hidden><dt>模型状态</dt><dd id="models-error"></dd></div>
+          </dl>
+          <h2 class="models-details-heading">默认模型信息</h2>
+          <dl class="models-details">
+            <div class="models-full"><dt>文件大小</dt><dd id="models-default-size">--</dd></div>
+            <div class="models-full"><dt>模型名称</dt><dd id="models-default-name">--</dd></div>
+            <div class="models-full models-wide"><dt>默认路径</dt><dd id="models-default-path">--</dd></div>
+            <div class="models-full models-wide"><dt>SHA-256</dt><dd id="models-default-sha256">--</dd></div>
+            <div id="models-default-error-row" class="models-full" hidden><dt>默认模型状态</dt><dd id="models-default-error"></dd></div>
+          </dl>
+        </section>
+        <section class="models-section" aria-label="离线更新">
+          <h2>离线更新</h2>
+          <div class="models-upload">
+            <input id="models-file" type="file" accept=".onnx" hidden>
+            <span id="models-filename">尚未选择文件</span>
+            <div class="models-actions"><button id="models-choose" type="button" disabled><i data-lucide="folder-open"></i>替换模型</button><button id="models-apply" class="primary models-primary" type="button" disabled>应用更新</button></div>
+          </div>
+        </section>
+        <section class="models-section" aria-label="在线更新">
+          <h2>在线更新</h2>
+          <div class="models-online-controls">
+            <button id="models-online-update" class="primary models-primary" type="button" disabled>同步更新</button>
+            <div id="models-online-progress" class="models-online-progress" hidden>
+              <div id="models-online-summary" role="status"></div>
+              <progress id="models-online-bar" max="6" value="0" aria-label="模型更新总体进度"></progress>
+            </div>
+          </div>
+          <p id="models-online-hint" class="models-online-hint" role="status"></p>
+          <dialog id="models-online-result" aria-labelledby="models-result-title">
+            <h2 id="models-result-title">模型更新结果</h2>
+            <ul id="models-result-items"></ul>
+            <form method="dialog"><button type="submit" class="primary">知道了</button></form>
+          </dialog>
+        </section>
+        <div class="models-restore"><button id="models-restore" type="button" disabled><i data-lucide="rotate-ccw"></i><span>恢复默认</span></button></div>
+      </section>
+      <section id="network-workspace" class="network-workspace" aria-label="网络管理" hidden>
+        <div class="network-heading"><h1>网络管理</h1></div>
+        <dl class="network-metrics" aria-label="当前网络状态">
+          <div><dt>当前模式</dt><dd id="network-mode">--</dd></div>
+          <div><dt>无线 IP</dt><dd id="network-wireless-ip">--</dd></div>
+          <div><dt>有线 IP</dt><dd id="network-wired-ip">--</dd></div>
+          <div><dt>无线频段</dt><dd id="network-band">--</dd></div>
+          <div><dt>蓝牙地址</dt><dd id="network-bluetooth-address">--</dd></div>
+        </dl>
+        <section class="network-section network-direct" aria-label="直连模式">
+          <div class="network-section-heading"><h2>直连模式</h2><span id="network-hotspot-state" class="muted">--</span></div>
+          <div class="network-direct-content">
+            <dl class="network-configuration"><div><dt>热点名称</dt><dd id="network-ap-name">--</dd></div><div><dt>热点密码</dt><dd>不可读取</dd></div></dl>
+            <button id="network-hotspot" class="primary network-action" type="button"><i data-lucide="radio"></i>启用设备热点</button>
+          </div>
+        </section>
+        <section class="network-section network-lan" aria-label="局域网模式">
+          <div class="network-section-heading"><h2>局域网模式</h2><span class="network-connected">当前网络 <strong id="network-current">--</strong></span></div>
+          <form id="network-connect-form" autocomplete="off">
+            <div class="network-form-fields">
+              <label class="network-field" for="network-ssid"><span>Wi-Fi 名称</span><input id="network-ssid" type="text" placeholder="输入或选择 Wi-Fi 名称" autocomplete="off" required></label>
+              <label class="network-field" for="network-password"><span>Wi-Fi 密码</span><span class="network-password-wrap"><input id="network-password" type="password" autocomplete="new-password"><button id="network-password-toggle" class="icon" type="button" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></span></label>
+            </div>
+            <div class="network-form-actions"><button id="network-connect" class="primary network-action" type="submit"><i data-lucide="wifi"></i>连接网络</button></div>
+          </form>
+          <div class="network-nearby" aria-label="附近 Wi-Fi">
+            <div class="network-section-heading"><h3>Wi-Fi 列表</h3><button id="network-scan" type="button" title="扫描附近 Wi-Fi"><i data-lucide="refresh-cw"></i><span>扫描</span></button></div>
+            <div id="network-list" class="network-list"></div>
+            <p id="network-empty" class="network-empty">尚无扫描结果</p>
+          </div>
+        </section>
+      </section>
+      <section id="monitor">
+        <div class="telemetry-layout">
+          <div class="viewer-section">
+            <div id="viewer">
+              <span id="model-loading">模型加载中</span>
+              <select id="model-palette" class="viewer-palette" aria-label="模型配色"><option value="white_orange">白橙</option><option value="yellow_black" selected>黄黑</option><option value="black_orange">黑橙</option><option value="navy">蓝黄</option></select>
+              <label class="torque-switch viewer-camera-switch" title="显示摄像头画面" hidden><span>摄像头</span><input id="camera-enabled" type="checkbox" role="switch" aria-label="显示摄像头画面" checked /></label>
+              <label class="torque-switch viewer-imu-switch" title="模型跟随 IMU 姿态"><span>IMU</span><input id="model-imu-follow" type="checkbox" role="switch" aria-label="模型跟随 IMU 姿态" /></label>
+              <label class="torque-switch viewer-reference-switch" title="显示参考姿态"><span>参考姿态</span><input id="reference-pose" type="checkbox" role="switch" aria-label="显示参考姿态" /></label>
+              <button id="reset-view" class="icon viewer-reset" title="复位视角" aria-label="复位视角"><i data-lucide="rotate-ccw"></i></button>
+              <div id="action-pose-views" hidden>
+                <section id="action-live-pane" class="action-pose-pane" aria-label="实时姿态"><strong>实时姿态</strong></section>
+                <section id="action-reference-pane" class="action-pose-pane" aria-label="参考姿态"><strong>参考姿态</strong></section>
+              </div>
+              <section id="camera-preview" class="camera-preview" aria-label="摄像头实时画面" hidden>
+                <video id="camera-video" autoplay muted playsinline aria-label="实时摄像头画面"></video>
+                <div class="camera-toolbar"><span>实时画面</span><button id="camera-expand" type="button" aria-label="摄像头全屏" aria-pressed="false" title="铺满3D视图区">全屏</button></div>
+                <div id="camera-status" class="camera-status" role="status">摄像头连接中</div>
+              </section>
+            </div>
+          </div>
+          <div id="action-workspace" class="inspection-section" data-workspace-panel="action">
+            <div class="inspection-layout">
+              <section class="servo-section" aria-label="舵机控制">
+                <div class="section-bar"><div class="servo-pose-actions" role="group" aria-label="舵机画布控制"><details class="servo-visibility"><summary title="显示舵机" aria-label="显示舵机"><i data-lucide="sliders-horizontal"></i></summary><div id="servo-visibility-list"></div></details><button id="servo-layout-lock" class="icon" type="button" title="解锁卡片布局" aria-label="锁定卡片布局" aria-pressed="true"><i class="layout-locked-icon" data-lucide="lock" aria-hidden="true"></i><i class="layout-unlocked-icon" data-lucide="lock-open" aria-hidden="true"></i></button><button id="servo-arrange" class="icon" title="自动排列卡片" aria-label="自动排列卡片"><i data-lucide="layout-grid"></i></button><button id="servo-default" class="icon" title="恢复默认布局" aria-label="恢复默认布局" disabled><i data-lucide="rotate-ccw"></i></button><button id="servo-restore" class="icon" title="撤销自动排列" aria-label="撤销自动排列" disabled><i data-lucide="undo-2"></i></button><label class="servo-scale"><input id="servo-scale" type="number" min="50" max="300" step="1" value="100" aria-label="舵机卡片大小百分比">%</label><label class="torque-switch servo-debug-switch"><span>调试模式</span><input id="servo-debug-mode" type="checkbox" role="switch" aria-label="舵机调试模式" disabled></label></div></div>
+                <div id="servo-rows" class="servo-rows" aria-label="舵机控制画布"><div id="servo-canvas" class="servo-canvas"></div></div>
+              </section>
+            </div>
+            <section id="action-editor" class="action-editor" aria-label="动作数据">
+              <div class="action-heading"><h2>动作数据</h2><span id="action-status" role="status">未播放</span></div>
+              <div class="action-table-wrap"><table id="action-table"><thead></thead><tbody></tbody></table><div id="action-empty" class="action-empty">暂无动作帧</div></div>
+              <div class="action-file-status">
+                <label class="action-file-name"><span>名称</span><input id="action-name" type="text" value="动作1" aria-label="动作组名称"></label>
+              </div>
+              <div class="action-controls">
+                <div class="action-timing" role="group" aria-label="动作时间">
+                  <div class="action-summary"><span>总帧数 <strong id="action-count">0</strong></span><span>总时间 <strong id="action-total">0.00 s</strong></span></div>
+                  <div class="action-timing-fields">
+                    <div class="timing-row"><label for="frame-duration">时长 (ms)</label><div class="action-stepper"><button type="button" data-step-target="frame-duration" data-step="-1" title="减少时长" aria-label="减少时长"><i data-lucide="minus"></i></button><input id="frame-duration" type="number" min="1" max="30000" step="1" value="1000"><button type="button" data-step-target="frame-duration" data-step="1" title="增加时长" aria-label="增加时长"><i data-lucide="plus"></i></button></div><label class="action-check"><input id="lock-duration" type="checkbox">锁定时长</label></div>
+                    <div class="timing-row"><label for="action-speed">速度 (%)</label><div class="action-stepper"><button type="button" data-step-target="action-speed" data-step="-1" title="降低速度" aria-label="降低速度"><i data-lucide="minus"></i></button><input id="action-speed" type="number" min="1" max="1000" step="1" value="100"><button type="button" data-step-target="action-speed" data-step="1" title="提高速度" aria-label="提高速度"><i data-lucide="plus"></i></button></div><label class="action-check"><input id="use-speed" type="checkbox">应用速度</label></div>
+                  </div>
+                  <div class="action-mirrors"><button id="frame-mirror" class="action-mirror" title="镜像选中帧"><i data-lucide="flip-horizontal-2"></i>镜像当前</button><button id="frames-mirror" class="action-mirror" title="镜像全部帧"><i data-lucide="flip-horizontal-2"></i>镜像全部</button></div>
+                </div>
+                <div class="action-frame-operations" role="group" aria-label="动作帧操作">
+                  <button id="release" class="danger" title="全部卸力"><i data-lucide="power-off"></i>全部卸力</button><button id="frame-add" title="将当前目标添加到末尾"><i data-lucide="plus"></i>添加</button><button id="frame-update" title="用当前目标更新选中帧"><i data-lucide="refresh-cw"></i>更新</button><button id="frame-up" title="上移选中帧" aria-label="上移选中帧"><i data-lucide="arrow-up"></i>上移</button>
+                  <button id="frame-read" title="回读当前位置并添加帧"><i data-lucide="download"></i>回读</button><button id="frame-delete" class="danger" title="删除选中帧"><i data-lucide="trash-2"></i>删除</button><button id="frame-insert" title="在选中帧后插入当前目标"><i data-lucide="list-plus"></i>插入</button><button id="frame-down" title="下移选中帧" aria-label="下移选中帧"><i data-lucide="arrow-down"></i>下移</button>
+                </div>
+                <div class="action-footer">
+                  <div class="action-group" role="group" aria-label="舵机偏差"><button id="offset-read"><i data-lucide="download"></i>读取偏差</button><button id="offset-save"><i data-lucide="save"></i>保存偏差</button><button id="offset-load"><i data-lucide="folder-open"></i>加载偏差</button><input id="offset-file" type="file" accept=".csv,text/csv" hidden></div>
+                  <div class="action-group" role="group" aria-label="动作播放"><div class="action-playback-row"><label class="action-loop" title="循环播放"><input id="action-loop" type="checkbox" role="switch" aria-label="循环播放"><span>循环</span></label><button id="action-run" class="primary" title="运行" aria-label="运行"><i data-lucide="play"></i><span>运行</span></button></div><button id="home-all" title="可见且未锁定的舵机回 Home 姿态" disabled><i data-lucide="house"></i>Home</button><button id="center-all" title="可见且未锁定的舵机回到 2048" disabled><i data-lucide="crosshair"></i>中位</button></div>
+                  <div class="action-group" role="group" aria-label="动作文件"><button id="action-open"><i data-lucide="folder-open"></i>打开动作</button><button id="action-save"><i data-lucide="save"></i>保存动作</button><button id="action-append"><i data-lucide="files"></i>串联动作</button></div>
+                  <div class="action-group" role="group" aria-label="动作组"><select id="action-groups" aria-label="动作组" title="动作组"><option value="">选择动作组</option></select><button id="groups-refresh" title="刷新动作组"><i data-lucide="refresh-cw"></i>刷新动作组</button><button id="group-run" class="primary"><i data-lucide="play"></i><span>运行动作组</span></button></div>
+                </div>
+              </div>
+            </section>
+          </div>
+          <section id="status-workspace" class="workspace-content" data-workspace-panel="status" hidden>
+            <div class="section-title status-heading"><h2>实时设备数据</h2></div>
+            <dl class="runtime-stats">
+              <div id="tof-reading" class="tof-reading" data-status="starting"><dt>TOF 距离</dt><dd><strong id="tof-distance">连接中</strong></dd></div>
+              <div><dt id="bus-rate-label">总线采集</dt><dd id="bus-rate">--</dd></div><div><dt id="failures-label">失败轮次</dt><dd id="failures">--</dd></div><div><dt>IMU</dt><dd id="pose-status">等待 IMU</dd></div>
+              <div class="studio-only" hidden><dt>电池电压</dt><dd id="runtime-battery">--</dd></div><div class="studio-only" hidden><dt>最高舵机温度</dt><dd id="runtime-motor">--</dd></div>
+              <div class="studio-only" hidden><dt>CPU 温度</dt><dd id="runtime-cpu">--</dd></div><div class="studio-only" hidden><dt>安全状态</dt><dd id="runtime-safety">--</dd></div>
+              <div><dt>存储占用</dt><dd id="runtime-storage" title="系统根分区已用 / 总量">--</dd></div><div><dt>内存占用</dt><dd id="runtime-memory" title="总内存减去可用内存 / 总量">--</dd></div>
+            </dl>
+            <section class="status-imu" aria-label="IMU 数据">
+              <div class="status-imu-layout">
+                <section class="imu-channel" aria-label="躯体 IMU 姿态">
+                  <div class="section-title"><h2>躯体 IMU 姿态</h2><span class="muted">机身坐标 · ° / rad/s</span></div>
+                  <div class="chart-section"><div class="chart-layout"><div class="chart-labels"><div class="curve-label c1"><span>X / Roll</span><output id="curve-roll">--</output></div><div class="curve-label c2"><span>Y / Pitch</span><output id="curve-pitch">--</output></div><div class="curve-label c3"><span>Z / Yaw</span><output id="curve-yaw">--</output></div></div><canvas id="chart" aria-label="躯体 IMU 三轴姿态角实时曲线"></canvas></div></div>
+                  <dl class="imu-readings"><div><dt>角速度 XYZ</dt><dd id="status-gyro">--</dd></div><div><dt>重力方向 XYZ</dt><dd id="status-gravity">--</dd></div><div><dt>四元数 WXYZ</dt><dd id="status-quaternion">--</dd></div></dl>
+                </section>
+                <section class="imu-channel" aria-label="头部 IMU 姿态">
+                  <div class="section-title"><h2>头部 IMU 姿态</h2><span id="aux-imu-caption" class="muted">I²C3 · 传感器坐标</span></div>
+                  <div class="chart-section"><div class="chart-layout"><div class="chart-labels"><div class="curve-label c1"><span>X / Roll</span><output id="aux-curve-roll">--</output></div><div class="curve-label c2"><span>Y / Pitch</span><output id="aux-curve-pitch">--</output></div><div class="curve-label c3"><span>Z / Yaw</span><output id="aux-curve-yaw">--</output></div></div><canvas id="aux-chart" aria-label="头部 IMU 三轴姿态角实时曲线"></canvas></div></div>
+                  <dl class="imu-readings"><div><dt>角速度 XYZ</dt><dd id="aux-gyro">--</dd></div><div><dt>重力方向 XYZ</dt><dd id="aux-gravity">--</dd></div><div><dt>四元数 WXYZ</dt><dd id="aux-quaternion">--</dd></div></dl>
+                </section>
+              </div>
+            </section>
+            <section class="status-servos"><div class="section-title"><h2>舵机状态</h2><span class="muted">实时反馈</span></div>
+              <div class="status-table-scroll"><table class="status-table"><thead><tr><th>舵机</th><th>编码器</th><th>角度</th><th>速度</th><th>负载</th><th>电压</th><th>温度</th><th>状态</th><th title="位置 P / I / D">位置 PID</th><th title="过温阈值">过温阈值</th><th title="最小启动力">最小启动力</th><th title="固件版本 / 舵机版本">固件/舵机版本</th></tr></thead><tbody id="status-servo-rows"></tbody></table></div>
+            </section>
+            <section id="imu-comparison" class="imu-comparison" aria-label="IMU 转换数据对比" hidden>
+          <div class="section-bar"><h2>转换后 IMU 数据</h2><span class="muted">机身坐标 · 角速度 rad/s · 重力方向单位向量</span></div>
+          <div class="imu-comparison-scroll"><table><thead><tr><th>来源</th><th>RPY °</th><th>角速度 XYZ</th><th>重力 XYZ</th><th>四元数 WXYZ</th><th>状态</th></tr></thead><tbody>
+            <tr><th>ID200</th><td id="compare-id200-rpy">--</td><td id="compare-id200-gyro">--</td><td id="compare-id200-gravity">--</td><td id="compare-id200-quaternion">--</td><td id="compare-id200-status">--</td></tr>
+            <tr><th>I2C5</th><td id="compare-i2c-rpy">--</td><td id="compare-i2c-gyro">--</td><td id="compare-i2c-gravity">--</td><td id="compare-i2c-quaternion">--</td><td id="compare-i2c-status">--</td></tr>
+          </tbody></table></div>
+          <p id="imu-compare-delta" role="status">等待两路有效数据</p>
+            </section>
+          </section>
+          <section id="debug-workspace" class="workspace-content" data-workspace-panel="debug" hidden>
+            <iframe id="debug-frame" title="舵机调试"></iframe>
+          </section>
+          <section id="calibration-workspace" class="workspace-content" data-workspace-panel="calibration" hidden>
+            <div class="workspace-heading"><div><h1>IMU 校准</h1></div></div>
+            <section class="calibration-panel" aria-label="IMU 标定">
+              <div class="calibration-source-row"><div class="calibration-source" role="group" aria-label="选择校准的 IMU"><button type="button" data-calibration-source="body" aria-pressed="true">躯体 IMU</button><button type="button" data-calibration-source="head" aria-pressed="false">头部 IMU</button></div></div>
+              <div class="calibration-primary"><div class="calibration-mode"><button id="calibration-accel" class="primary">加速度六面</button><button id="calibration-accel-default" title="恢复默认加速度标定">恢复默认</button></div><div class="calibration-mode"><button id="calibration-gyro" class="primary">陀螺仪静置</button><button id="calibration-gyro-default" title="恢复默认陀螺仪标定">恢复默认</button></div><button id="calibration-next" disabled>继续</button><button id="calibration-cancel" disabled>取消</button><span id="calibration-status" role="status">未开始</span><a id="calibration-download" href="/api/calibration/report" download hidden>下载记录</a></div>
+              <p id="calibration-profile-status" hidden></p><p id="calibration-faces"></p><p id="calibration-check"></p>
+              <details id="calibration-resume-options"><summary>续采 / 重采</summary><div class="calibration-resume"><input id="calibration-record" type="text" placeholder="已有记录路径" aria-label="已有加速度记录路径" /><select id="calibration-face" aria-label="重采面"><option value="">缺失面</option><option>+X</option><option>-X</option><option>+Y</option><option>-Y</option><option>+Z</option><option>-Z</option></select><button id="calibration-resume">开始</button></div></details>
+            </section>
+            <div class="calibration-charts">
+              <section class="sensor-chart"><div class="section-title"><h2>加速度实时</h2><span class="muted">g</span></div><div id="accel-series-legend" class="series-legend live-series-legend"><span data-series="raw">实线 原始</span><span data-series="corrected" hidden>实线 校准后</span></div><div id="accel-values" class="axis-legend"></div><canvas id="accel-chart" aria-label="加速度三轴原始与校准后实时曲线"></canvas></section>
+              <section class="sensor-chart"><div class="section-title"><h2>角速度实时</h2><span class="muted">rad/s</span></div><div id="gyro-series-legend" class="series-legend live-series-legend"><span data-series="raw">实线 原始</span><span data-series="corrected" hidden>实线 校准后</span></div><div id="gyro-values" class="axis-legend"></div><canvas id="gyro-chart" aria-label="角速度三轴原始与校准后实时曲线"></canvas></section>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <dialog id="action-select"><form method="dialog"><h2 id="action-select-title"></h2><label class="field">实机动作文件<select id="action-select-name" required><option value="">请选择动作</option></select></label><div class="dialog-actions"><button value="cancel" formnovalidate>取消</button><button id="action-select-confirm" value="ok" class="primary">确认</button></div></form></dialog>
+    <dialog id="confirm"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div class="dialog-actions"><button value="cancel">取消</button><button value="ok" class="primary">确认</button></div></form></dialog>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
