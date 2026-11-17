@@ -20,6 +20,7 @@ WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "control", "target", 
 MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "maze", "person", "target"))
 REST_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status",))
 CLIENT_TIMEOUT = 30
+UNCONFIRMED_RELEASE_WARNING = "卸力未确认，运动控制不可用；设备状态为只读"
 REST_INVALIDATING_ACTIONS = frozenset(("move", "move_direct", "write_register", "offset_direct",
                                        "center_all", "home_all", "run_targets"))
 
@@ -98,6 +99,7 @@ class StudioController:
         self.manual_guard_error = None
         self.rest_transition_client = None
         self.rest_unconfirmed = set()
+        self.unconfirmed_warnings = {}
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
         self.owner = None
@@ -131,6 +133,8 @@ class StudioController:
         return self.controller.calibration
 
     def _require(self, client, workspaces):
+        if client in self.rest_unconfirmed:
+            raise PermissionError("维护接管未确认，设备操作不可用")
         if not client or self.owner != client or self.workspace not in workspaces or self.controller is None:
             raise PermissionError("当前浏览器没有此工作区的维护控制权")
         if self.lease is None or not self.lease.alive():
@@ -149,6 +153,38 @@ class StudioController:
             elif path == "/api/head-imu/calibration":
                 self._require(client, {"calibration"})
 
+    def _switch_unconfirmed_workspace(self, client, workspace):
+        """Allow status observation without treating an unconfirmed release as safe."""
+        warning = self.unconfirmed_warnings.get(client, UNCONFIRMED_RELEASE_WARNING)
+        try:
+            # Keep the full movement block even on a different page. The
+            # release request may have failed before robotd could latch it.
+            self.manual_page_guard.ensure(client, status=True)
+        except (OSError, RuntimeError, ValueError):
+            if client in self.status_viewers:
+                self._set_status_viewer(client, False)
+            raise
+        self.client_workspaces[client] = (workspace, time.monotonic())
+        if workspace == "status" and self.controller is None and self.lease is None:
+            self._set_status_viewer(client, True)
+            return dict(workspace=workspace, maintenance=False, ready=True,
+                        release_unconfirmed=True, warning=warning)
+        if client in self.status_viewers:
+            self._set_status_viewer(client, False)
+        message = warning + ("；维护占用，设备状态采集暂停" if workspace == "status" else
+                             "；请重新点击页面重试")
+        return dict(workspace=workspace, maintenance=False, ready=False, error=message)
+
+    def _unconfirmed_fallback(self, client, workspace, warning):
+        self.rest_unconfirmed.add(client)
+        self.unconfirmed_warnings[client] = warning
+        try:
+            return self._switch_unconfirmed_workspace(client, workspace)
+        except (OSError, RuntimeError, ValueError) as error:
+            self.client_workspaces[client] = (workspace, time.monotonic())
+            return dict(workspace=workspace, maintenance=False, ready=False,
+                        error=f"{warning}；手动控制限制未确认：{error}")
+
     def switch(self, client, workspace):
         if not client or workspace not in WORKSPACES:
             raise ValueError("工作区无效")
@@ -158,12 +194,7 @@ class StudioController:
             if client in self.rest_unconfirmed:
                 # Permit navigation while keeping the manual guard. The daemon's
                 # emergency gate remains closed until a release is verified.
-                self.manual_page_guard.ensure(client, status=False)
-                if client in self.status_viewers:
-                    self._set_status_viewer(client, False)
-                self.client_workspaces[client] = (workspace, time.monotonic())
-                return dict(workspace=workspace, maintenance=False, ready=False,
-                            error="卸力未确认，请点击设备状态、动作编辑、舵机调试或 IMU 校准重试")
+                return self._switch_unconfirmed_workspace(client, workspace)
             previous = self.client_workspaces.get(client)
             previous_status_seen = self.status_viewers.get(client)
             previously_disabled = bool(previous and previous[0] in MANUAL_DISABLED_WORKSPACES)
@@ -173,7 +204,7 @@ class StudioController:
                     self.manual_page_guard.ensure(client)
                     if workspace == "status":
                         self.manual_page_guard.ensure(client, status=True)
-                    elif previous and previous[0] == "status":
+                    elif workspace != "status":
                         self.manual_page_guard.ensure(client, status=False)
                 result = self._switch_workspace(client, workspace)
             except BaseException:
@@ -185,7 +216,12 @@ class StudioController:
                     self.status_viewers.pop(client, None)
                 else:
                     self.status_viewers[client] = previous_status_seen
-                if previously_disabled:
+                if workspace in REST_WORKSPACES:
+                    # A failed handoff must not restore a motion-capable page
+                    # while the user is seeing the unavailable maintenance page.
+                    self.rest_unconfirmed.add(client)
+                    self.manual_page_guard.ensure(client, status=True)
+                elif previously_disabled:
                     self.manual_page_guard.ensure(client, status=previous[0] == "status")
                 else:
                     self.manual_page_guard.release(client)
@@ -207,18 +243,25 @@ class StudioController:
             if previous is not None and previous[0] == workspace and client not in self.rest_unconfirmed:
                 return self.switch(client, workspace)
             if self.owner not in (None, client):
-                raise PermissionError("另一浏览器正在使用维护工作区")
+                return self._unconfirmed_fallback(client, workspace, "另一浏览器正在使用维护工作区；设备操作不可用")
             if any(other != client and self.manual_page_guard.status_enabled(other)
                    for other in self.manual_page_guard.leases):
-                raise RuntimeError("其他页面正在采集设备状态，暂时无法休息")
+                return self._unconfirmed_fallback(client, workspace, "其他页面正在采集设备状态；维护接管暂不可用")
             previous_status_seen = self.status_viewers.get(client)
+            retry_unconfirmed = client in self.rest_unconfirmed
             self.rest_transition_client = client
             try:
                 if self.owner == client and (self.controller is not None or self.lease is not None):
                     self._leave()
                 if previous_status_seen is not None:
                     self._set_status_viewer(client, False)
-                self.manual_page_guard.ensure(client, status=False)
+                # Once release is unconfirmed, do not open a movement window
+                # while retrying it. Emergency release is a priority request
+                # and remains available with the status guard held.
+                self.manual_page_guard.ensure(client, status=retry_unconfirmed)
+            except (OSError, RuntimeError, PermissionError, ValueError) as error:
+                self.rest_transition_client = None
+                return self._unconfirmed_fallback(client, workspace, f"维护串口未安全交回：{error}；设备操作不可用")
             except BaseException:
                 self.rest_transition_client = None
                 if previous and previous[0] in MANUAL_DISABLED_WORKSPACES:
@@ -233,6 +276,8 @@ class StudioController:
             # snapshots and unrelated status requests must remain responsive.
             fallback = False
             try:
+                if retry_unconfirmed:
+                    raise RuntimeError("卸力尚未确认")
                 ensure_rest(self.path)
             except Exception as error:
                 logging.warning("休息未完成，准备关闭策略并卸力：%s", error)
@@ -243,29 +288,66 @@ class StudioController:
                     logging.error("%s", message)
                     with self.lock:
                         self.rest_transition_client = None
-                        self.rest_unconfirmed.add(client)
-                        self.client_workspaces[client] = (workspace, time.monotonic())
-                        try:
-                            self.manual_page_guard.ensure(client, status=workspace == "status")
-                        except (OSError, RuntimeError, ValueError) as guard_error:
-                            message += f"；手动控制限制未确认：{guard_error}"
-                    return dict(workspace=workspace, maintenance=False, ready=False, error=message)
+                        return self._unconfirmed_fallback(client, workspace, message)
                 fallback = True
             with self.lock:
                 self.rest_transition_client = None
-                self.rest_unconfirmed.discard(client)
-                result = self.switch(client, workspace)
+                # An unconfirmed release keeps the status guard active.  The
+                # maintenance lease needs that guard removed to acquire the
+                # bus, so overlap it with a separate movement block until the
+                # exclusive lease has actually taken over.
+                transition_guard = retry_unconfirmed and workspace in MAINTENANCE_WORKSPACES
+                try:
+                    if transition_guard:
+                        self.manual_page_guard.set_transition(client, True)
+                    self.rest_unconfirmed.discard(client)
+                    result = self.switch(client, workspace)
+                    if transition_guard:
+                        self.manual_page_guard.set_transition(client, False)
+                except Exception as error:
+                    warning = f"维护接管未完成：{error}；设备操作不可用"
+                    result = self._unconfirmed_fallback(client, workspace, warning)
+                    # If the final transition-unblock failed after acquiring
+                    # maintenance, restore a status guard before releasing the
+                    # lease.  Otherwise the failed cleanup would open a gap.
+                    if self.owner == client and (self.controller is not None or self.lease is not None):
+                        if self.manual_page_guard.status_enabled(client):
+                            try:
+                                self._leave()
+                            except (OSError, RuntimeError, PermissionError, ValueError) as leave_error:
+                                warning += f"；维护串口未安全交回：{leave_error}"
+                            result = self._unconfirmed_fallback(client, workspace, warning)
+                    # If the status guard cannot be restored, retain the
+                    # connection-bound transition guard for the next retry.
+                    if transition_guard and self.manual_page_guard.status_enabled(client):
+                        try:
+                            self.manual_page_guard.set_transition(client, False)
+                        except (OSError, RuntimeError, ValueError) as guard_error:
+                            logging.warning("Cannot release maintenance transition guard: %s", guard_error)
+                    return result
+                self.unconfirmed_warnings.pop(client, None)
                 if fallback:
                     result["rest_fallback"] = True
                 return result
         except BaseException:
             with self.lock:
                 self.rest_transition_client = None
-                if previous and previous[0] in MANUAL_DISABLED_WORKSPACES:
+                if retry_unconfirmed:
+                    # Interruption must never release the last movement block
+                    # while the maintenance handoff is still in progress.
+                    self.rest_unconfirmed.add(client)
+                    self.client_workspaces[client] = (workspace, time.monotonic())
+                    try:
+                        self.manual_page_guard.ensure(client, status=True)
+                        if workspace in MAINTENANCE_WORKSPACES:
+                            self.manual_page_guard.set_transition(client, False)
+                    except (OSError, RuntimeError, ValueError) as guard_error:
+                        logging.error("Cannot restore interrupted maintenance guard: %s", guard_error)
+                elif previous and previous[0] in MANUAL_DISABLED_WORKSPACES:
                     self.manual_page_guard.ensure(client, status=previous[0] == "status")
                 else:
                     self.manual_page_guard.release(client)
-                if previous_status_seen is not None:
+                if previous_status_seen is not None and not retry_unconfirmed:
                     self._set_status_viewer(client, True)
             raise
 
@@ -364,7 +446,10 @@ class StudioController:
             self.observer.set_stream_suspended(False)
 
     def _sync_status(self):
-        enabled = bool(self.status_viewers) and self.lease is None and self.controller is None
+        # Never keep a device subscription after its connection-bound status
+        # guard has disappeared; the daemon may otherwise resume normal reads.
+        enabled = (self.lease is None and self.controller is None
+                   and any(self.manual_page_guard.status_enabled(client) for client in self.status_viewers))
         self.observer.set_devices_enabled(enabled)
         if enabled:
             self.observer.set_stream_suspended(False)
@@ -379,6 +464,16 @@ class StudioController:
             workspace, _ = entry
             self.client_workspaces[client] = (workspace, time.monotonic())
             if client in self.rest_unconfirmed:
+                if workspace == "status":
+                    # Re-establish the connection-bound guard before subscribing
+                    # after a disconnect; a status view never owns maintenance.
+                    try:
+                        self.manual_page_guard.ensure(client, status=True)
+                    except (OSError, RuntimeError, ValueError):
+                        if client in self.status_viewers:
+                            self._set_status_viewer(client, False)
+                        raise
+                    self._set_status_viewer(client, visible)
                 return
             self._set_status_viewer(client, visible and workspace == "status")
 
@@ -685,11 +780,14 @@ class StudioController:
                 self.client_workspaces = {client: entry for client, entry in self.client_workspaces.items()
                                           if client == self.rest_transition_client or now - entry[1] <= CLIENT_TIMEOUT}
                 self.rest_unconfirmed.intersection_update(self.client_workspaces)
+                self.unconfirmed_warnings = {client: warning for client, warning in self.unconfirmed_warnings.items()
+                                             if client in self.rest_unconfirmed}
                 for client in list(self.manual_page_guard.leases):
                     if client == self.rest_transition_client:
                         continue
                     entry = self.client_workspaces.get(client)
-                    if entry is None or entry[0] not in MANUAL_DISABLED_WORKSPACES:
+                    if entry is None or (entry[0] not in MANUAL_DISABLED_WORKSPACES
+                                         and client not in self.rest_unconfirmed):
                         try:
                             self.manual_page_guard.release(client)
                         except (OSError, ValueError, RuntimeError) as error:
@@ -697,16 +795,21 @@ class StudioController:
                 for client, (workspace, _) in self.client_workspaces.items():
                     if client == self.rest_transition_client:
                         continue
-                    if workspace not in MANUAL_DISABLED_WORKSPACES:
+                    if workspace not in MANUAL_DISABLED_WORKSPACES and client not in self.rest_unconfirmed:
                         continue
                     try:
-                        self.manual_page_guard.ensure(client, status=workspace == "status")
+                        self.manual_page_guard.ensure(client, status=workspace == "status" or client in self.rest_unconfirmed)
                         self.manual_guard_error = None
                     except (OSError, ValueError, RuntimeError) as error:
                         message = str(error)
                         if self.manual_guard_error != message:
                             logging.warning("Cannot restore manual control restriction: %s", error)
                             self.manual_guard_error = message
+                        if workspace == "status" and client in self.status_viewers:
+                            try:
+                                self._set_status_viewer(client, False)
+                            except (OSError, ValueError, RuntimeError) as status_error:
+                                logging.error("Cannot stop unguarded status subscription: %s", status_error)
                 if self.lease is None:
                     continue
                 lost = not self.lease.alive()

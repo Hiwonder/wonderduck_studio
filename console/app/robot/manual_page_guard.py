@@ -13,6 +13,7 @@ class _PageLease:
         self.stream = None
         self.next_id = 0
         self.status_enabled = False
+        self.transition_enabled = False
         try:
             self.connection.connect(str(path))
             self.stream = self.connection.makefile("rwb")
@@ -53,8 +54,20 @@ class _PageLease:
 
     def set_status(self, enabled):
         if self.status_enabled != enabled:
-            self._request("block_status" if enabled else "unblock_status")
+            try:
+                self._request("block_status" if enabled else "unblock_status")
+            except BaseException:
+                # The request may have reached robotd even if its reply was
+                # lost.  Reassert the desired state rather than trusting the
+                # last acknowledged value on a later retry.
+                self.status_enabled = None
+                raise
             self.status_enabled = enabled
+
+    def set_transition(self, enabled):
+        if self.transition_enabled != enabled:
+            self._request("block_maintenance_transition" if enabled else "unblock_maintenance_transition")
+            self.transition_enabled = enabled
 
     def close(self):
         if self.stream is not None:
@@ -80,7 +93,15 @@ class ManualPageGuard:
 
     def status_enabled(self, client):
         lease = self.leases.get(client)
-        return lease is not None and lease.status_enabled
+        return lease is not None and lease.status_enabled and lease.alive()
+
+    def set_transition(self, client, enabled):
+        # Reuse the status guard's connection.  Creating a fresh lease here
+        # could lose protection between the two guards if that connection died.
+        lease = self.leases.get(client)
+        if lease is None or not lease.alive():
+            raise ConnectionError("机器人维护交接保护连接已断开")
+        lease.set_transition(enabled)
 
     def ensure(self, client, status=None):
         previous = self.leases.get(client)
@@ -95,8 +116,25 @@ class ManualPageGuard:
             try:
                 lease.set_status(status)
             except BaseException:
-                self.leases.pop(client, None)
-                lease.close()
+                if lease.transition_enabled and lease.alive():
+                    if status is True:
+                        # The old stream may be unusable after a timeout. Keep
+                        # its transition block until a fresh connection has
+                        # confirmed a replacement status block.
+                        replacement = None
+                        try:
+                            replacement = _PageLease(self.path)
+                            replacement.set_status(True)
+                        except (OSError, RuntimeError, ValueError):
+                            if replacement is not None:
+                                replacement.close()
+                        else:
+                            self.leases[client] = replacement
+                            lease.close()
+                            return
+                else:
+                    self.leases.pop(client, None)
+                    lease.close()
                 raise
 
     def release(self, client):

@@ -16,6 +16,9 @@ import { createServoControls } from '../servo-controls.js';
 import { createReleaseConfirmation } from '../release-confirm.js';
 
 const $ = (id) => document.getElementById(id);
+// The parent may show this page before it has a safe maintenance lease.
+// In preview mode no arm or register-read request should reach the robot.
+const previewOnly = new URLSearchParams(location.search).get('preview') === '1';
 const confirmRelease = createReleaseConfirmation();
 const client = sessionStorage.getItem('console-client') || crypto.randomUUID?.() || `client-${Date.now()}-${Math.random()}`;
 sessionStorage.setItem('console-client', client);
@@ -136,6 +139,7 @@ async function request(path, body) {
     }
     throw Object.assign(new Error(data.error || `HTTP ${response.status}`), { status: response.status });
   }
+  if (previewOnly && path === 'info') data.readonly = true;
   return data;
 }
 
@@ -552,6 +556,13 @@ function queueParameterRead(delay = 120) {
 
 async function readParameters() {
   clearTimeout(parameterReadTimer);
+  if (previewOnly) {
+    parameters = null;
+    parameterId = null;
+    renderParameters('维护未就绪，参数不可用');
+    updateParameterEditor();
+    return;
+  }
   parameterReadPending = true;
   if (parameterReadBusy || busy || scanBusy || parameterWriteBusy) return;
   const id = selected, revision = parameterRevision;

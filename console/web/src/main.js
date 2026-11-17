@@ -302,6 +302,7 @@ const resumePages = new Set(['status', 'action', 'debug', ...restrictedPages]);
 let switchingWorkspace = false;
 let pendingWorkspaceResume = false, workspaceRestoreInFlight = false;
 let workspaceRetryRequired = false;
+let statusReleaseUnconfirmed = false;
 let queuedWorkspace = null, workspaceQueueTimer = null;
 
 function restoreWorkspaceOnVisible() {
@@ -328,6 +329,9 @@ function restoreWorkspaceOnVisible() {
     }
     restored = true;
     document.body.dataset.studioReady = 'true';
+    statusReleaseUnconfirmed = target === 'status' && result?.release_unconfirmed === true;
+    const warning = statusReleaseUnconfirmed ? (result.warning || '卸力未确认，运动控制不可用；设备状态为只读') : '';
+    previewWorkspace(target, warning, true);
     if (frame) frame.inert = false;
     if (target === 'debug') notifyFrames('studio-workspace', { page: target });
     updateControls();
@@ -614,6 +618,18 @@ function clearDebugFrame() {
   if (frame.getAttribute('src') !== 'about:blank') frame.src = 'about:blank';
 }
 
+function previewDebugFrame() {
+  const frame = $('debug-frame');
+  loadWorkspaceFrame(frame, '/debug.html?preview=1').then(() => {
+    if (workspace === 'debug' && workspaceRetryRequired && !document.body.dataset.studioReady
+        && frame.getAttribute('src') === '/debug.html?preview=1') {
+      frame.classList.remove('frame-clearing');
+      notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
+      notifyFrames('studio-workspace', { page: 'debug' });
+    }
+  }).catch(error => console.debug('舵机调试预览不可用', error.message));
+}
+
 function previewWorkspace(page, message, ready = false) {
   document.body.dataset.workspace = page;
   for (const choice of document.querySelectorAll('button[data-workspace]')) {
@@ -658,17 +674,19 @@ function queueWorkspace(page) {
 
 async function selectWorkspace(next) {
   if (switchingWorkspace || servoDebugMode.busy() || controlActionStarting) { queueWorkspace(next); return; }
-  if (next === workspace && (!info?.studio || document.body.dataset.studioReady)) return;
+  if (next === workspace && (!info?.studio || document.body.dataset.studioReady) && !statusReleaseUnconfirmed) return;
   switchingWorkspace = true;
   sidebarTransitionPending = !!state && state.online && stateFresh();
   servoDebugMode.update();
   const previous = workspace;
   const wasReady = !!document.body.dataset.studioReady;
-  const restBefore = !!info?.studio && restBeforeWorkspace.has(next) && (previous !== next || !wasReady);
+  const restBefore = !!info?.studio && restBeforeWorkspace.has(next) &&
+    (previous !== next || !wasReady || statusReleaseUnconfirmed);
   if (previous !== next) advanceHeadSubscription();
   const pauseCalibration = previous === 'calibration' && previous !== next;
   if (pauseCalibration) calibrationCharts.setActive(false);
   let restFallback = false;
+  let statusWarning = '';
   if (info?.studio) {
     delete document.body.dataset.studioReady;
     controlGeneration++;
@@ -696,11 +714,15 @@ async function selectWorkspace(next) {
       if (result?.ready === false) throw new Error(result.error || '设备操作尚未就绪');
       if (next === 'status' && result?.ready !== true) throw new Error(result?.error || '设备状态采集尚未就绪');
       if (maintenancePages.has(next) && result?.maintenance !== true) throw new Error(result?.error || '维护工作区尚未就绪');
+      if (next === 'status' && result?.release_unconfirmed === true) {
+        statusWarning = result.warning || '卸力未确认，运动控制不可用；设备状态为只读';
+      }
       info = await request('info');
       token = info.token;
     }
     if (queuedWorkspace && queuedWorkspace !== next) {
       workspace = next;
+      statusReleaseUnconfirmed = !!statusWarning;
       workspaceRetryRequired = false;
       return;
     }
@@ -712,15 +734,17 @@ async function selectWorkspace(next) {
       url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=0`; url.hash = '';
       await loadWorkspaceFrame(control, url.href);
     }
-    if (next === 'debug' && (previous !== 'debug' || !$('debug-frame').src || $('debug-frame').src === 'about:blank')) {
+    if (next === 'debug' && (previous !== 'debug' || !$('debug-frame').src || $('debug-frame').src === 'about:blank'
+        || $('debug-frame').getAttribute('src')?.includes('preview=1'))) {
       await loadWorkspaceFrame($('debug-frame'), '/debug.html');
       $('debug-frame').classList.remove('frame-clearing');
     }
     workspace = next;
+    statusReleaseUnconfirmed = !!statusWarning;
     document.body.dataset.studioReady = 'true';
-    previewWorkspace(workspace, '', true);
+    previewWorkspace(workspace, statusWarning, true);
     if (restFallback) toast('休息未完成，已关闭策略并卸力');
-    else if (restBefore) toast('页面已就绪', false, { routine: true });
+    else if (restBefore && !statusWarning) toast('页面已就绪', false, { routine: true });
     workspaceRetryRequired = false;
     control.hidden = !controlPages.has(workspace);
     $('monitor').hidden = controlPages.has(workspace) || workspace === 'network' || workspace === 'models';
@@ -759,12 +783,14 @@ async function selectWorkspace(next) {
     if (next === 'debug' || previous === 'debug') clearDebugFrame();
     if (controlPages.has(next) && !controlPages.has(previous)) $('control-workspace').src = 'about:blank';
     workspace = next;
+    statusReleaseUnconfirmed = false;
     delete document.body.dataset.studioReady;
     workspaceRetryRequired = true;
     setArmed(false);
     if (queuedWorkspace && queuedWorkspace !== next) return;
     if (queuedWorkspace === next) queuedWorkspace = null;
     previewWorkspace(workspace, message);
+    if (workspace === 'debug') previewDebugFrame();
     networkControls.setActive(false);
     modelControls.setActive(false);
     cameraPreview?.stop();
