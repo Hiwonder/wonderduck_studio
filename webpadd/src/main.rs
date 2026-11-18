@@ -446,8 +446,7 @@ async fn main() -> ExitCode {
         std::env::var_os("WONDERDUCK_TARGET_VISION_RECORD").map(PathBuf::from)));
     control.target_vision_record = colors.recorder();
     let voice = Arc::new(voice::VoicePlayer::new(params.audio.device.clone(), params.audio.player.clone()));
-    let recording_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        .join("records/audio/system-test");
+    let recording_dir = audio_record::recording_directory();
     let recorder = Arc::new(audio_record::Recorder::new(params.audio.capture_device(), Arc::clone(&voice), recording_dir));
     let state = AppState {
         socket: args.socket.clone(),

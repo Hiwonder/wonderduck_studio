@@ -13,6 +13,39 @@ use serde::{Deserialize, Serialize};
 use super::{voice, AppState};
 
 const MAX_SECONDS: u64 = 120;
+static NEXT_PROBE: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn recording_directory() -> PathBuf {
+    if let Some(directory) = std::env::var_os("WONDERDUCK_AUDIO_RECORD_DIR") {
+        let directory = PathBuf::from(directory);
+        if directory.is_absolute() { return directory; }
+        tracing::warn!(path = %directory.display(), "ignoring relative recording directory");
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        .join("records/audio/system-test")
+}
+
+fn storage_error(context: &str, error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(libc::EROFS) => "录音存储位置为只读，请检查存储卡或服务设置".into(),
+        Some(libc::ENOSPC) => "存储空间不足，无法保存录音".into(),
+        _ if error.kind() == std::io::ErrorKind::PermissionDenied =>
+            "录音存储权限不足，请检查服务设置".into(),
+        _ => format!("{context}：{error}"),
+    }
+}
+
+fn prepare_directory(directory: &Path) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| storage_error("无法创建录音目录", &error))?;
+    // Check an existing directory too: mkdir succeeds on a read-only filesystem
+    // if the directory is already there. Do this before capturing any audio.
+    let probe = directory.join(format!(".recording-check-{}-{}", std::process::id(),
+        NEXT_PROBE.fetch_add(1, Ordering::Relaxed)));
+    let file = OpenOptions::new().write(true).create_new(true).open(&probe)
+        .map_err(|error| storage_error("无法写入录音目录", &error))?;
+    drop(file);
+    fs::remove_file(&probe).map_err(|error| storage_error("无法清理录音目录", &error))
+}
 
 struct Capture {
     child: Child,
@@ -85,6 +118,7 @@ impl Recorder {
         if matches!(state.phase, Phase::Recording(_) | Phase::Saving | Phase::Playing) {
             return Err("录音或播放正在进行".into());
         }
+        prepare_directory(&self.directory)?;
         let samples = voice::memory_file(&[]).map_err(|error| format!("无法准备录音：{error}"))?;
         let diagnostics = voice::memory_file(&[]).map_err(|error| format!("无法准备录音：{error}"))?;
         let child = Command::new(&self.capture_program)
@@ -213,13 +247,13 @@ fn finish(mut capture: Capture, status: Result<ExitStatus, std::io::Error>, dire
     let length = u32::try_from(aligned).ok().filter(|length| *length <= u32::MAX - 36)
         .ok_or_else(|| "录音过大，无法保存".to_owned())?;
     capture.samples.set_len(aligned).map_err(|error| format!("无法整理录音：{error}"))?;
-    fs::create_dir_all(directory).map_err(|error| format!("无法创建录音目录：{error}"))?;
+    fs::create_dir_all(directory).map_err(|error| storage_error("无法创建录音目录", &error))?;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| format!("系统时间异常：{error}"))?.as_nanos();
     let path = directory.join(format!("record-{stamp:020}-{}-{}.wav", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let temporary = path.with_extension("wav.part");
     let mut output = OpenOptions::new().write(true).create_new(true).open(&temporary)
-        .map_err(|error| format!("无法创建录音文件：{error}"))?;
+        .map_err(|error| storage_error("无法创建录音文件", &error))?;
     let result = (|| -> std::io::Result<()> {
         output.write_all(b"RIFF")?;
         output.write_all(&(36 + length).to_le_bytes())?;
@@ -243,7 +277,7 @@ fn finish(mut capture: Capture, status: Result<ExitStatus, std::io::Error>, dire
         tracing::warn!(path = %temporary.display(), %error, "cannot remove temporary recording");
     }
     if let Err(error) = result {
-        return Err(format!("保存录音失败：{error}"));
+        return Err(storage_error("保存录音失败", &error));
     }
     Ok((path, capture.samples))
 }

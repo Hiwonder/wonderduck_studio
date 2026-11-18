@@ -41,3 +41,5 @@ Environment=RUST_LOG=info
 StandardOutput=journal
 StandardError=journal
 RuntimeDirectory=webpadd
+StateDirectory=webpadd
+Environment=WONDERDUCK_AUDIO_RECORD_DIR=/var/lib/webpadd/records/audio/system-test
