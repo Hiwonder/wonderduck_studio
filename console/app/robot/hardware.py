@@ -162,15 +162,17 @@ class Hardware(ServoLayout):
                     self.offset_lock_cache[device_id] = data[55 - address:56 - address]
                 return data
 
-    def sync_read(self, ids, address, length):
-        blocks, errors, statuses = {}, {}, {}
-        for code, group in self.baud_groups(ids):
-            self.select_baud(code)
-            values, failures, replies = self.exchange(packet(254, 0x82, (address, length, *group)), group, length)
+    def individual_read(self, ids, address, length):
+        blocks, errors, statuses, observed = {}, {}, {}, {}
+        for device_id in ids:
+            self.select_baud(self.baud_codes.get(device_id, 0))
+            values, failures, replies = self.exchange(
+                self.live.make_read(device_id, address, length), (device_id,), length)
+            observed[device_id] = time.monotonic()
             blocks.update(values)
             errors.update(failures)
             statuses.update(replies)
-        return blocks, errors, statuses
+        return blocks, errors, statuses, observed
 
     def baud_groups(self, ids, maximum=251):
         groups = {}
@@ -238,8 +240,8 @@ class Hardware(ServoLayout):
         read_id200 = imu_source in ("id200", "compare")
         read_i2c = imu_source in ("i2c", "compare")
         ids = ((200,) if read_id200 else ()) + tuple(self.ids)
-        blocks, errors, statuses = self.sync_read(ids, 56, 12)
-        id200_read_at = time.monotonic()
+        blocks, errors, statuses, observed = self.individual_read(ids, 56, 12)
+        id200_read_at = observed.get(200)
         replies = dict(statuses)
         now = time.monotonic()
         if read_id200 and now - self.diagnostic_time >= 1:
@@ -255,7 +257,7 @@ class Hardware(ServoLayout):
                 self.diagnostic = None
                 self.diagnostic_time = time.monotonic()
         if now - self.torque_time >= 1:
-            torque, _, torque_statuses = self.sync_read(self.ids, 40, 1)
+            torque, _, torque_statuses, _ = self.individual_read(self.ids, 40, 1)
             self.torque = {i: b[0] for i, b in torque.items()}
             for device_id, status in torque_statuses.items():
                 replies[device_id] = replies.get(device_id, 0) | status
@@ -308,8 +310,8 @@ class Hardware(ServoLayout):
                         packet_status=statuses.get(device_id), register_status=register_status,
                         faults=servo_faults(status or 0), error=errors.get(device_id),
                         torque=self.torque.get(device_id),
-                        sampled_monotonic=id200_read_at if device_id in blocks else None,
-                        observed_monotonic=id200_read_at)
+                        sampled_monotonic=observed.get(device_id) if device_id in blocks else None,
+                        observed_monotonic=observed.get(device_id))
             if device_id in blocks:
                 raw, speed, load, voltage, temperature = struct.unpack_from("<HHHBB", blocks[device_id])
                 item.update(raw=raw, speed_rad_s=-self.live.signed_magnitude(speed, 15) * 2 * math.pi / 4096,

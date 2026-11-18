@@ -87,7 +87,7 @@
         <div class="chart-section"><div class="chart-layout"><div class="chart-labels"><div class="curve-label c1"><span>X / Roll</span><output id="curve-roll">--</output></div><div class="curve-label c2"><span>Y / Pitch</span><output id="curve-pitch">--</output></div><div class="curve-label c3"><span>Z / Yaw</span><output id="curve-yaw">--</output></div></div><canvas id="chart" aria-label="IMU 三轴姿态角实时曲线"></canvas></div></div>
       </section>
     </main>
-    <div id="toast" role="status" hidden></div>
+    <div id="toast" role="status" hidden><span id="toast-message"></span><button id="toast-close" type="button" aria-label="关闭提示">×</button></div>
     <dialog id="confirm"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div class="dialog-actions"><button value="cancel">取消</button><button value="ok" class="primary">确认</button></div></form></dialog>
     <script type="module" src="/src/debug/main.js"></script>
   </body>

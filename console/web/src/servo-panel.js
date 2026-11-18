@@ -1,6 +1,6 @@
 import { createLiveTarget } from './live-target.js';
 import { createLiveParameter } from './live-parameter.js';
-import { servoStatus } from './state-status.js';
+import { SERVO_STATUS_MAX_AGE_MS, servoStatus } from './state-status.js';
 import { createServoLayout } from './servo-layout.js';
 import { createSliderTrack } from './slider-track.js';
 import defaultServoLayout from './default-servo-layout.json';
@@ -326,7 +326,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       row.lock.disabled = row.visibility.disabled = !!operation || playbackPending || playbackActive;
       const current = servo(id);
       const presentation = holdPresentation && row.lastPresentation
-        ? row.lastPresentation : servoStatus(current, state, elapsed, connectionError);
+        ? row.lastPresentation : servoStatus(current, state, elapsed, connectionError, SERVO_STATUS_MAX_AGE_MS);
       if (!holdPresentation) row.lastPresentation = presentation;
       if (!targets.has(id) && Number.isInteger(state?.pose_targets?.[id])) targets.set(id, state.pose_targets[id]);
       const target = targets.get(id) ?? (presentation.valid ? current.raw : null);

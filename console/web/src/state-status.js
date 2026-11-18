@@ -1,13 +1,16 @@
 export const SAMPLE_MAX_AGE_MS = 500;
+// Individual bus scans can take longer when a device times out; IMU and
+// control-frame freshness retain their shorter limit.
+export const SERVO_STATUS_MAX_AGE_MS = 3000;
 
 export function sampleFresh(state, elapsed = 0, connectionError = '') {
   return !connectionError && !!state?.online && Number.isFinite(state.age_ms) &&
     state.age_ms >= 0 && state.age_ms + Math.max(0, elapsed) < SAMPLE_MAX_AGE_MS;
 }
 
-export function deviceFresh(device, state, elapsed = 0, connectionError = '') {
+export function deviceFresh(device, state, elapsed = 0, connectionError = '', maxAgeMs = SAMPLE_MAX_AGE_MS) {
   return !connectionError && !!state?.online && !!device?.valid && Number.isFinite(device.age_ms) &&
-    device.age_ms >= 0 && device.age_ms + Math.max(0, elapsed) < SAMPLE_MAX_AGE_MS;
+    device.age_ms >= 0 && device.age_ms + Math.max(0, elapsed) < maxAgeMs;
 }
 
 export function auxImuStatus(imu, elapsed = 0, connectionError = '') {
@@ -63,8 +66,8 @@ export function tofStatus(tof, elapsed = 0, connectionError = '', studio = false
   return result(known ? tof.status : 'invalid_data', label, tof.error || label);
 }
 
-export function servoStatus(servo, state, elapsed = 0, connectionError = '') {
-  const fresh = deviceFresh(servo, state, elapsed, connectionError);
+export function servoStatus(servo, state, elapsed = 0, connectionError = '', maxAgeMs = SAMPLE_MAX_AGE_MS) {
+  const fresh = deviceFresh(servo, state, elapsed, connectionError, maxAgeMs);
   const valid = !state?.device_paused && fresh && servo?.online !== false;
   const result = (kind, label, title) => ({ kind, label, title, valid, fresh });
   if (connectionError) return result('connection', '连接中断', connectionError);
@@ -73,9 +76,9 @@ export function servoStatus(servo, state, elapsed = 0, connectionError = '') {
   if (!servo) return result('invalid', '数据异常', '本次采集没有该舵机的状态');
   const observationAge = servo.observation_age_ms;
   if (!Number.isFinite(observationAge)) return result('waiting', '等待采集', servo.error || '尚未读取该舵机');
-  if (observationAge < 0 || observationAge + Math.max(0, elapsed) >= SAMPLE_MAX_AGE_MS) {
+  if (observationAge < 0 || observationAge + Math.max(0, elapsed) >= maxAgeMs) {
     const label = servo.valid ? '数据过期' : /超时|timeout/i.test(servo.error || '') ? '读取超时（已过期）' : '读取失败（已过期）';
-    return result('stale', label, ['该舵机的读取结果已超过 500 ms', servo.error].filter(Boolean).join('；'));
+    return result('stale', label, [`该舵机的读取结果已超过 ${maxAgeMs} ms`, servo.error].filter(Boolean).join('；'));
   }
   if (servo.online === false) {
     return /校验|帧长度/.test(servo.error || '')
@@ -83,7 +86,7 @@ export function servoStatus(servo, state, elapsed = 0, connectionError = '') {
       : result('offline', /超时|timeout/i.test(servo.error || '') ? '读取超时' : '读取失败',
         servo.error || '本次读取未收到舵机回复');
   }
-  if (servo.valid && !fresh) return result('stale', '数据过期', '该舵机的采样数据已超过 500 ms');
+  if (servo.valid && !fresh) return result('stale', '数据过期', `该舵机的采样数据已超过 ${maxAgeMs} ms`);
   const torque = ({ 0: '关闭', 1: '开启', 128: '校准' })[servo.torque] || '--';
   const details = [`在线；扭矩寄存器：${torque}`];
   if (fresh) details.push(`采样年龄 ${Math.round(servo.age_ms + Math.max(0, elapsed))} ms`);

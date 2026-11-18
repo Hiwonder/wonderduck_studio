@@ -28,7 +28,7 @@ from app.robot.robotd_state import query_robotd
 from app.sensors.camera import Camera
 from app.sensors.qmi_imu import AuxiliaryImu
 from app.sensors.tof import TofReader
-from app.system import network, resources
+from app.system import network, resources, service_control
 from app.system.runtime_config import robot_root
 from app.system.secure_transport import SecureTransport
 
@@ -188,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
                                 demo=self.controller.demo, hz=self.controller.hz,
                                 imu_source=self.controller.imu_source, readonly=readonly, device_versions=versions,
                                 studio=getattr(self.server, "studio", False),
+                                supports_service_restart=(getattr(self.server, "studio", False)
+                                    and not self.controller.demo),
                                 supports_shutdown=(getattr(self.server, "studio", False)
                                     and not self.controller.demo and hasattr(self.controller, "shutdown")),
                                 supports_online_models=getattr(self.server, "online_model_updater", None) is not None,
@@ -386,6 +388,11 @@ class Handler(BaseHTTPRequestHandler):
                         or not hasattr(self.controller, "shutdown")):
                     raise PermissionError("当前服务不提供关机操作")
                 self.send_json(self.controller.shutdown(self.client))
+                return
+            if path == "/api/service/restart":
+                if not getattr(self.server, "studio", False) or self.controller.demo:
+                    raise PermissionError("当前服务不提供重启操作")
+                self.send_json(service_control.restart_robotd())
                 return
             if path == "/api/control-actions":
                 if not getattr(self.server, "studio", False) or not hasattr(self.controller, "start_library_action"):

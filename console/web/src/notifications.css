@@ -5,8 +5,23 @@ body #toast {
   transform: translate(-50%, -50%);
   max-height: calc(100dvh - 32px);
   overflow: auto;
-  pointer-events: none;
+  pointer-events: auto;
   text-align: center;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#toast-close, #workspace-notice-close {
+  flex: none;
+  min-height: 24px;
+  width: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 20px;
+  line-height: 1;
 }
 
 body.studio-shell { --notification-sidebar-width: 176px; }

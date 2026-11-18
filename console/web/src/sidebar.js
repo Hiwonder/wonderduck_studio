@@ -1,4 +1,5 @@
 // Sidebar state and notifications shared by all workspaces.
+import { friendlyErrorMessage } from './user-messages.js';
 
 export function createConnectionStatus($) {
   return function setConnectionStatus(text, kind, detail = '') {
@@ -87,13 +88,14 @@ export function createNotifications($) {
   let lastStatus = lastCommand.textContent, noticeId = 0;
   function toast(message, error = false, { routine = false } = {}) {
     if (message === '工作区已切换，请重新操作') return;
+    if (error) message = friendlyErrorMessage(message);
     if (routine) {
       lastStatus = message;
       if (lastCommand.textContent !== message) lastCommand.textContent = message;
       if (lastCommand.classList.contains('error') !== error) lastCommand.classList.toggle('error', error);
       return;
     }
-    $('toast').textContent = message;
+    $('toast-message').textContent = message;
     $('toast').classList.toggle('error', error);
     $('toast').hidden = false;
     clearTimeout(toast.timer);
@@ -106,6 +108,7 @@ export function createNotifications($) {
     clearTimeout(toast.timer);
     $('toast').hidden = true;
   };
+  $('toast-close').addEventListener('click', () => toast.dismiss(noticeId));
   new MutationObserver(() => {
     if (lastCommand.textContent === lastStatus) return;
     lastStatus = lastCommand.textContent;

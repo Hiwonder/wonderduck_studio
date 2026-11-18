@@ -100,6 +100,41 @@
       const turnInput = document.querySelector("#turn-input");
       const turnRange = document.querySelector("#turn-range");
       const triggerRanges = [...document.querySelectorAll("[data-trigger-range]")];
+      let pickMouthTimer = null, pickMouthActive = false, pickMouthOpened = false, pickMouthButton = null;
+      function cancelPickMouth(close = false) {
+        clearTimeout(pickMouthTimer);
+        pickMouthTimer = null;
+        const wasOpened = pickMouthOpened;
+        pickMouthActive = false;
+        pickMouthOpened = false;
+        pickMouthButton = null;
+        if (close && wasOpened) {
+          state.left_trigger = 0;
+          triggerRanges.filter(range => range.dataset.triggerRange === 'left_trigger')
+            .forEach(range => { range.value = '0'; });
+          sendInput();
+        }
+      }
+      function schedulePickMouth(button) {
+        cancelPickMouth(true);
+        pickMouthActive = true;
+        pickMouthButton = button;
+        const startedAt = performance.now();
+        pickMouthTimer = setTimeout(() => {
+          if (!studioActive || !state.active || document.body.dataset.consolePage !== 'control'
+              || motionUnavailable() || humanOwner === 'gamepad' || socket?.readyState !== WebSocket.OPEN
+              || performance.now() - startedAt >= 1500) {
+            cancelPickMouth(true);
+            return;
+          }
+          pickMouthOpened = true;
+          state.left_trigger = 1;
+          triggerRanges.filter(range => range.dataset.triggerRange === 'left_trigger')
+            .forEach(range => { range.value = '1'; });
+          sendInput();
+          pickMouthTimer = setTimeout(() => cancelPickMouth(true), Math.max(0, 1500 - (performance.now() - startedAt)));
+        }, 200);
+      }
       const audioVolume = document.querySelector('#audio-volume');
       const audioVolumeValue = document.querySelector('#audio-volume-value');
       const trackingStart = document.querySelector('#tracking-start');
@@ -257,6 +292,7 @@
         stickLocks.forEach(input => { input.disabled = disabled; });
       };
       const zero = () => {
+        cancelPickMouth();
         visionModeRequested = false;
         stickLocks.forEach(input => { input.checked = false; });
         state.left_x = state.left_y = state.right_x = state.right_y = 0;
@@ -1865,6 +1901,7 @@
         const bindings = controls.bindings || {};
         document.querySelectorAll("[data-binding]").forEach((button) => {
           const name = bindings[button.dataset.binding];
+          button.dataset.skill = name || '';
           const label = name ? (skillLabels[name] || name) : "未绑定";
           button.hidden = !name || name === 'roulade' || name === 'headstand';
           if (button.hidden && held.delete(button.dataset.button)) { button.classList.remove('is-held'); sendInput(); }
@@ -2191,6 +2228,7 @@
             obstacleEnabled.disabled = obstacleDistance.disabled = obstacleDelay.disabled = false;
             updateSettingsState();
           } else if (message.type === "action_result") {
+            if (!message.accepted && pickMouthActive && message.name === pickMouthButton) cancelPickMouth(true);
             if (message.name === 'prepare_drive' || message.name === 'manual_prepare_drive' || message.name === 'rest') {
               driveEntryInFlight = false;
               const operation = message.name === 'rest' ? 'rest' : 'start';
@@ -2320,8 +2358,12 @@
         if (button.dataset.action) { button.addEventListener("click", () => sendAction(button.dataset.action)); return; }
         const press = () => {
           if (button.disabled || !state.active || maze || mazePending) return;
+          const firstPress = !held.has(button.dataset.button);
           held.add(button.dataset.button);
           button.classList.add("is-held"); sendInput();
+          if (firstPress && button.dataset.skill === 'ground_pick' && document.body.dataset.consolePage === 'control') {
+            schedulePickMouth(button.dataset.button);
+          }
         };
         const release = () => {
           held.delete(button.dataset.button);
@@ -2345,6 +2387,7 @@
       });
       triggerRanges.forEach((range) => range.addEventListener("input", () => {
         if (maze || mazePending) { range.value = '0'; return; }
+        cancelPickMouth();
         state[range.dataset.triggerRange] = Number(range.value); sendInput();
       }));
       turnInput.addEventListener("change", () => applyTurn(turnInput.value));
@@ -2422,6 +2465,7 @@
         sendInput();
       });
       window.addEventListener('console-page-changed', () => {
+        if (document.body.dataset.consolePage !== 'control') cancelPickMouth(true);
         driveEntryPending = isMotionPage();
         if (driveEntryPending) driveEntryStatusSequence = powerSequence;
         renderMotionPower();

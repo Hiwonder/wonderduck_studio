@@ -14,6 +14,7 @@ import { createCalibrationControls } from '../calibration-controls.js';
 import { createParameterSave } from '../parameter-save.js';
 import { createServoControls } from '../servo-controls.js';
 import { createReleaseConfirmation } from '../release-confirm.js';
+import { friendlyErrorMessage } from '../user-messages.js';
 
 const $ = (id) => document.getElementById(id);
 // The parent may show this page before it has a safe maintenance lease.
@@ -86,17 +87,19 @@ window.matchMedia('(max-width:720px)').addEventListener('change', () => setSideb
 let forwardedNotice = null, forwardedStatus = null;
 function toast(message, error = false) {
   if (message === '工作区已切换，请重新操作') return;
+  if (error) message = friendlyErrorMessage(message);
   if (window.parent !== window) {
     forwardedNotice = { type: 'studio-feedback', text: message, error };
     window.parent.postMessage(forwardedNotice, location.origin);
     return;
   }
-  $('toast').textContent = message;
+  $('toast-message').textContent = message;
   $('toast').classList.toggle('error', error);
   $('toast').hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => $('toast').hidden = true, error ? 7000 : 3000);
 }
+$('toast-close').addEventListener('click', () => { clearTimeout(toast.timer); $('toast').hidden = true; });
 let lastEmbeddedCommand = $('last-command').textContent;
 new MutationObserver(() => {
   const message = $('last-command').textContent;
@@ -171,7 +174,7 @@ async function command(action, data = {}) {
       const message = result.verified ? (pose ? `${pose} 目标已下发并读回` : '寄存器读回一致') : '部分卸力未确认';
       $('last-command').textContent = `${pose ? `${Object.keys(result.targets).length} 个舵机` : `ID ${id}`} · ${message}`;
       toast(message, !result.verified);
-      if (!result.verified) $('last-command').textContent += ` · ${JSON.stringify(result.results)}`;
+      if (!result.verified) console.warn('部分卸力未确认', result.results);
     }
     return result;
   } finally { busy = false; updateControls(); }
@@ -578,7 +581,8 @@ async function readParameters() {
     updateParameterEditor();
   } catch (error) {
     if (id === selected && revision === parameterRevision) {
-      renderParameters(error.message);
+      console.warn('读取舵机参数失败', error);
+      renderParameters(friendlyErrorMessage(error.message));
       toast(error.message, true);
     }
   } finally {

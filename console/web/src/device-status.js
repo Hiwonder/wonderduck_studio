@@ -1,5 +1,23 @@
-import { deviceFresh, SAMPLE_MAX_AGE_MS, servoStatus } from './state-status.js';
+import { deviceFresh, SERVO_STATUS_MAX_AGE_MS, servoStatus } from './state-status.js';
 import { lowVoltageWarning } from './sidebar.js';
+
+// Keep these targets aligned with robotd's HX startup configuration. PID is
+// displayed as P / I / D, unlike the servo's register order P / D / I.
+const STARTUP_POSITION_PID = [15, 0, 0];
+const STARTUP_TEMPERATURE_LIMIT = 120;
+const STARTUP_MINIMUM_TORQUE = 0;
+
+export function startupConfigurationMismatch(id, configuration) {
+  const pid = configuration?.position_pid;
+  const validPid = Array.isArray(pid) && pid.length === 3 && pid.every(Number.isInteger);
+  return {
+    pid: validPid && pid.some((value, index) => value !== STARTUP_POSITION_PID[index]),
+    temperature: id !== 34 && Number.isInteger(configuration?.overtemperature_c)
+      && configuration.overtemperature_c !== STARTUP_TEMPERATURE_LIMIT,
+    torque: id !== 34 && Number.isInteger(configuration?.minimum_starting_torque)
+      && configuration.minimum_starting_torque !== STARTUP_MINIMUM_TORQUE,
+  };
+}
 
 export function formatResourceUsage(usage) {
   const used = usage?.used_bytes, total = usage?.total_bytes;
@@ -68,7 +86,7 @@ export function createDeviceStatus({ toast }) {
       setText('runtime-safety', !fresh ? '--' : safety.fallen ? '摔倒' : safety.limp ? '卸力状态' : '正常');
     }
     const deviceReportsFresh = Number.isFinite(state.device_report_age_ms) &&
-      state.device_report_age_ms + Math.max(0, elapsed) < SAMPLE_MAX_AGE_MS;
+      state.device_report_age_ms + Math.max(0, elapsed) < SERVO_STATUS_MAX_AGE_MS;
     const statusNotice = state.device_paused ? '维护占用，独立采集暂停'
       : state.calibration?.active ? '标定中 · 常规采集暂停'
       : connectionError ? '连接中断'
@@ -100,10 +118,16 @@ export function createDeviceStatus({ toast }) {
     }
     get('aux-imu-caption').hidden = !auxiliary.valid;
     const servos = new Map((state.servos || []).map(servo => [servo.id, servo]));
+    const statuses = new Map();
     for (const joint of joints) {
       const servo = servos.get(joint.id);
-      const status = servoStatus(servo, state, elapsed, connectionError);
+      const status = servoStatus(servo, state, elapsed, connectionError, SERVO_STATUS_MAX_AGE_MS);
       const config = servo?.configuration;
+      const mismatch = status.valid && !servo?.configuration_error && !state.calibration?.active
+        ? startupConfigurationMismatch(joint.id, config) : { pid: false, temperature: false, torque: false };
+      const hasMismatch = mismatch.pid || mismatch.temperature || mismatch.torque;
+      statuses.set(joint.id, state.calibration?.active ? 'paused'
+        : status.kind === 'normal' && hasMismatch ? 'configuration' : status.kind);
       const version = values => Array.isArray(values) && values.length === 2 && values.every(Number.isInteger)
         ? values.join('.') : '--';
       const values = [status.valid ? number(servo.raw, 0) : '--', status.valid ? number(servo.degrees, 1, '°') : '--',
@@ -121,8 +145,17 @@ export function createDeviceStatus({ toast }) {
         cell.title = index >= 7 && servo?.configuration_error ? servo.configuration_error : values[index];
       });
       entry.cells[6].className = status.kind === 'normal' && !state.calibration?.active ? '' : 'status-error';
+      for (const [index, differs, expected] of [
+        [7, mismatch.pid, '开机设置：15 / 0 / 0'],
+        [8, mismatch.temperature, '开机设置：120 °C'],
+        [9, mismatch.torque, '开机设置：0'],
+      ]) {
+        entry.cells[index].classList.toggle('status-error', differs);
+        if (differs) entry.cells[index].title = `${values[index]}；${expected}`;
+      }
       entry.row.title = status.title;
     }
+    return statuses;
   }
   function renderResources(resources) {
     setText('runtime-storage', formatResourceUsage(resources?.storage));

@@ -193,7 +193,7 @@
 <div class="panel-heading"><div class="heading-label"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-settings"></use></svg>系统设置</h2></div></div>
 <section class="settings-card audio-settings"><div class="subsection-heading"><h3>音频设置</h3></div>
 <label class="audio-volume-control" for="audio-volume"><span>系统音量 <output id="audio-volume-value" for="audio-volume">--</output></span><input class="speed-range" disabled="" id="audio-volume" max="100" min="0" step="1" type="range"/></label>
-<div class="audio-record-controls"><button class="action" disabled="" id="audio-record" type="button" aria-pressed="false">开始录音</button><span id="audio-record-status" role="status" aria-live="polite"></span><button class="action" hidden="" id="audio-record-delete" type="button">删除录音</button></div>
+<div class="audio-record-controls"><button class="action" disabled="" id="audio-record" type="button" aria-pressed="false">开始录音</button><div class="audio-control-status"><span id="audio-record-status" role="status" aria-live="polite"></span></div><button class="action" hidden="" id="audio-record-delete" type="button">删除录音</button></div>
 <p class="audio-record-path" hidden="" id="audio-record-path"></p>
 <p class="parameter-note">再次点击停止并播放录音，最长录制 2 分钟。</p></section>
 <section class="settings-card software-info"><div class="subsection-heading"><h3>软件信息</h3></div>
@@ -202,7 +202,7 @@
 <div><dt>镜像版本</dt><dd id="device-image-version">--</dd></div>
 <div><dt>固件版本</dt><dd id="device-imu-firmware-version">--</dd></div>
 <div><dt>版权说明</dt><dd>© 2026 Hiwonder</dd></div>
-<div><dt>软件许可证</dt><dd><button class="action" id="licenses-open" type="button">查看许可证</button> <a data-studio-source="github" href="https://github.com/Hiwonder/wonderduck_studio" target="_blank" rel="noopener">源代码</a></dd></div>
+<div><dt>软件许可证</dt><dd><button class="action" id="licenses-open" type="button">查看许可证</button></dd></div>
 </dl></section>
 <section class="settings-card reset-card"><div class="subsection-heading"><h3>恢复默认</h3></div><p class="parameter-note">将所有可调参数恢复默认并自动保存。</p><button class="action" id="reset-settings" type="button" disabled="">恢复默认</button></section>
 </section>

@@ -27,6 +27,7 @@
       </div>
       <div class="sidebar-footer">
         <div class="sidebar-actions">
+          <button id="sidebar-restart" class="sidebar-footer-button" type="button" title="重启服务" aria-label="重启服务" hidden disabled><i data-lucide="refresh-cw"></i><span>重启服务</span></button>
           <button id="sidebar-release" class="sidebar-footer-button" type="button" title="关节卸力" aria-label="关节卸力" disabled><i data-lucide="power-off"></i><span>关节卸力</span></button>
           <button id="sidebar-shutdown" class="sidebar-footer-button" type="button" title="关机" aria-label="关机" hidden disabled><i data-lucide="power"></i><span>关机</span></button>
           <button id="sidebar-toggle" class="sidebar-footer-button" type="button" title="收起侧边栏" aria-label="收起侧边栏" aria-expanded="true" aria-controls="sidebar-content"><i data-lucide="panel-left-close"></i><span>收起</span></button>
@@ -37,9 +38,9 @@
       </div>
     </aside>
     <div id="sidebar-scrim" hidden></div>
-    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <div id="toast" role="status" aria-live="polite" hidden><span id="toast-message"></span><button id="toast-close" type="button" aria-label="关闭提示">×</button></div>
     <main>
-      <div id="workspace-notice" class="workspace-notice" role="status" aria-live="polite" hidden></div>
+      <div id="workspace-notice" class="workspace-notice" role="status" aria-live="polite" hidden><span id="workspace-notice-message"></span><button id="workspace-notice-close" type="button" aria-label="关闭提示" hidden>×</button></div>
       <iframe id="control-workspace" title="机器人操控" allow="microphone" hidden></iframe>
       <section id="models-workspace" class="models-workspace" aria-label="模型管理" hidden>
         <div class="models-heading"><h1>模型管理</h1></div>
@@ -127,6 +128,7 @@
           <div class="viewer-section">
             <div id="viewer">
               <span id="model-loading">模型加载中</span>
+              <span id="model-servo-alert" class="viewer-servo-alert" role="status" hidden>红色：舵机异常</span>
               <select id="model-palette" class="viewer-palette" aria-label="模型配色"><option value="white_orange">白橙</option><option value="yellow_black" selected>黄黑</option><option value="black_orange">黑橙</option><option value="navy">蓝黄</option></select>
               <label class="torque-switch viewer-camera-switch" title="显示摄像头画面" hidden><span>摄像头</span><input id="camera-enabled" type="checkbox" role="switch" aria-label="显示摄像头画面" checked /></label>
               <label class="torque-switch viewer-imu-switch" title="模型跟随 IMU 姿态"><span>IMU</span><input id="model-imu-follow" type="checkbox" role="switch" aria-label="模型跟随 IMU 姿态" /></label>

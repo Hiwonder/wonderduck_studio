@@ -31,7 +31,9 @@ import { createNetworkControls } from './network.js';
 import { createModelControls } from './models.js';
 import { createCalibrationView } from './calibration-view.js';
 import { createActionReferenceView } from './action-reference-view.js';
+import { createJointHighlighter } from './joint-highlights.js';
 import { createReleaseConfirmation } from './release-confirm.js';
+import { friendlyErrorMessage } from './user-messages.js';
 import { version as appVersion } from '../package.json';
 
 const $ = (id) => document.getElementById(id);
@@ -330,8 +332,9 @@ function restoreWorkspaceOnVisible() {
     restored = true;
     document.body.dataset.studioReady = 'true';
     statusReleaseUnconfirmed = target === 'status' && result?.release_unconfirmed === true;
-    const warning = statusReleaseUnconfirmed ? (result.warning || '卸力未确认，运动控制不可用；设备状态为只读') : '';
-    previewWorkspace(target, warning, true);
+    const warning = statusReleaseUnconfirmed
+      ? `${friendlyErrorMessage(result.warning || '卸力未确认')} 当前仅可查看设备状态。` : '';
+    previewWorkspace(target, warning, true, !!warning);
     if (frame) frame.inert = false;
     if (target === 'debug') notifyFrames('studio-workspace', { page: target });
     updateControls();
@@ -503,6 +506,43 @@ async function controlAction(event) {
 
 let sidebarReleaseBusy = false;
 let sidebarShutdownBusy = false;
+let sidebarRestartBusy = false;
+function updateSidebarRestart() {
+  const button = $('sidebar-restart');
+  button.hidden = !info?.supports_service_restart;
+  button.disabled = sidebarRestartBusy || !info?.supports_service_restart;
+}
+
+$('sidebar-restart').addEventListener('click', async () => {
+  if (sidebarRestartBusy || !info?.supports_service_restart) return;
+  sidebarRestartBusy = true;
+  updateSidebarRestart();
+  const previousToken = token;
+  try {
+    await request('service/restart', {}, 20000);
+    toast('服务正在重启，恢复后页面将自动刷新');
+    const deadline = performance.now() + 60000;
+    while (performance.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      try {
+        const response = await fetch('/api/info', { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+        if (response.ok) {
+          const refreshed = await response.json();
+          if (typeof refreshed.token === 'string' && refreshed.token && refreshed.token !== previousToken) {
+            location.reload();
+            return;
+          }
+        }
+      } catch (_) { /* The service is restarting. */ }
+    }
+    throw new Error('未检测到服务恢复，请检查设备后刷新页面');
+  } catch (error) {
+    toast(`重启服务失败：${error.message}`, true);
+    sidebarRestartBusy = false;
+    updateSidebarRestart();
+  }
+});
+
 function updateSidebarShutdown() {
   const button = $('sidebar-shutdown');
   button.hidden = !info?.supports_shutdown;
@@ -630,7 +670,13 @@ function previewDebugFrame() {
   }).catch(error => console.debug('舵机调试预览不可用', error.message));
 }
 
-function previewWorkspace(page, message, ready = false) {
+let workspaceNoticeTimer = null;
+$('workspace-notice-close').addEventListener('click', () => {
+  clearTimeout(workspaceNoticeTimer);
+  $('workspace-notice').hidden = true;
+});
+
+function previewWorkspace(page, message, ready = false, dismissible = false) {
   document.body.dataset.workspace = page;
   for (const choice of document.querySelectorAll('button[data-workspace]')) {
     const active = choice.dataset.workspace === page;
@@ -649,8 +695,11 @@ function previewWorkspace(page, message, ready = false) {
     panel.inert = !ready;
   }
   const notice = $('workspace-notice');
+  clearTimeout(workspaceNoticeTimer);
   notice.hidden = !message;
-  notice.textContent = message || '';
+  $('workspace-notice-message').textContent = message || '';
+  $('workspace-notice-close').hidden = !message || !dismissible;
+  if (message && dismissible) workspaceNoticeTimer = setTimeout(() => { notice.hidden = true; }, 8000);
 }
 
 function queueWorkspace(page) {
@@ -715,13 +764,14 @@ async function selectWorkspace(next) {
       if (next === 'status' && result?.ready !== true) throw new Error(result?.error || '设备状态采集尚未就绪');
       if (maintenancePages.has(next) && result?.maintenance !== true) throw new Error(result?.error || '维护工作区尚未就绪');
       if (next === 'status' && result?.release_unconfirmed === true) {
-        statusWarning = result.warning || '卸力未确认，运动控制不可用；设备状态为只读';
+        statusWarning = `${friendlyErrorMessage(result.warning || '卸力未确认')} 当前仅可查看设备状态。`;
       }
       info = await request('info');
       token = info.token;
     }
     if (queuedWorkspace && queuedWorkspace !== next) {
       workspace = next;
+      highlightSelectedJoints();
       statusReleaseUnconfirmed = !!statusWarning;
       workspaceRetryRequired = false;
       return;
@@ -740,9 +790,10 @@ async function selectWorkspace(next) {
       $('debug-frame').classList.remove('frame-clearing');
     }
     workspace = next;
+    highlightSelectedJoints();
     statusReleaseUnconfirmed = !!statusWarning;
     document.body.dataset.studioReady = 'true';
-    previewWorkspace(workspace, statusWarning, true);
+    previewWorkspace(workspace, statusWarning, true, !!statusWarning);
     if (restFallback) toast('休息未完成，已关闭策略并卸力');
     else if (restBefore && !statusWarning) toast('页面已就绪', false, { routine: true });
     workspaceRetryRequired = false;
@@ -779,17 +830,19 @@ async function selectWorkspace(next) {
     if (state && info) renderState();
     drawChart();
   } catch (error) {
-    const message = `${error.message}；设备操作暂不可用，重新点击当前页面可重试`;
+    console.warn('页面切换失败', error);
+    const message = `${friendlyErrorMessage(error.message)} 设备操作暂不可用，请重新点击当前页面重试。`;
     if (next === 'debug' || previous === 'debug') clearDebugFrame();
     if (controlPages.has(next) && !controlPages.has(previous)) $('control-workspace').src = 'about:blank';
     workspace = next;
+    highlightSelectedJoints();
     statusReleaseUnconfirmed = false;
     delete document.body.dataset.studioReady;
     workspaceRetryRequired = true;
     setArmed(false);
     if (queuedWorkspace && queuedWorkspace !== next) return;
     if (queuedWorkspace === next) queuedWorkspace = null;
-    previewWorkspace(workspace, message);
+    previewWorkspace(workspace, message, false, true);
     if (workspace === 'debug') previewDebugFrame();
     networkControls.setActive(false);
     modelControls.setActive(false);
@@ -798,7 +851,6 @@ async function selectWorkspace(next) {
     calibrationView.setActive(workspace === 'calibration');
     updateReferenceView();
     if (state && info) renderState();
-    toast(message, true);
   } finally {
     switchingWorkspace = false;
     if (sidebarTransitionPending) sidebarTransitionCompleted = performance.now();
@@ -931,7 +983,11 @@ function renderState() {
   }
   const auxChanged = auxValid !== auxiliary.valid;
   auxValid = auxiliary.valid;
-  if (workspace === 'status') deviceStatus.render(info, state, fresh, sampleElapsed(), connectionError, auxiliary, transitionHandoff, lowVoltage);
+  if (workspace === 'status') {
+    const statuses = deviceStatus.render(info, state, fresh, sampleElapsed(), connectionError, auxiliary, transitionHandoff, lowVoltage);
+    jointHighlighter.setStatuses(statuses);
+    $('model-servo-alert').hidden = !jointHighlighter.hasIssues();
+  }
   if (workspace === 'action' && (!info.studio || (state.workspace === 'action' && state.maintenance_owner))) {
     referenceView?.setTargets(state.pose_targets, info.joints);
   }
@@ -1083,8 +1139,7 @@ let alignLiveFeet, modelPlatform;
 let modelAsset, modelPlacementReady = false;
 const modelPlacementKey = 'console-model-placement';
 const rigJoints = new Map();
-const jointHighlights = new Map();
-let selectedHighlights = [];
+const jointHighlighter = createJointHighlighter();
 const attitudeTarget = new THREE.Quaternion();
 function saveModelPlacement(platform) {
   try {
@@ -1173,43 +1228,12 @@ function applyModelPalette() {
 $('model-palette').addEventListener('change', applyModelPalette);
 
 function highlightSelectedJoints() {
-  for (const group of selectedHighlights) for (const visual of group.visuals) visual.mesh.material = visual.original;
-  selectedHighlights = selected.map(id => info?.joints.find(joint => joint.id === id)?.name)
-    .map(name => jointHighlights.get(name)).filter(Boolean);
-  for (const group of selectedHighlights) for (const visual of group.visuals) visual.mesh.material = visual.highlight;
+  jointHighlighter.setContext(workspace, selected, info?.joints || []);
+  $('model-servo-alert').hidden = workspace !== 'status' || !jointHighlighter.hasIssues();
 }
 
 function prepareJointHighlights(model) {
-  const owners = new Map();
-  for (const [name, joint] of rigJoints) {
-    const group = { node: joint.node, visuals: [] };
-    jointHighlights.set(name, group);
-    owners.set(joint.node, group);
-  }
-  const mouth = model.getObjectByName('body_mouth');
-  if (mouth && !rigJoints.has('mouth')) {
-    const group = { node: mouth, visuals: [] };
-    jointHighlights.set('mouth', group);
-    owners.set(mouth, group);
-  }
-  model.traverse(mesh => {
-    if (!mesh.isMesh) return;
-    // Associate only this joint's rigid parts, stopping at descendant joint boundaries.
-    let parent = mesh.parent;
-    while (parent && !owners.has(parent)) parent = parent.parent;
-    const group = owners.get(parent);
-    if (!group) return;
-    const makeHighlight = original => {
-      const material = original.clone();
-      material.color.set('#32b83c');
-      if (material.emissive) { material.emissive.set('#105910'); material.emissiveIntensity = .4; }
-      material.toneMapped = false;
-      return material;
-    };
-    const original = mesh.material;
-    const highlight = Array.isArray(original) ? original.map(makeHighlight) : makeHighlight(original);
-    group.visuals.push({ mesh, original, highlight });
-  });
+  jointHighlighter.prepare(model, rigJoints);
   highlightSelectedJoints();
 }
 
@@ -1401,6 +1425,7 @@ function applyMode() {
   else if (!info.supports_direct_slider) toast('重启控制台服务后启用滑杆直接发送', true);
   updateSidebarRelease();
   updateSidebarShutdown();
+  updateSidebarRestart();
   $('demo-badge').hidden = !info.demo;
   for (const element of document.querySelectorAll('.studio-only')) element.hidden = !info.studio;
 }

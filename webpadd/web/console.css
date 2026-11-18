@@ -237,11 +237,12 @@ body[data-console-page="system"] .system-panel { grid-column: 1; grid-row: 1 / -
 .audio-volume-control span { display: flex; justify-content: space-between; gap: 12px; }
 .audio-volume-control output { color: var(--accent); font-variant-numeric: tabular-nums; }
 .audio-volume-control .speed-range { width: 100%; }
-.audio-record-controls { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 16px; }
-.audio-record-controls .action { min-width: 140px; }
+.audio-record-controls { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 16px; }
+.audio-record-controls #audio-record, .audio-record-controls #audio-record-delete { min-width: 140px; }
 .audio-record-controls #audio-record { grid-column: 1; grid-row: 1; }
 .audio-record-controls #audio-record-delete { grid-column: 1; grid-row: 2; }
-.audio-record-controls [role="status"] { grid-column: 2; grid-row: 1; color: var(--muted); font-size: var(--font-note); overflow-wrap: anywhere; }
+.audio-control-status { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.audio-control-status [role="status"] { color: var(--muted); font-size: var(--font-note); overflow-wrap: anywhere; }
 .audio-record-path { margin-top: 12px; color: var(--muted); font-size: var(--font-note); overflow-wrap: anywhere; }
 .audio-settings .parameter-note { margin-top: 12px; }
 .obstacle-controls { display: grid; gap: 14px; margin-top: 24px; }
