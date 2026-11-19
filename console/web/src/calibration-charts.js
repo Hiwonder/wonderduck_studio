@@ -1,5 +1,6 @@
 const WINDOW_MS = 20000;
 const HEAD_SAMPLE_MAX_AGE_US = 500000;
+const READONLY_SAMPLE_MAX_AGE_US = 1500000;
 
 function usable(sample, maxAgeUs = 100000) {
   return sample && sample.frame === 'sensor' && Number.isFinite(sample.timestamp_ms) &&
@@ -211,9 +212,17 @@ export function createCalibrationCharts({ request, context, onError, onStatus, o
       streamNotice(status, Boolean(calibration.sample_error));
       if (fresh) add(calibration.sample, 'calibration'); else updateValues(null);
     } else {
+      if (context().info?.readonly && latestState.imu?.valid && latestState.imu?.raw_sample) {
+        const sample = { ...latestState.imu.raw_sample,
+          age_us: latestState.imu.raw_sample.age_us + elapsed * 1000 };
+        if (usable(sample, READONLY_SAMPLE_MAX_AGE_US)) {
+          idleStatus = '实时 · 传感器坐标（只读）';
+          add(sample, 'console', READONLY_SAMPLE_MAX_AGE_US);
+        }
+      }
       const stale = !live.length || live.at(-1).source !== 'console' || performance.now() - live.at(-1).received > 1200;
       const status = stale && idleStatus.startsWith('实时') ? '等待新样本' : idleStatus;
-      streamNotice(status === '实时 · 传感器坐标' ? '' : status, status.startsWith('采样不可用'));
+      streamNotice(status.startsWith('实时 · 传感器坐标') ? '' : status, status.startsWith('采样不可用'));
       if (stale) updateValues(null);
     }
   }
@@ -223,7 +232,8 @@ export function createCalibrationCharts({ request, context, onError, onStatus, o
     const { info, connectionError } = context();
     if (source === 'body' && !pending && info && !connectionError && !latestState.calibration?.active) {
       if (info.readonly || latestState.imu_source === 'i2c') {
-        idleStatus = info.readonly ? '只读模式未提供原始六轴数据' : '当前来源不是 ID200';
+        idleStatus = info.readonly ? (latestState.imu?.raw_sample
+          ? '实时 · 传感器坐标（只读）' : '等待 IMU 原始六轴数据') : '当前来源不是 ID200';
       } else {
         pending = true;
         try {

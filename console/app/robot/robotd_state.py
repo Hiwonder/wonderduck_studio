@@ -89,6 +89,24 @@ def device_configuration(value):
                                         "overtemperature_c", "minimum_starting_torque")}
 
 
+def raw_imu_observation(value, now):
+    if not isinstance(value, dict):
+        raise ValueError("IMU 原始采样格式无效")
+    sampled = observed_time(value.get("t_ns"), now, "IMU 原始采样")
+    sequence = value.get("sequence")
+    if sampled is None or type(sequence) is not int or not 0 <= sequence <= 0xffffffff:
+        raise ValueError("IMU 原始采样时间或序号无效")
+    flags = ("ready", "accel_calibrated", "gyro_calibrated")
+    if any(type(value.get(key)) is not bool for key in flags):
+        raise ValueError("IMU 原始采样状态无效")
+    result = dict(frame="sensor", sampled_monotonic=sampled, timestamp_ms=sampled * 1000,
+                  sequence=sequence, **{key: value[key] for key in flags})
+    for key in ("raw_g", "corrected_g", "gyro_rad_s", "raw_gyro_rad_s"):
+        result[key] = vector(value.get(key), 3, "imu." + key)
+    result["corrected_gyro_rad_s"] = result["gyro_rad_s"]
+    return result
+
+
 class RobotdController:
     readonly = True
     demo = False
@@ -309,6 +327,11 @@ class RobotdController:
                     raise ValueError("robotd IMU 四元数无效")
                 imu.update(quaternion_wxyz=quat, gyro_rad_s=vector(row.get("gyro_rad_s"), 3, "imu.gyro_rad_s"),
                            gravity=vector(row.get("gravity"), 3, "imu.gravity"))
+                if row.get("raw_sample") is not None:
+                    try:
+                        imu["raw_sample"] = raw_imu_observation(row["raw_sample"], now)
+                    except ValueError as error:
+                        imu["raw_sample_error"] = str(error)
         except ValueError as error:
             imu = dict(valid=False, error=str(error), sampled_monotonic=None, observed_monotonic=now / 1e9)
         with self.lock:

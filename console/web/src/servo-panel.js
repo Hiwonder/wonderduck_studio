@@ -4,6 +4,7 @@ import { SERVO_STATUS_MAX_AGE_MS, servoStatus } from './state-status.js';
 import { createServoLayout } from './servo-layout.js';
 import { createSliderTrack } from './slider-track.js';
 import defaultServoLayout from './default-servo-layout.json';
+import { setLocalizedAttribute, setLocalizedText } from '../../../webpadd/web/language.js';
 
 const SERVO_DIRECTIONS = {
   10: 'right', 11: 'up', 12: 'down', 13: 'up', 14: 'down',
@@ -306,7 +307,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     const readyBeforeOffset = !!info && !info.readonly && armed && (fresh || frameGrace) && !document.hidden &&
       !state?.parameter_batch_active && !state?.calibration?.active && !playbackPending && state?.action_playback?.state !== 'playing' &&
       !operation;
-    const excluded = id => !rows.has(id) || locked.has(id) || !!rows.get(id)?.element.hidden;
+    const excluded = id => !rows.has(id) || locked.has(id) || !!rows.get(id)?.element.hidden || !servo(id)?.valid;
     const allOnline = !!info && info.joints.every(joint => excluded(joint.id) || servo(joint.id)?.valid);
     const hasUnlocked = !!info && info.joints.some(joint => !excluded(joint.id));
     const center = document.getElementById('center-all');
@@ -342,11 +343,11 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
         available && row.offsetValue !== null && (!!operation || (offsetWriting && activeOffset !== id)));
       const pending = targets.has(id) && current?.torque === 0;
       const status = row.offsetError ? '校正异常' : pending && presentation.valid ? '待运行' : presentation.label;
-      if (row.status.textContent !== status) row.status.textContent = status;
+      setLocalizedText(row.status, status, true);
       row.status.title = row.offsetError || presentation.title;
-      row.status.hidden = row.status.textContent === '开启';
-      row.element.title = info && !info.readonly && !info.supports_direct_slider
-        ? '重启控制台服务后启用滑杆直接发送' : `${row.joint.label} · ${row.status.textContent} · ${row.status.title}`;
+      row.status.hidden = status === '开启';
+      setLocalizedAttribute(row.element, 'title', info && !info.readonly && !info.supports_direct_slider
+        ? '重启控制台服务后启用滑杆直接发送' : `${row.joint.label} · ${status} · ${row.offsetError || presentation.title}`);
       row.element.classList.toggle('servo-row-error', !presentation.valid || !!row.offsetError);
     }
     if (active && !offsetRead && !offsetWriting && !operation && info && !info.readonly && fresh &&
@@ -363,7 +364,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     operation++;
     update();
     try {
-      const excluded = id => locked.has(id) || !!rows.get(id)?.element.hidden;
+      const excluded = id => locked.has(id) || !!rows.get(id)?.element.hidden || !servo(id)?.valid;
       const joints = context().info.joints;
       const lockedIds = joints.filter(joint => locked.has(joint.id)).map(joint => joint.id);
       let command = { action };
@@ -406,7 +407,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
   function positions(actual = false) {
     const values = {};
     for (const [id, row] of rows) {
-      if (row.element.hidden || locked.has(id)) continue;
+      if (row.element.hidden || locked.has(id) || !servo(id)?.valid) continue;
       const current = servo(id);
       const value = actual ? readbackPosition(row, current) : targets.get(id) ?? (current?.valid ? current.raw : null);
       if (Number.isInteger(value)) values[id] = value;
@@ -437,7 +438,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     const result = {};
     try {
       for (const [id, row] of rows) {
-        if (row.element.hidden) continue;
+        if (row.element.hidden || !servo(id)?.valid) continue;
         const data = await request('command', { action: 'registers', id });
         const value = data.registers.find(item => item.address === 31)?.value;
         if (!Number.isInteger(value)) throw new Error(`ID ${id} 偏差读取无效`);
@@ -452,11 +453,13 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
   async function applyOffsets(values) {
     const { info, state, armed, fresh } = context();
     if (!armed || !fresh || info?.readonly || operation || state?.action_playback?.state === 'playing') throw new Error('设备尚未就绪');
-    const entries = Object.entries(values);
+    const allEntries = Object.entries(values);
     const register = info.registers.find(item => item.address === 31);
-    if (!entries.length || entries.some(([id, value]) => !rows.has(Number(id)) || !Number.isInteger(value) || value < register.minimum || value > register.maximum)) {
+    if (!allEntries.length || allEntries.some(([id, value]) => !rows.has(Number(id)) || !Number.isInteger(value) || value < register.minimum || value > register.maximum)) {
       throw new Error('偏差文件包含未知舵机或无效数值');
     }
+    const entries = allEntries.filter(([id]) => servo(Number(id))?.valid);
+    if (!entries.length) throw new Error('没有可用的舵机偏差');
     const excludedEntry = entries.find(([id]) => locked.has(Number(id)) || rows.get(Number(id)).element.hidden);
     if (excludedEntry) throw new Error(`ID ${excludedEntry[0]} 已锁定或隐藏，请先启用`);
     cancel(); operation++; update();
@@ -482,7 +485,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
   function offsetValues() {
     const values = {};
     for (const [id, row] of rows) {
-      if (row.element.hidden) continue;
+      if (row.element.hidden || !servo(id)?.valid) continue;
       if (!Number.isInteger(row.offsetValue)) throw new Error(`ID ${id} 的偏差尚未读取`);
       values[id] = Number(row.offsetSlider.value);
     }
@@ -499,6 +502,6 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
   function holdForFrame(until) { frameGraceUntil = until; }
 
   return { reset, update, cancel, positions, setTargets, setPlaybackPending, holdForFrame, layout: cardLayout.layout, setLayout: cardLayout.setLayout, readOffsets, applyOffsets, offsetValues,
-    lockedIds: () => [...rows].filter(([id, row]) => locked.has(id) || row.element.hidden).map(([id]) => id),
+    lockedIds: () => [...rows].filter(([id, row]) => locked.has(id) || row.element.hidden || !servo(id)?.valid).map(([id]) => id),
     scale: cardLayout.scale };
 }

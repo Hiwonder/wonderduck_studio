@@ -1,4 +1,18 @@
 (() => {
+      // Keep the original validation message so an invalid input changes
+      // language without changing its value or validation state.
+      const validationMessages = new Map();
+      const setValidity = (input, message) => {
+        if (message) validationMessages.set(input, message);
+        else validationMessages.delete(input);
+        input.setCustomValidity(window.WonderduckLanguage?.translate(message) || message);
+      };
+      window.addEventListener('studio-language-change', () => {
+        for (const [input, message] of validationMessages) {
+          if (!input.isConnected) validationMessages.delete(input);
+          else input.setCustomValidity(window.WonderduckLanguage?.translate(message) || message);
+        }
+      });
       const isVisionPage = () => ['target', 'person'].includes(document.body.dataset.consolePage);
       const isMotionPage = () => ['control', 'target', 'person', 'maze'].includes(document.body.dataset.consolePage);
       const state = { left_x: 0, left_y: 0, right_x: 0, right_y: 0,
@@ -207,7 +221,7 @@
       const settingsStatus = document.querySelector('#settings-status');
       let settingsSaving = false, colorReference = null, colorChosen = false, referenceAreaConfigured = false, objectLabelPreference = null;
       let settingsLoaded = false, settingsDirty = false, applyingSettings = false, settingsFailed = false;
-      let settingsTimer = null, settingsDefaults = null, pendingSettingsJson = null, savedSettingsJson = null;
+      let settingsTimer = null, settingsMessageTimer = null, settingsDefaults = null, pendingSettingsJson = null, savedSettingsJson = null;
       let settingsRequest = 0, settingsPendingId = null, robotConnected = false;
       let colorPresets = new Map(), colorPresetsLoaded = false, colorPresetPending = null, colorPresetRevision = 0;
       let headSettingsDirty = false, headSettingsSaving = false, headSettingsFailed = false;
@@ -371,7 +385,13 @@
       const settingsReady = () => socket?.readyState === WebSocket.OPEN && !!confirmedObstacle;
       const markSettingsSaved = () => {
         if (!settingsDirty && !settingsSaving && !headSettingsDirty && !headSettingsSaving
-          && !trackingUnsaved()) settingsStatus.textContent = '参数已自动保存';
+          && !trackingUnsaved()) {
+          settingsStatus.textContent = '参数已自动保存';
+          clearTimeout(settingsMessageTimer);
+          settingsMessageTimer = setTimeout(() => {
+            if (settingsStatus.textContent === (window.WonderduckLanguage?.translate('参数已自动保存') || '参数已自动保存')) settingsStatus.textContent = '';
+          }, 3000);
+        }
       };
       const updateSettingsState = () => {
         resetSettings.disabled = !settingsLoaded || !settingsDefaults || !headSettingsDefaults || !coordinatedLeaseReady || !phaseReady || !settingsReady()
@@ -397,13 +417,13 @@
           const axis = Number(input.dataset.headTrackingDeadzone);
           headTrackingDeadzone[axis] = saved.deadzone[axis];
           input.value = String(headTrackingDeadzone[axis] * 100);
-          input.setCustomValidity('');
+          setValidity(input, '');
         }
         for (const input of document.querySelectorAll('[data-head-pid-axis]')) {
           const axis = Number(input.dataset.headPidAxis), term = Number(input.dataset.headPidTerm);
           headTrackingGains[axis][term] = saved.gains[axis][term];
           input.value = String(headTrackingGains[axis][term]);
-          input.setCustomValidity('');
+          setValidity(input, '');
           updateHeadPidRange(input, headTrackingGains[axis][term]);
         }
         applyingSettings = previous;
@@ -443,37 +463,37 @@
           const axis = Number(input.dataset.coordinatedPidAxis), term = Number(input.dataset.coordinatedPidTerm);
           coordinatedGains[axis][term] = gains[axis][term];
           input.value = String(gains[axis][term]);
-          input.setCustomValidity('');
+          setValidity(input, '');
           updateHeadPidRange(input, gains[axis][term]);
         }
         for (const input of document.querySelectorAll('[data-coordinated-deadzone]')) {
           const field = input.dataset.coordinatedDeadzone;
           const value = coordinatedHeadDeadzone[field === 'head-0' ? 0 : 1] * 100;
           input.value = String(value);
-          input.setCustomValidity('');
+          setValidity(input, '');
         }
         coordinatedBodyGains.splice(0, 3, ...saved.body_gains);
         for (const input of document.querySelectorAll('[data-coordinated-body-gain]')) {
           const axis = Number(input.dataset.coordinatedBodyGain);
           coordinatedBodyGains[axis] = saved.body_gains[axis];
           input.value = String(coordinatedBodyGains[axis]);
-          input.setCustomValidity('');
+          setValidity(input, '');
         }
         for (const input of document.querySelectorAll('[data-coordinated-final-point]')) {
           const axis = Number(input.dataset.coordinatedFinalPoint);
           coordinatedFinalPoint[axis] = saved.final_point[axis];
           input.value = String(coordinatedFinalPoint[axis]);
-          input.setCustomValidity('');
+          setValidity(input, '');
         }
         for (const input of document.querySelectorAll('[data-coordinated-final-tolerance]')) {
           const axis = Number(input.dataset.coordinatedFinalTolerance);
           coordinatedFinalTolerance[axis] = saved.final_tolerance[axis];
           input.value = String(coordinatedFinalTolerance[axis]);
-          input.setCustomValidity('');
+          setValidity(input, '');
         }
         coordinatedArrivalDelay = saved.arrival_delay_s;
         arrivalDelayInput.value = String(coordinatedArrivalDelay);
-        arrivalDelayInput.setCustomValidity('');
+        setValidity(arrivalDelayInput, '');
         coordinatedArrivalSkill = saved.arrival_skill;
         for (const stage of ['before', 'after']) {
           Object.assign(coordinatedMouth[stage], saved[`mouth_${stage}`]);
@@ -481,7 +501,7 @@
             const field = input.dataset.mouthField;
             if (field === 'enabled') input.checked = coordinatedMouth[stage].enabled;
             else input.value = String(coordinatedMouth[stage][field] * (field === 'open' ? 100 : 1));
-            input.setCustomValidity('');
+            setValidity(input, '');
           }
         }
         renderArrivalSkills();
@@ -507,12 +527,12 @@
         finalLateralLimit = saved.final_lateral_limit;
         for (const input of document.querySelectorAll('[data-coordinated-phase-gain]')) {
           input.value = String(finalBodyGains[Number(input.dataset.coordinatedPhaseGain)]);
-          input.setCustomValidity('');
+          setValidity(input, '');
         }
         for (const input of document.querySelectorAll('[data-coordinated-phase-limit]')) {
           const value = phaseLimit(input.dataset.coordinatedPhaseLimit);
           input.value = value === null ? '' : String(value);
-          input.setCustomValidity('');
+          setValidity(input, '');
         }
       };
       const collectPhaseSettings = () => ({final_body_gains: [...finalBodyGains],
@@ -541,7 +561,7 @@
         for (const input of mazeInputs) {
           input.value = String(saved.maze[input.dataset.maze]);
           mazeSettings[input.dataset.maze] = saved.maze[input.dataset.maze];
-          input.setCustomValidity('');
+          setValidity(input, '');
         }
         referenceAreaConfigured = saved.tracking.reference_area !== null;
         referenceArea = referenceAreaConfigured ? saved.tracking.reference_area : 0.01;
@@ -557,7 +577,7 @@
           trackingGains[axis][term] = saved.tracking.gains[axis][term];
           input.value = String(trackingGains[axis][term]);
           input.nextElementSibling.value = String(trackingGains[axis][term]);
-          input.nextElementSibling.setCustomValidity('');
+          setValidity(input.nextElementSibling, '');
         }
         const threshold = document.querySelector('#color-threshold');
         threshold.value = String(saved.color_threshold);
@@ -725,11 +745,12 @@
       };
       const changedParameter = event => {
         const field = event.target;
-        if (!field.matches('input, select') || field.matches(`[data-stick-lock], [data-trigger-range], [data-head-pid-axis], [data-head-pid-range-axis], [data-head-tracking-deadzone], ${coordinatedInputSelector}, ${phaseInputSelector}, #follow-stop-area, #follow-area-deadzone, #follow-stop-distance, #follow-distance-deadzone, #color-presets, #color-preset-name, #audio-volume`)) return;
+        if (!field.matches('input, select') || field.matches(`[data-stick-lock], [data-trigger-range], [data-head-pid-axis], [data-head-pid-range-axis], [data-head-tracking-deadzone], ${coordinatedInputSelector}, ${phaseInputSelector}, #follow-stop-area, #follow-area-deadzone, #follow-stop-distance, #follow-distance-deadzone, #color-presets, #color-preset-name, #audio-volume, #network-announcement-enabled`)) return;
         queueSettings();
       };
       document.addEventListener('input', changedParameter);
       document.addEventListener('change', event => {
+        if (event.target.matches('#network-announcement-enabled')) return;
         changedParameter(event);
         if (event.target.matches('[data-head-pid-axis], [data-head-pid-range-axis], [data-head-tracking-deadzone]')) flushHeadSettings();
         else if (event.target.matches(coordinatedInputSelector)) flushCoordinatedSettings();
@@ -955,7 +976,7 @@
           gains[axis][term] = value;
           if (source === range) {
             input.value = String(value);
-            input.setCustomValidity('');
+            setValidity(input, '');
           } else if (head) updateHeadPidRange(input, value);
           else range.value = String(value);
           if (queue) queue();
@@ -965,9 +986,9 @@
           if (Number.isFinite(range.valueAsNumber)) apply(range.valueAsNumber, range);
         });
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
+          setValidity(input, '');
           if (input.value === '' || !Number.isFinite(input.valueAsNumber) || !input.validity.valid) {
-            input.setCustomValidity(error);
+            setValidity(input, error);
             if (queue) queue();
             return;
           }
@@ -976,7 +997,7 @@
         input.addEventListener('change', () => {
           if (input.value !== '' && Number.isFinite(input.valueAsNumber) && input.validity.valid) return;
           input.value = String(gains[axis][term]);
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice(error, true);
         });
       };
@@ -1001,16 +1022,16 @@
         const axis = Number(input.dataset.coordinatedBodyGain);
         const error = '联合 PID 需要有限数值';
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
+          setValidity(input, '');
           const value = input.valueAsNumber;
-          if (!Number.isFinite(value) || !input.validity.valid) input.setCustomValidity(error);
+          if (!Number.isFinite(value) || !input.validity.valid) setValidity(input, error);
           else { coordinatedBodyGains[axis] = value; updateCoordinated(); }
           queueCoordinatedSettings();
         });
         input.addEventListener('change', () => {
           if (input.validity.valid) return;
           input.value = String(coordinatedBodyGains[axis]);
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice(error, true);
         });
       });
@@ -1018,15 +1039,15 @@
         const axis = Number(input.dataset.coordinatedPhaseGain);
         const error = '身体增益需要有限数值';
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
-          if (input.value === '' || !Number.isFinite(input.valueAsNumber) || !input.validity.valid) input.setCustomValidity(error);
+          setValidity(input, '');
+          if (input.value === '' || !Number.isFinite(input.valueAsNumber) || !input.validity.valid) setValidity(input, error);
           else { finalBodyGains[axis] = input.valueAsNumber; updateCoordinated(); }
           queuePhaseSettings();
         });
         input.addEventListener('change', () => {
           if (input.validity.valid) return;
           input.value = String(finalBodyGains[axis]);
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice(error, true);
         });
       });
@@ -1035,9 +1056,9 @@
         const approach = kind === 'approach';
         const error = '线速度上限需要非负有限数值';
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
+          setValidity(input, '');
           const value = approach && input.value === '' ? null : input.valueAsNumber;
-          if ((value !== null && !validDeadzone(value)) || !input.validity.valid) input.setCustomValidity(error);
+          if ((value !== null && !validDeadzone(value)) || !input.validity.valid) setValidity(input, error);
           else {
             if (approach) approachLinearLimit = value;
             else if (kind === 'final') finalLinearLimit = value;
@@ -1050,7 +1071,7 @@
           if (input.validity.valid) return;
           const value = phaseLimit(kind);
           input.value = value === null ? '' : String(value);
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice(error, true);
         });
       });
@@ -1058,16 +1079,16 @@
         const axis = Number(input.dataset.coordinatedFinalPoint);
         const error = '最终目标需要画面范围内的有限坐标';
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
+          setValidity(input, '');
           const value = input.valueAsNumber;
-          if (!Number.isFinite(value) || !input.validity.valid) input.setCustomValidity(error);
+          if (!Number.isFinite(value) || !input.validity.valid) setValidity(input, error);
           else { coordinatedFinalPoint[axis] = value; updateTrackingGuide(); updateCoordinated(); }
           queueCoordinatedSettings();
         });
         input.addEventListener('change', () => {
           if (input.validity.valid) return;
           input.value = String(coordinatedFinalPoint[axis]);
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice(error, true);
         });
       });
@@ -1075,30 +1096,30 @@
         const axis = Number(input.dataset.coordinatedFinalTolerance);
         const error = '目标误差需要非负有限数值';
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
+          setValidity(input, '');
           const value = input.valueAsNumber;
-          if (!Number.isFinite(value) || !input.validity.valid) input.setCustomValidity(error);
+          if (!Number.isFinite(value) || !input.validity.valid) setValidity(input, error);
           else { coordinatedFinalTolerance[axis] = value; updateTrackingGuide(); updateCoordinated(); }
           queueCoordinatedSettings();
         });
         input.addEventListener('change', () => {
           if (input.validity.valid) return;
           input.value = String(coordinatedFinalTolerance[axis]);
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice(error, true);
         });
       });
       arrivalDelayInput.addEventListener('input', () => {
-        arrivalDelayInput.setCustomValidity('');
+        setValidity(arrivalDelayInput, '');
         const value = arrivalDelayInput.valueAsNumber;
-        if (!Number.isFinite(value) || !arrivalDelayInput.validity.valid) arrivalDelayInput.setCustomValidity('动作延时需要非负有限数值');
+        if (!Number.isFinite(value) || !arrivalDelayInput.validity.valid) setValidity(arrivalDelayInput, '动作延时需要非负有限数值');
         else { coordinatedArrivalDelay = value; updateCoordinated(); }
         queueCoordinatedSettings();
       });
       arrivalDelayInput.addEventListener('change', () => {
         if (arrivalDelayInput.validity.valid) return;
         arrivalDelayInput.value = String(coordinatedArrivalDelay);
-        arrivalDelayInput.setCustomValidity('');
+        setValidity(arrivalDelayInput, '');
         setNotice('动作延时需要非负有限数值', true);
       });
       arrivalSkillInput.addEventListener('change', () => {
@@ -1110,16 +1131,16 @@
         const stage = input.dataset.coordinatedMouth, field = input.dataset.mouthField;
         const error = field === 'open' ? '嘴部开度需要 0 到 100 的有限数值' : '转动时间需要非负有限数值';
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
+          setValidity(input, '');
           const value = field === 'enabled' ? input.checked : input.valueAsNumber;
-          if (field !== 'enabled' && (!Number.isFinite(value) || !input.validity.valid)) input.setCustomValidity(error);
+          if (field !== 'enabled' && (!Number.isFinite(value) || !input.validity.valid)) setValidity(input, error);
           else { coordinatedMouth[stage][field] = field === 'open' ? value / 100 : value; updateCoordinated(); }
           queueCoordinatedSettings();
         });
         input.addEventListener('change', () => {
           if (input.validity.valid) return;
           input.value = String(coordinatedMouth[stage][field] * (field === 'open' ? 100 : 1));
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice(error, true);
         });
       });
@@ -1130,16 +1151,16 @@
         const scale = 100;
         const error = '联合追踪死区需要非负有限数值';
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
+          setValidity(input, '');
           const value = input.valueAsNumber;
-          if (!Number.isFinite(value) || !input.validity.valid) input.setCustomValidity(error);
+          if (!Number.isFinite(value) || !input.validity.valid) setValidity(input, error);
           else { values[axis] = value / scale; updateCoordinated(); }
           queueCoordinatedSettings();
         });
         input.addEventListener('change', () => {
           if (input.validity.valid) return;
           input.value = String(values[axis] * scale);
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice(error, true);
         });
       });
@@ -1150,10 +1171,10 @@
       document.querySelectorAll('[data-head-tracking-deadzone]').forEach(input => {
         const axis = Number(input.dataset.headTrackingDeadzone);
         input.addEventListener('input', () => {
-          input.setCustomValidity('');
+          setValidity(input, '');
           const value = input.valueAsNumber;
           if (!Number.isFinite(value) || value < 0) {
-            input.setCustomValidity('头部死区需要非负有限数值');
+            setValidity(input, '头部死区需要非负有限数值');
           } else {
             headTrackingDeadzone[axis] = value / 100;
             if (headTracking) sendHeadTracking('update', headTrackingPoint);
@@ -1164,7 +1185,7 @@
         input.addEventListener('change', () => {
           if (input.validity.valid) return;
           input.value = String(headTrackingDeadzone[axis] * 100);
-          input.setCustomValidity('');
+          setValidity(input, '');
           setNotice('头部死区需要非负有限数值', true);
         });
       });
@@ -1250,7 +1271,7 @@
           : Number.isSafeInteger(value) && (input.dataset.maze === 'threshold_mm'
             ? value > 0 && value <= 4294967295 : value >= 0));
         const error = headStep ? '转头步进须为非负有限数，可填小数。' : '距离须为正整数，时间须为非负整数。';
-        input.setCustomValidity(valid ? '' : error);
+        setValidity(input, valid ? '' : error);
         if (!valid) { setNotice(`避障参数无效：${error}`, true); return; }
         mazeSettings[input.dataset.maze] = value;
         if (maze) sendMaze('update');
@@ -1306,16 +1327,16 @@
         reconcileHeadPosition();
       });
       followStopArea.addEventListener('input', () => {
-        followStopArea.setCustomValidity('');
+        setValidity(followStopArea, '');
         if (!Number.isSafeInteger(followStopArea.valueAsNumber) || followStopArea.valueAsNumber <= 0) {
-          followStopArea.setCustomValidity('停止面积需要填写大于零的整数');
+          setValidity(followStopArea, '停止面积需要填写大于零的整数');
         }
         updateTrackingButton();
       });
       followStopArea.addEventListener('change', () => {
         if (!followStopArea.validity.valid) {
           followStopArea.value = String(followStopAreaValue);
-          followStopArea.setCustomValidity('');
+          setValidity(followStopArea, '');
           setNotice('停止面积需要填写大于零的整数', true);
         } else {
           followStopAreaValue = followStopArea.valueAsNumber;
@@ -1326,14 +1347,14 @@
       });
       followAreaDeadzone.addEventListener('input', () => {
         const value = followAreaDeadzone.valueAsNumber;
-        followAreaDeadzone.setCustomValidity(Number.isSafeInteger(value) && value >= 0
+        setValidity(followAreaDeadzone, Number.isSafeInteger(value) && value >= 0
           ? '' : '面积死区需要填写非负整数');
         updateTrackingButton();
       });
       followAreaDeadzone.addEventListener('change', () => {
         if (!followAreaDeadzone.validity.valid) {
           followAreaDeadzone.value = String(followAreaDeadzoneValue);
-          followAreaDeadzone.setCustomValidity('');
+          setValidity(followAreaDeadzone, '');
           setNotice('面积死区需要填写非负整数', true);
         } else {
           followAreaDeadzoneValue = followAreaDeadzone.valueAsNumber;
@@ -1343,17 +1364,17 @@
         updateTrackingButton();
       });
       followStopDistance.addEventListener('input', () => {
-        followStopDistance.setCustomValidity('');
+        setValidity(followStopDistance, '');
         if (!Number.isSafeInteger(followStopDistance.valueAsNumber)
           || followStopDistance.valueAsNumber <= 0 || followStopDistance.valueAsNumber > 4294967295) {
-          followStopDistance.setCustomValidity('跟踪距离需要填写大于零的整数');
+          setValidity(followStopDistance, '跟踪距离需要填写大于零的整数');
         }
         updateTrackingButton();
       });
       followStopDistance.addEventListener('change', () => {
         if (!followStopDistance.validity.valid) {
           followStopDistance.value = String(followStopDistanceValue);
-          followStopDistance.setCustomValidity('');
+          setValidity(followStopDistance, '');
           setNotice('跟踪距离需要填写大于零的整数', true);
         } else {
           followStopDistanceValue = followStopDistance.valueAsNumber;
@@ -1364,14 +1385,14 @@
       });
       followDistanceDeadzone.addEventListener('input', () => {
         const value = followDistanceDeadzone.valueAsNumber;
-        followDistanceDeadzone.setCustomValidity(Number.isSafeInteger(value) && value >= 0 && value <= 4294967295
+        setValidity(followDistanceDeadzone, Number.isSafeInteger(value) && value >= 0 && value <= 4294967295
           ? '' : '距离死区需要填写非负整数');
         updateTrackingButton();
       });
       followDistanceDeadzone.addEventListener('change', () => {
         if (!followDistanceDeadzone.validity.valid) {
           followDistanceDeadzone.value = String(followDistanceDeadzoneValue);
-          followDistanceDeadzone.setCustomValidity('');
+          setValidity(followDistanceDeadzone, '');
           setNotice('距离死区需要填写非负整数', true);
         } else {
           followDistanceDeadzoneValue = followDistanceDeadzone.valueAsNumber;
@@ -1566,11 +1587,12 @@
         desiredVolume = null;
         volumeBusy = true;
         try {
+          const previousSavedVolume = savedAudioVolume;
           confirmedVolume = await requestVolume({ method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ volume: value }) });
           savedAudioVolume = confirmedVolume;
           audioVolume.disabled = false;
           if (desiredVolume === null) showVolume(confirmedVolume);
-          queueSettings();
+          if (confirmedVolume !== previousSavedVolume) queueSettings();
         } catch (error) {
           if (desiredVolume === null && confirmedVolume !== null) showVolume(confirmedVolume);
           setNotice(`音量设置失败：${error.message}`, true);
@@ -1595,8 +1617,8 @@
         audioVolume.disabled = false;
       }).catch(error => setNotice(`音量不可用：${error.message}`, true));
       const setText = (element, value) => {
-        const text = String(value);
-        if (element.textContent !== text) element.textContent = text;
+        if (window.WonderduckLanguage) window.WonderduckLanguage.setLocalizedText(element, value);
+        else if (element.textContent !== String(value)) element.textContent = String(value);
       };
       const setConnected = (connected, text) => {
         dot.classList.toggle("online", connected);
@@ -1865,17 +1887,18 @@
           threshold_mm: Number(obstacleDistance.value), clear_delay_ms: Number(obstacleDelay.value) }));
       };
       const restoreSharedSettings = () => {
+        if (restoreObstacle && confirmedObstacle && !obstaclePending
+            && Object.keys(restoreObstacle).every(key => restoreObstacle[key] === confirmedObstacle[key])) {
+          restoreObstacle = null;
+          updateSettingsState();
+        }
         if (socket?.readyState !== WebSocket.OPEN || !robotConnected || !state.active || !document.hasFocus()) return;
         if (restoreObstacle && confirmedObstacle && !obstaclePending) {
           const saved = restoreObstacle;
-          if (Object.keys(saved).every(key => saved[key] === confirmedObstacle[key])) {
-            restoreObstacle = null;
-          } else {
-            obstacleEnabled.checked = saved.enabled;
-            obstacleDistance.value = saved.threshold_mm;
-            obstacleDelay.value = saved.clear_delay_ms;
-            sendObstacle(true);
-          }
+          obstacleEnabled.checked = saved.enabled;
+          obstacleDistance.value = saved.threshold_mm;
+          obstacleDelay.value = saved.clear_delay_ms;
+          sendObstacle(true);
         }
       };
       const updateControls = (controls) => {

@@ -1,14 +1,16 @@
 // Sidebar state and notifications shared by all workspaces.
 import { friendlyErrorMessage } from './user-messages.js';
+import { deviceFresh, SAMPLE_MAX_AGE_MS, SERVO_STATUS_MAX_AGE_MS } from './state-status.js';
+import { onLanguageChange, setLocalizedAttribute, setLocalizedText } from '../../../webpadd/web/language.js';
 
 export function createConnectionStatus($) {
   return function setConnectionStatus(text, kind, detail = '') {
     const connection = $('connection'), device = $('device-connection'), dot = $('status-dot');
-    if (connection.textContent !== text) connection.textContent = text;
-    if (connection.title !== detail) connection.title = detail;
+    setLocalizedText(connection, text);
+    setLocalizedAttribute(connection, 'title', detail);
     const title = detail ? `${text}：${detail}` : text;
-    if (device.title !== title) device.title = title;
-    if (device.getAttribute('aria-label') !== text) device.setAttribute('aria-label', text);
+    setLocalizedAttribute(device, 'title', title);
+    setLocalizedAttribute(device, 'aria-label', text);
     const dotClass = `dot ${kind}`;
     if (dot.className !== dotClass) dot.className = dotClass;
   };
@@ -20,6 +22,41 @@ export function lowVoltageWarning(status) {
   return status?.triggered === true || (Number.isFinite(status?.voltage_v)
     && Number.isFinite(status?.settings?.threshold_v) && status.voltage_v < status.settings.threshold_v
     && Number.isFinite(status?.low_for_ms) && status.low_for_ms >= 1000);
+}
+
+// Estimate display voltage from existing servo observations only. This does
+// not initiate a bus read and is never used by the protection monitor.
+export function estimateServoVoltage(state, elapsed = 0, connectionError = '') {
+  if (state?.device_paused || !Array.isArray(state?.servos)) return null;
+  const maxAge = state.individual_device_scan || Number.isFinite(state.device_report_age_ms)
+    ? SERVO_STATUS_MAX_AGE_MS : SAMPLE_MAX_AGE_MS;
+  const servos = state.servos.filter(servo => !servo?.discovered);
+  const values = servos.filter(servo => deviceFresh(servo, state, elapsed, connectionError, maxAge)
+      && servo.online !== false && !servo.error && !(servo.faults?.length)
+      && (!Number.isInteger(servo.status) || servo.status === 0)
+      && Number.isFinite(servo.voltage) && servo.voltage > 0)
+    .map(servo => servo.voltage).sort((a, b) => a - b);
+  if (!values.length) return null;
+  const middle = Math.floor(values.length / 2);
+  const median = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+  const tolerance = Math.max(1, median * 0.15);
+  const agreeing = values.filter(value => Math.abs(value - median) <= tolerance);
+  // Without a majority, the remaining readings do not identify a reliable value.
+  if (!agreeing.length || (values.length >= 3 && agreeing.length < Math.ceil(values.length / 2))) return null;
+  return {
+    voltage: agreeing.reduce((sum, value) => sum + value, 0) / agreeing.length,
+    excluded: agreeing.length !== servos.length,
+  };
+}
+
+export function displayVoltage(state, elapsed = 0, connectionError = '') {
+  const estimate = estimateServoVoltage(state, elapsed, connectionError);
+  const healthVoltage = state?.robot?.health?.battery?.volts;
+  const independent = state?.individual_device_scan || Number.isFinite(state?.device_report_age_ms);
+  if (independent && !estimate) return null;
+  if (estimate && (estimate.excluded || state.individual_device_scan || Number.isFinite(state.device_report_age_ms)
+      || !Number.isFinite(healthVoltage) || healthVoltage <= 0)) return estimate.voltage;
+  return Number.isFinite(healthVoltage) && healthVoltage > 0 ? healthVoltage : null;
 }
 
 // When the device-status page owns the bus, the control loop's voltage monitor is
@@ -50,10 +87,10 @@ export function renderSidebarVoltage($, { calibrating, voltage, fresh, lowVoltag
   const shownVoltage = warning && Number.isFinite(lowVoltage.voltage_v) ? lowVoltage.voltage_v : voltage;
   const text = calibrating ? '采集中' : (fresh || warning) && Number.isFinite(shownVoltage) ? `${shownVoltage.toFixed(1)} V` : '--';
   const label = warning ? '电压过低，请及时充电' : calibrating ? 'IMU 校准采集中' : '电池电压';
-  if (output.textContent !== text) output.textContent = text;
-  if (output.getAttribute('aria-label') !== label) output.setAttribute('aria-label', label);
+  setLocalizedText(output, text);
+  setLocalizedAttribute(output, 'aria-label', label);
   const row = $('sidebar-telemetry'), battery = $('sidebar-battery-icon'), sampling = $('sidebar-sampling-icon');
-  if (row.title !== label) row.title = label;
+  setLocalizedAttribute(row, 'title', label);
   row.classList.toggle('low-voltage', warning);
   if (battery.hasAttribute('hidden') !== calibrating) battery.toggleAttribute('hidden', calibrating);
   if (sampling.hasAttribute('hidden') === calibrating) sampling.toggleAttribute('hidden', !calibrating);
@@ -85,13 +122,14 @@ export function createSidebar($, iconsRefresh) {
 
 export function createNotifications($) {
   const lastCommand = $('last-command');
-  let lastStatus = lastCommand.textContent, noticeId = 0;
-  function toast(message, error = false, { routine = false } = {}) {
+  let lastStatus = lastCommand.textContent, routineSource = null, noticeId = 0;
+  function toast(message, error = false, { routine = false, source = null } = {}) {
     if (message === '工作区已切换，请重新操作') return;
     if (error) message = friendlyErrorMessage(message);
     if (routine) {
-      lastStatus = message;
-      if (lastCommand.textContent !== message) lastCommand.textContent = message;
+      routineSource = source;
+      setLocalizedText(lastCommand, message);
+      lastStatus = lastCommand.textContent;
       if (lastCommand.classList.contains('error') !== error) lastCommand.classList.toggle('error', error);
       return;
     }
@@ -108,10 +146,19 @@ export function createNotifications($) {
     clearTimeout(toast.timer);
     $('toast').hidden = true;
   };
+  toast.clearRoutine = source => {
+    if (!source || routineSource !== source || lastCommand.textContent !== lastStatus) return;
+    routineSource = null;
+    lastStatus = '';
+    lastCommand.textContent = '';
+    lastCommand.classList.remove('error');
+  };
   $('toast-close').addEventListener('click', () => toast.dismiss(noticeId));
+  onLanguageChange(() => { lastStatus = lastCommand.textContent; });
   new MutationObserver(() => {
     if (lastCommand.textContent === lastStatus) return;
     lastStatus = lastCommand.textContent;
+    routineSource = null;
     lastCommand.classList.remove('error');
   }).observe(lastCommand, { childList: true, characterData: true, subtree: true });
   return toast;

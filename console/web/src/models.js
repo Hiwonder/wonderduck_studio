@@ -1,3 +1,5 @@
+import { getLanguage, onLanguageChange } from '../../../webpadd/web/language.js';
+
 const modelLabels = {
   walk: '行走（velocity）', stand: '站立（stand）', sitstand: '坐立（sitstand）',
   ground_pick: '地面拾取（ground_pick）', kick_left: '左踢（ball_kick_left）',
@@ -25,6 +27,21 @@ export function createModelControls({ request, requestHeaders, refreshSession, c
   let onlineTimer = null, onlineSequence = 0, onlineError = '';
   const current = value => active && generation === value;
   const selected = () => models.find(model => model.id === selectedId);
+
+  function optionText(model) {
+    const name = modelName(model);
+    const customEnglish = !Object.hasOwn(modelLabels, model.id) && getLanguage() === 'en';
+    const status = model.active ? (customEnglish ? ' (Running)' : '（运行中）')
+      : model.loaded === false ? (customEnglish ? ' (Not loaded)' : '（未加载）') : '';
+    return `${name}${status}`;
+  }
+
+  onLanguageChange(() => {
+    for (const option of element('select').options) {
+      const model = models.find(item => item.id === option.value);
+      if (model && !Object.hasOwn(modelLabels, model.id)) option.textContent = optionText(model);
+    }
+  });
 
   function clearFile() {
     element('file').value = '';
@@ -158,9 +175,11 @@ export function createModelControls({ request, requestHeaders, refreshSession, c
     element('loaded').textContent = typeof model?.loaded === 'boolean' ? (model.loaded ? '已加载' : '未加载') : '--';
     element('default').textContent = typeof model?.is_default === 'boolean' ? (model.is_default ? '相同' : '不同') : '--';
     element('size').textContent = sizeText(model?.size);
+    element('name').toggleAttribute('data-i18n-skip', !!model?.original_name);
     element('name').textContent = model ? model.original_name || '原文件名未保留' : '--';
     element('path').textContent = model?.path || '--';
     element('default-name').textContent = model ? (model.default_path ? '原文件名未保留' : '未配置') : '--';
+    element('default-path').toggleAttribute('data-i18n-skip', !!model?.default_path);
     element('default-path').textContent = model ? model.default_path || '未配置' : '--';
     element('default-size').textContent = sizeText(model?.default_size);
     element('default-sha256').textContent = model?.default_sha256 || '--';
@@ -184,8 +203,10 @@ export function createModelControls({ request, requestHeaders, refreshSession, c
     for (const model of models) {
       const option = document.createElement('option');
       option.value = model.id;
-      const name = modelName(model);
-      option.textContent = `${name}${model.active ? '（运行中）' : model.loaded === false ? '（未加载）' : ''}`;
+      // Model names supplied by the device are user content, even if they
+      // happen to match a translated application label.
+      option.toggleAttribute('data-i18n-skip', !Object.hasOwn(modelLabels, model.id));
+      option.textContent = optionText(model);
       select.append(option);
     }
     select.value = selectedId;

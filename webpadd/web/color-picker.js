@@ -91,7 +91,8 @@
     if (message) {
       const notice = document.createElement('span');
       notice.className = 'vision-notice';
-      notice.textContent = `${hex ? ' · ' : ''}${message}`;
+      if (hex) notice.append(document.createTextNode(' · '));
+      notice.append(document.createTextNode(message));
       result.append(notice);
       window.dispatchEvent(new CustomEvent('console-feedback', {detail: {text: message, error: true}}));
     }

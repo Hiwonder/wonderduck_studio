@@ -526,6 +526,7 @@ fn router(state: AppState, media_port: u16) -> Router {
         .route("/colors", get(color_detection::upgrade))
         .route("/console.css", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], include_str!("../web/console.css")) }))
         .route("/console.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/console.js")) }))
+        .route("/language.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/language.js")) }))
         .route("/action-library.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/action-library.js")) }))
         .route("/licenses/agpl-3.0.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../../LICENSE")) }))
         .route("/licenses/apache-2.0.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../web/licenses/apache-2.0.txt")) }))

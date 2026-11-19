@@ -237,6 +237,12 @@ body[data-console-page="system"] .system-panel { grid-column: 1; grid-row: 1 / -
 .audio-volume-control span { display: flex; justify-content: space-between; gap: 12px; }
 .audio-volume-control output { color: var(--accent); font-variant-numeric: tabular-nums; }
 .audio-volume-control .speed-range { width: 100%; }
+.network-announcement-control { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
+.network-announcement-control input { appearance: none; position: relative; width: 38px; height: 22px; border: 0; border-radius: 11px; background: var(--line); cursor: pointer; }
+.network-announcement-control input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.network-announcement-control input:checked { background: var(--accent); }
+.network-announcement-control input:checked::after { transform: translateX(16px); }
+.network-announcement-control input:disabled { opacity: .5; cursor: default; }
 .audio-record-controls { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 16px; }
 .audio-record-controls #audio-record, .audio-record-controls #audio-record-delete { min-width: 140px; }
 .audio-record-controls #audio-record { grid-column: 1; grid-row: 1; }
@@ -703,7 +709,7 @@ html[data-theme] .action.stop:hover:not(:disabled) { background: #862129; border
 .system-panel .settings-section { min-height: auto; }
 .system-panel .settings-card { width: 100%; max-width: 640px; }
 .software-info-rows { margin-top: 10px; }
-.software-info-rows > div { display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 52px; }
+.software-info-rows > div { display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 44px; }
 .software-info-rows dt { color: var(--text); font-size: var(--font-body); }
 .software-info-rows dd { margin: 0; color: var(--muted); text-align: right; font-size: var(--font-body); }
 .software-info-rows .action { min-width: 140px; }
@@ -1431,6 +1437,11 @@ html[data-studio-embedded="true"] .feedback-dock,html[data-studio-embedded="true
 /* Keep the original vertical arrangement; shorter windows remain scrollable. */
 @media (min-width: 900px) and (min-height: 1000px) {
   .system-panel { overflow-y: hidden; }
+}
+@media (min-width: 900px) and (max-height: 850px) {
+  .system-panel { padding-top: 12px; padding-bottom: 12px; }
+  .system-panel .settings-card { padding-top: 8px; padding-bottom: 8px; }
+  .software-info-rows > div { min-height: 34px; }
 }
 
 .control-panel .accessory-controls .mouth-control { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; white-space: normal; }

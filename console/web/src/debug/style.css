@@ -58,6 +58,7 @@ header{height:64px}
 .live-control-heading .muted{font-size:13px}
 .servo-pose-actions{display:flex;align-items:center;gap:8px;height:48px;min-width:0;border-top:1px solid var(--line)}
 .servo-pose-actions button{height:34px;min-height:34px;padding:4px 8px;font-size:13px;gap:5px}
+.scan-progress{font-size:12px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
 #center-all{width:68px}#scan-servos{min-width:62px}#home-all{width:78px}.servo-pose-actions #release{width:100px}
 .servo-pose-actions svg{width:14px;height:14px;flex-shrink:0}
 .torque-switch{display:flex;align-items:center;gap:7px;margin-left:auto;font-size:13px;cursor:pointer}

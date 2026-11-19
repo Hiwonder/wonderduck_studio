@@ -1,5 +1,6 @@
-import { deviceFresh, SERVO_STATUS_MAX_AGE_MS, servoStatus } from './state-status.js';
+import { deviceFresh, imuFresh, SAMPLE_MAX_AGE_MS, SERVO_STATUS_MAX_AGE_MS, servoStatus } from './state-status.js';
 import { lowVoltageWarning } from './sidebar.js';
+import { setLocalizedAttribute, setLocalizedText } from '../../../webpadd/web/language.js';
 
 // Keep these targets aligned with robotd's HX startup configuration. PID is
 // displayed as P / I / D, unlike the servo's register order P / D / I.
@@ -27,21 +28,41 @@ export function formatResourceUsage(usage) {
     : `${Math.round(used / mib)} / ${Math.round(total / mib)} MiB`;
 }
 
+export function hottestServoTemperature(state, elapsed = 0, connectionError = '') {
+  if (state?.device_paused || !Array.isArray(state?.servos)) return null;
+  const maxAge = state.individual_device_scan || Number.isFinite(state.device_report_age_ms)
+    ? SERVO_STATUS_MAX_AGE_MS : SAMPLE_MAX_AGE_MS;
+  let hottest = null;
+  for (const servo of state.servos) {
+    if (servo?.discovered || !deviceFresh(servo, state, elapsed, connectionError, maxAge)
+        || servo.online === false || servo.error || !Number.isFinite(servo.temperature)
+        || servo.temperature <= 0 || servo.temperature > 255) continue;
+    // A reported fault does not invalidate a checksummed temperature. In
+    // particular, keep an overheating servo in the maximum.
+    if (!hottest || servo.temperature > hottest.temperature) {
+      hottest = { id: servo.id, name: servo.label || servo.name || '', temperature: servo.temperature };
+    }
+  }
+  return hottest;
+}
+
 export function createDeviceStatus({ toast }) {
   const get = id => document.getElementById(id);
   const rows = new Map();
-  let lastStatusNotice = '', lastAuxNotice = '';
+  let lastStatusNotice = '', lastAuxNotice = '', resourceCpu = null, resourceCpuAt = 0, healthCpu = null;
+  const cpuTemperature = () => resourceCpu !== null && performance.now() - resourceCpuAt < 10000
+    ? resourceCpu : healthCpu;
   const number = (value, digits, suffix = '') => Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : '--';
   const vector = (values, digits = 3) => Array.isArray(values) && values.length === 3 && values.every(Number.isFinite)
     ? values.map(value => value.toFixed(digits)).join('  /  ') : '--';
   const reading = (id, value) => {
     const element = get(id);
-    if (element.textContent !== value) element.textContent = value;
-    element.title = value;
+    setLocalizedText(element, value);
+    setLocalizedAttribute(element, 'title', value);
   };
   const setText = (id, value) => {
     const element = get(id);
-    if (element.textContent !== value) element.textContent = value;
+    setLocalizedText(element, value);
   };
 
   function rebuild(joints) {
@@ -64,25 +85,30 @@ export function createDeviceStatus({ toast }) {
   }
 
   function render(info, state, fresh, elapsed, connectionError, auxiliary, handoff = false,
-                  lowVoltage = state.robot?.low_voltage) {
+                  lowVoltage = state.robot?.low_voltage, batteryVoltage = state.robot?.health?.battery?.volts) {
     const joints = info?.joints || [];
     if (rows.size !== joints.length || joints.some(joint => !rows.has(joint.id))) rebuild(joints);
     const imu = state.imu || {};
-    const valid = deviceFresh(imu, state, elapsed, connectionError);
+    const valid = imuFresh(imu, state, elapsed, connectionError);
     if (info?.studio) {
       const health = state.robot?.health || {}, safety = state.safety || {};
-      const motor = health.motors;
-      const motorId = joints.find(joint => joint.name === motor?.hottest)?.id;
-      const motorTemperature = number(motor?.max_c, 0, ' °C');
+      const independent = state.individual_device_scan || Number.isFinite(state.device_report_age_ms);
+      const observedMotor = hottestServoTemperature(state, elapsed, connectionError);
+      const motor = independent ? observedMotor : observedMotor || (health.motors && {
+        id: joints.find(joint => joint.name === health.motors.hottest)?.id,
+        name: health.motors.hottest, temperature: health.motors.max_c,
+      });
+      const motorTemperature = number(motor?.temperature, 0, ' °C');
       const warning = lowVoltageWarning(lowVoltage);
-      const voltage = warning && Number.isFinite(lowVoltage.voltage_v) ? lowVoltage.voltage_v : health.battery?.volts;
+      const voltage = warning && Number.isFinite(lowVoltage.voltage_v) ? lowVoltage.voltage_v : batteryVoltage;
       setText('runtime-battery', number(voltage, 1, ' V'));
       get('runtime-battery').classList.toggle('low-voltage', warning);
       get('runtime-battery').title = warning ? '电压过低，请及时充电' : '电池电压';
-      setText('runtime-motor', motorTemperature !== '--' && Number.isInteger(motorId)
-        ? `${motorTemperature} · ID ${motorId}` : motorTemperature);
-      get('runtime-motor').title = motor?.hottest || '';
-      setText('runtime-cpu', number(health.cpu_temp_c, 0, ' °C'));
+      setText('runtime-motor', motorTemperature !== '--' && Number.isInteger(motor?.id)
+        ? `${motorTemperature} · ID ${motor.id}` : motorTemperature);
+      get('runtime-motor').title = motor?.name || '';
+      healthCpu = Number.isFinite(health.cpu_temp_c) ? health.cpu_temp_c : null;
+      setText('runtime-cpu', number(cpuTemperature(), 0, ' °C'));
       setText('runtime-safety', !fresh ? '--' : safety.fallen ? '摔倒' : safety.limp ? '卸力状态' : '正常');
     }
     const deviceReportsFresh = Number.isFinite(state.device_report_age_ms) &&
@@ -109,7 +135,7 @@ export function createDeviceStatus({ toast }) {
     reading('aux-gyro', auxiliary.valid ? vector(aux.gyro_rad_s) : '--');
     reading('aux-gravity', auxiliary.valid ? vector(aux.gravity) : '--');
     reading('aux-quaternion', auxiliary.valid ? aux.quaternion_wxyz.map(value => value.toFixed(3)).join('  /  ') : '--');
-    const auxNotice = auxiliary.valid ? '' : auxiliary.detail !== auxiliary.label
+    const auxNotice = auxiliary.valid || auxiliary.kind === 'pending' ? '' : auxiliary.detail !== auxiliary.label
       ? `${auxiliary.label}：${auxiliary.detail}` : auxiliary.label;
     const transientAux = transientHandoff && ['starting', 'waiting', 'stale'].includes(auxiliary.kind);
     if (!transientAux && auxNotice !== lastAuxNotice) {
@@ -141,8 +167,8 @@ export function createDeviceStatus({ toast }) {
         config ? `${version(config.firmware_version)} / ${version(config.servo_version)}` : '--'];
       const entry = rows.get(joint.id);
       entry.cells.forEach((cell, index) => {
-        if (cell.textContent !== values[index]) cell.textContent = values[index];
-        cell.title = index >= 7 && servo?.configuration_error ? servo.configuration_error : values[index];
+        setLocalizedText(cell, values[index], index === 6);
+        setLocalizedAttribute(cell, 'title', index >= 7 && servo?.configuration_error ? servo.configuration_error : values[index], index === 6);
       });
       entry.cells[6].className = status.kind === 'normal' && !state.calibration?.active ? '' : 'status-error';
       for (const [index, differs, expected] of [
@@ -160,6 +186,9 @@ export function createDeviceStatus({ toast }) {
   function renderResources(resources) {
     setText('runtime-storage', formatResourceUsage(resources?.storage));
     setText('runtime-memory', formatResourceUsage(resources?.memory));
+    resourceCpu = Number.isFinite(resources?.cpu_temp_c) ? resources.cpu_temp_c : null;
+    resourceCpuAt = performance.now();
+    setText('runtime-cpu', number(cpuTemperature(), 0, ' °C'));
   }
   return { render, renderResources };
 }

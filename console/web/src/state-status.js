@@ -1,11 +1,13 @@
 export const SAMPLE_MAX_AGE_MS = 500;
-// Individual bus scans can take longer when a device times out; IMU and
-// control-frame freshness retain their shorter limit.
+// A missing servo can delay a complete independent scan by its timeout and
+// quiet interval; each displayed device still uses its own sample timestamp.
 export const SERVO_STATUS_MAX_AGE_MS = 3000;
+export const INDEPENDENT_IMU_MAX_AGE_MS = 1500;
 
 export function sampleFresh(state, elapsed = 0, connectionError = '') {
+  const limit = state?.individual_device_scan ? SERVO_STATUS_MAX_AGE_MS : SAMPLE_MAX_AGE_MS;
   return !connectionError && !!state?.online && Number.isFinite(state.age_ms) &&
-    state.age_ms >= 0 && state.age_ms + Math.max(0, elapsed) < SAMPLE_MAX_AGE_MS;
+    state.age_ms >= 0 && state.age_ms + Math.max(0, elapsed) < limit;
 }
 
 export function deviceFresh(device, state, elapsed = 0, connectionError = '', maxAgeMs = SAMPLE_MAX_AGE_MS) {
@@ -13,12 +15,23 @@ export function deviceFresh(device, state, elapsed = 0, connectionError = '', ma
     device.age_ms >= 0 && device.age_ms + Math.max(0, elapsed) < maxAgeMs;
 }
 
+export function imuFresh(imu, state, elapsed = 0, connectionError = '') {
+  const limit = Number.isFinite(state?.device_report_age_ms) || state?.individual_device_scan
+    ? INDEPENDENT_IMU_MAX_AGE_MS : SAMPLE_MAX_AGE_MS;
+  return deviceFresh(imu, state, elapsed, connectionError, limit);
+}
+
 export function auxImuStatus(imu, elapsed = 0, connectionError = '') {
   const result = (kind, label, detail = label, valid = false) => ({ kind, label, detail, valid });
   if (connectionError) return result('connection', '服务断开', connectionError);
   if (!imu) return result('starting', '等待采集');
-  if (imu.status === 'stale' || (imu.valid && Number.isFinite(imu.age_ms) &&
-      imu.age_ms + Math.max(0, elapsed) > 500)) return result('stale', '数据过期', imu.error || '头部 IMU 数据已超过 500 ms');
+  if (imu.status === 'stale') return result('stale', '数据过期', imu.error || '头部 IMU 数据已超过 500 ms');
+  // A previously valid sample can age out while the browser waits for the
+  // next response. That does not establish that the sensor itself is stale.
+  if (imu.valid === true && imu.status === 'ok' && Number.isFinite(imu.age_ms) && imu.age_ms >= 0 &&
+      imu.age_ms + Math.max(0, elapsed) > 500) {
+    return result('pending', '等待更新', '正在等待设备状态更新');
+  }
   const vector = (value, length) => Array.isArray(value) && value.length === length && value.every(Number.isFinite);
   if (imu.valid === true && imu.status === 'ok') {
     if (!Number.isFinite(imu.age_ms) || imu.age_ms < 0 || !Number.isInteger(imu.reset_count) || !vector(imu.rpy_deg, 3) ||
@@ -33,8 +46,8 @@ export function auxImuStatus(imu, elapsed = 0, connectionError = '') {
   return result(imu.status || 'invalid', label, imu.error || label);
 }
 
-export function imuTraceContinues(previous, sample, axis) {
-  return !!previous && sample.time - previous.time <= 600 &&
+export function imuTraceContinues(previous, sample, axis, maxGapMs = 600) {
+  return !!previous && sample.time - previous.time <= maxGapMs &&
     Math.abs(sample.angles[axis] - previous.angles[axis]) <= 180 &&
     sample.reset_count === previous.reset_count;
 }

@@ -133,7 +133,7 @@ export function createParameterSave({ context, request, command, toast, setBusy,
 
   function updateSelectAll(id, selector, blocked) {
     const input = get(id);
-    const options = [...document.querySelectorAll(selector)].filter(option => option.dataset.batchWritable !== 'false');
+    const options = [...document.querySelectorAll(selector)].filter(option => option.dataset.batchWritable !== 'false' && option.dataset.unavailable !== 'true');
     const count = options.filter(option => option.checked).length;
     input.checked = options.length > 0 && count === options.length;
     input.indeterminate = count > 0 && count < options.length;
@@ -159,7 +159,11 @@ export function createParameterSave({ context, request, command, toast, setBusy,
     const blocked = current.readonly || running || loading || current.busy || current.parameterWriteBusy;
     get('load-params').disabled = blocked || current.parameterId !== current.id || !current.registers;
     for (const input of document.querySelectorAll('.servo-select-toggle, .batch-parameter-toggle')) {
-      input.disabled = blocked || input.dataset.batchWritable === 'false';
+      const id = input.classList.contains('servo-select-toggle') ? Number(input.closest('tr').dataset.id) : null;
+      const unavailable = id !== null && !current.servos?.some(servo => servo.id === id && servo.online === true);
+      if (id !== null) input.dataset.unavailable = String(unavailable);
+      if (unavailable) { selectedIds.delete(id); input.checked = false; }
+      input.disabled = blocked || unavailable || input.dataset.batchWritable === 'false';
     }
     updateSelectAll('select-all-servos', '.servo-select-toggle', blocked);
     updateSelectAll('select-all-parameters', '.batch-parameter-toggle', blocked);

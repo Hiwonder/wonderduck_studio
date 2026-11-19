@@ -29,7 +29,7 @@ from app.sensors.camera import Camera
 from app.sensors.qmi_imu import AuxiliaryImu
 from app.sensors.tof import TofReader
 from app.system import network, resources, service_control
-from app.system.runtime_config import robot_root
+from app.system.runtime_config import ModelPaletteStore, NetworkAnnouncementStore, robot_root, software_version
 from app.system.secure_transport import SecureTransport
 
 
@@ -168,13 +168,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         if path == "/api/info":
-            readonly = getattr(self.controller, "readonly", False)
+            native_readonly = getattr(self.controller, "readonly", False)
+            readonly = native_readonly
+            if getattr(self.server, "studio", False) and hasattr(self.controller, "readonly_for"):
+                readonly = readonly or self.controller.readonly_for(self.client)
             registers = [dict(item, writable=False) for item in REGISTERS] if readonly else REGISTERS
             updater = getattr(self.server, "online_model_updater", None)
             try:
                 versions = device_versions(updater.version_path) if updater else device_versions()
             except ValueError:
                 versions = None
+            versions = dict(versions or {}, software_version=software_version(getattr(self.server, "robot_root", None)))
             if getattr(self.server, "studio", False):
                 try:
                     health = query_robotd(self.controller.path, (("robot.health", {}),), timeout=.5)["robot.health"]
@@ -196,7 +200,7 @@ class Handler(BaseHTTPRequestHandler):
                                 supports_online_model_rest=getattr(self.server, "online_model_updater", None) is not None,
                                 supports_model_update_resume=getattr(self.server, "online_model_updater", None) is not None,
                                 supports_model_version_gate=getattr(self.server, "online_model_updater", None) is not None,
-                                supports_locked_release=not readonly,
+                                supports_locked_release=not native_readonly,
                                 supports_home_targets=not readonly, supports_direct_slider=not readonly,
                                 supports_direct_action_frame=not readonly))
         elif path == "/api/internal/maintenance-voltage":
@@ -210,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             state_started = time.monotonic()
             workspace = self.headers.get("X-Studio-Workspace")
             if getattr(self.server, "studio", False):
-                self.controller.set_status_visible(self.client, workspace == "status")
+                self.controller.set_status_visible(self.client, workspace in ("status", "action", "debug", "calibration"))
             state = self.controller.snapshot(self.client)
             control_done = time.monotonic()
             if getattr(self.server, "tof", None) is not None:
@@ -242,6 +246,11 @@ class Handler(BaseHTTPRequestHandler):
             if "control_servos" in state:
                 state["control_servos"] = [dict(item) for item in state["control_servos"]]
             state["imu"] = dict(state.get("imu") or {})
+            if isinstance(state["imu"].get("raw_sample"), dict):
+                raw_sample = dict(state["imu"]["raw_sample"])
+                sampled = raw_sample.pop("sampled_monotonic", None)
+                raw_sample["age_us"] = round((now - sampled) * 1_000_000) if sampled is not None else None
+                state["imu"]["raw_sample"] = raw_sample
             for item in [*state["servos"], *state.get("control_servos", []), state["imu"]]:
                 for source, target in (("sampled_monotonic", "age_ms"),
                                        ("observed_monotonic", "observation_age_ms")):
@@ -263,6 +272,14 @@ class Handler(BaseHTTPRequestHandler):
                     logging.warning("头部 IMU 页面状态请求慢 total_ms=%.1f control_ms=%.1f auxiliary_ms=%.1f response_ms=%.1f",
                                     (state_done - state_started) * 1000, (control_done - state_started) * 1000,
                                     (auxiliary_done - control_done) * 1000, (state_done - auxiliary_done) * 1000)
+        elif path == "/api/model-palette":
+            self.send_json(self.server.model_palette.snapshot())
+        elif path == "/api/network-announcement":
+            try:
+                self.send_json(self.server.network_announcement.snapshot())
+            except (OSError, ValueError) as error:
+                logging.warning("读取开机网络播报设置失败：%s", error)
+                self.send_json(dict(error="读取开机网络播报设置失败"), 500)
         elif path == "/api/resources":
             try:
                 self.send_json(resources.snapshot())
@@ -360,6 +377,12 @@ class Handler(BaseHTTPRequestHandler):
             command = json.loads(body.read(length))
             if not isinstance(command, dict):
                 raise ValueError("请求必须为对象")
+            if path == "/api/model-palette":
+                self.send_json(self.server.model_palette.save(command.get("palette")))
+                return
+            if path == "/api/network-announcement":
+                self.send_json(self.server.network_announcement.save(command.get("enabled")))
+                return
             if path == "/api/models/restore":
                 manager = self.model_manager()
                 with self.model_operation():
@@ -540,9 +563,10 @@ def create_controller(args):
             return Hardware(args.serial, args.source, args.layout, args.full_servo_range,
                             args.imu_source, home_policy=args.home_policy)
 
-        def factory():
+        def factory(workspace):
             return Controller(create_hardware(), args.hz, demo=args.demo, hardware_factory=create_hardware,
-                              port=args.serial, full_servo_range=args.full_servo_range, maintenance=True)
+                              port=args.serial, full_servo_range=args.full_servo_range, maintenance=True,
+                              imu_only=workspace == "calibration")
 
         return StudioController(args.robotd_socket, args.hz, factory, demo=args.demo,
                                 status_hardware_factory=create_hardware)
@@ -603,12 +627,15 @@ def main():
         server.daemon_threads = True
         server.controller = controller
         server.studio = args.studio
+        server.robot_root = args.robot_root
         server.camera = camera
         server.tof = tof
         server.auxiliary_imu = auxiliary_imu
         server.static = Path(args.static).resolve()
         server.actions_directory = Path(__file__).resolve().parent / "actions"
         server.action_documents = ActionDocuments(Path(__file__).resolve().parent / "action-groups")
+        server.model_palette = ModelPaletteStore()
+        server.network_announcement = NetworkAnnouncementStore()
         server.model_manager = (ModelManager(args.robot_root, controller.observer.query)
                                 if args.studio and not args.demo else None)
         server.online_model_updater = (OnlineModelUpdater(server.model_manager, lambda: UpdateControl(args.robotd_socket))

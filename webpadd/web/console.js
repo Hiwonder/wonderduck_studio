@@ -198,30 +198,57 @@
   const previousStates = new Map();
   const previousErrors = new Map();
   function sendFeedback(text, error, node = null, routine = false) {
-    latestFeedback = { node, message: { type: 'studio-feedback', text, error, routine } };
+    latestFeedback = { node, message: { type: 'studio-feedback', text, error, routine, source: node?.id || null } };
     if (studioOrigin) window.parent.postMessage(latestFeedback.message, studioOrigin);
     else if (error) pendingErrors.push(latestFeedback.message);
   }
+  const networkAnnouncement = document.querySelector('#network-announcement-enabled');
+  let announcementRequestId = 0, announcementConfirmed = null, announcementTimer = null;
+  function requestNetworkAnnouncement(enabled) {
+    if (!studioOrigin) return;
+    const requestId = ++announcementRequestId;
+    clearTimeout(announcementTimer);
+    networkAnnouncement.disabled = true;
+    window.parent.postMessage({ type: 'studio-network-announcement-request', requestId,
+      ...(typeof enabled === 'boolean' ? { enabled } : {}) }, studioOrigin);
+    announcementTimer = setTimeout(() => {
+      if (requestId !== announcementRequestId) return;
+      if (announcementConfirmed !== null) networkAnnouncement.checked = announcementConfirmed;
+      networkAnnouncement.disabled = announcementConfirmed === null;
+      sendFeedback('开机网络播报设置超时，请重试', true);
+    }, 8000);
+  }
+  networkAnnouncement.addEventListener('change', () => requestNetworkAnnouncement(networkAnnouncement.checked));
+  window.addEventListener('console-page-changed', () => {
+    if (body.dataset.consolePage === 'system') requestNetworkAnnouncement();
+  });
   function forwardFeedback(node) {
     if (!node) return;
-    const text = node.textContent.trim();
+    const visibleText = node.textContent.trim();
+    const sourceText = (window.WonderduckLanguage?.sourceText(node) || visibleText).trim();
+    // This observer can run before the language observer, so translate from
+    // the source when forwarding feedback to the parent.
+    const text = window.WonderduckLanguage?.translate(sourceText) || visibleText;
     if (!text) {
       previousStates.delete(node);
       previousErrors.delete(node);
       if (latestFeedback?.node === node) latestFeedback = null;
+      if (node.id === 'settings-status' && studioOrigin) {
+        window.parent.postMessage({ type: 'studio-feedback-clear', source: node.id }, studioOrigin);
+      }
       return;
     }
     const error = node.classList.contains('error')
-      || (node.id !== 'notice' && /失败|无效|不可用|中断|未连接|已断开|超时|错误/.test(text));
+      || (node.id !== 'notice' && /失败|无效|不可用|中断|未连接|已断开|超时|错误/.test(sourceText));
     const routine = routineNodes.has(node.id) || (node.id === 'settings-status' && !error
-      && ['参数已修改，等待保存…', '正在自动保存…', '参数已自动保存'].includes(text));
-    const state = `${error}:${text}`;
+      && ['参数已修改，等待保存…', '正在自动保存…', '参数已自动保存'].includes(sourceText));
+    const state = `${error}:${sourceText}`;
     if (routine && previousStates.get(node) === state) return;
     if (routine) {
       previousStates.set(node, state);
-      if (error && previousErrors.get(node) === text) return;
-      if (error) previousErrors.set(node, text);
-      else if (node.id !== 'camera-status' && (node.id !== 'connection' || text.includes('已连接'))) previousErrors.delete(node);
+      if (error && previousErrors.get(node) === sourceText) return;
+      if (error) previousErrors.set(node, sourceText);
+      else if (node.id !== 'camera-status' && (node.id !== 'connection' || sourceText.includes('已连接'))) previousErrors.delete(node);
     }
     sendFeedback(text, error, node, routine);
   }
@@ -266,6 +293,10 @@
       const button = document.querySelector(`button[data-page="${event.data.page}"]`);
       button?.click();
       window.dispatchEvent(new Event('studio-enter'));
+      if (button && Number.isSafeInteger(event.data.requestId)) {
+        window.parent.postMessage({ type: 'studio-workspace-ready', page: event.data.page,
+          requestId: event.data.requestId }, event.origin);
+      }
     } else if (event.data?.type === 'studio-leave' && Number.isSafeInteger(event.data.requestId)) {
       window.dispatchEvent(new CustomEvent('studio-leave', { detail: event.data.requestId }));
     } else if (event.data?.type === 'studio-debug-mode' && typeof event.data.enabled === 'boolean') {
@@ -279,7 +310,20 @@
       const versions = event.data.versions;
       document.getElementById('device-hardware-version').textContent = versions?.hardware_version || '未配置';
       document.getElementById('device-image-version').textContent = versions?.image_version || '未配置';
+      document.getElementById('device-software-version').textContent = versions?.software_version || '未读取';
       document.getElementById('device-imu-firmware-version').textContent = versions?.imu_firmware_version || '未读取';
+    } else if (event.data?.type === 'studio-network-announcement-result'
+        && event.data.requestId === announcementRequestId) {
+      clearTimeout(announcementTimer);
+      if (typeof event.data.enabled === 'boolean') {
+        announcementConfirmed = event.data.enabled;
+        networkAnnouncement.checked = announcementConfirmed;
+        networkAnnouncement.disabled = false;
+      } else {
+        if (announcementConfirmed !== null) networkAnnouncement.checked = announcementConfirmed;
+        networkAnnouncement.disabled = announcementConfirmed === null;
+        sendFeedback(`开机网络播报设置失败：${event.data.error || '请重试'}`, true);
+      }
     }
   });
   expanded.addEventListener('change', () => {

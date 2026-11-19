@@ -3,7 +3,7 @@ import { createIcons, Bot, PowerOff,
   Save, Pencil, Menu, PanelLeftClose, Crosshair, House, FolderOpen } from 'lucide';
 import { createLinkedTarget } from './linked-target.js';
 import { createLiveParameter } from './live-parameter.js';
-import { sampleFresh, servoStatus } from './state-status.js';
+import { imuFresh, sampleFresh, servoStatus } from './state-status.js';
 import './style.css';
 import '../font.css';
 import '../theme.css';
@@ -15,6 +15,7 @@ import { createParameterSave } from '../parameter-save.js';
 import { createServoControls } from '../servo-controls.js';
 import { createReleaseConfirmation } from '../release-confirm.js';
 import { friendlyErrorMessage } from '../user-messages.js';
+import { setLocalizedAttribute, setLocalizedText, translate } from '../../../../webpadd/web/language.js';
 
 const $ = (id) => document.getElementById(id);
 // The parent may show this page before it has a safe maintenance lease.
@@ -329,10 +330,10 @@ function updateControls() {
   const operationBusy = busy || scanBusy || parameterSave.isRunning() || !!state?.parameter_batch_active;
   const online = stateFresh();
   const poseEnabled = armed && !operationBusy && !parameterWriteBusy && !document.hidden && online &&
-    info?.joints.every(joint => state.servos.some(servo => servo.id === joint.id && servo.valid));
+    info?.joints.some(joint => state.servos.some(servo => servo.id === joint.id && servo.valid));
   servoControls.update({ center: poseEnabled,
     home: armed && !operationBusy && !parameterWriteBusy && !document.hidden && online &&
-      info?.joints.filter(joint => !joint.discovered).every(joint => state.servos.some(servo => servo.id === joint.id && servo.valid)),
+      info?.joints.filter(joint => !joint.discovered).some(joint => state.servos.some(servo => servo.id === joint.id && servo.valid)),
     scan: armed && !operationBusy && !parameterWriteBusy && !parameterReadBusy && !document.hidden && online });
   $('torque').disabled = !armed || operationBusy || parameterWriteBusy || !online || !current?.valid;
   $('torque').checked = current?.torque === 1;
@@ -540,8 +541,8 @@ function renderServos() {
     for (let i = 0; i < values.length; i++) {
       if (held && i > 0 && i < values.length - 1) continue;
       const cell = row.children[i + 1];
-      if (cell.textContent !== String(values[i])) cell.textContent = values[i];
-      cell.title = String(values[i]);
+      setLocalizedText(cell, values[i], i === values.length - 1);
+      setLocalizedAttribute(cell, 'title', values[i], i === values.length - 1);
     }
     if (servo?.id === selected) {
       if (valid && !targetInitialized) {
@@ -764,7 +765,7 @@ function renderState() {
   calibrationControls.render(state.calibration, info?.demo, state.imu_source);
   $('imu-source').value = state.imu_source || info.imu_source || 'id200';
   const fresh = stateFresh();
-  const valid = fresh && state.imu?.valid && validQuaternion(state.imu.quaternion_wxyz);
+  const valid = imuFresh(state.imu, state, sampleElapsed(), connectionError) && validQuaternion(state.imu.quaternion_wxyz);
   const servoKinds = fresh ? state.servos.map(servo => servoStatus(servo, state, sampleElapsed(), connectionError).kind) : [];
   const faults = servoKinds.includes('fault');
   const communication = servoKinds.includes('communication');
@@ -849,7 +850,7 @@ async function poll() {
 }
 
 setInterval(() => {
-  if (state && !stateFresh() && !['数据过期', '采集异常', '连接中断'].includes($('connection').textContent)) renderState();
+  if (state && !stateFresh() && !['数据过期', '采集异常', '连接中断'].map(translate).includes($('connection').textContent)) renderState();
 }, 100);
 
 function highlightSelectedJoint() {

@@ -4,8 +4,8 @@ import { modelConfigUrl } from './model-resource.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createIcons, Bot, Power, PowerOff, Menu, PanelLeftClose, Crosshair, Play, SlidersHorizontal, LayoutGrid, RotateCcw, Undo2,
   Lock, LockOpen, Plus, Minus, ListPlus, RefreshCw, Download, Trash2, ArrowUp, ArrowDown, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-  FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery } from 'lucide';
-import { SAMPLE_MAX_AGE_MS, auxImuStatus, deviceFresh, imuTraceContinues, sampleFresh, servoStatus, tofStatus } from './state-status.js';
+  FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, Languages } from 'lucide';
+import { SAMPLE_MAX_AGE_MS, SERVO_STATUS_MAX_AGE_MS, INDEPENDENT_IMU_MAX_AGE_MS, auxImuStatus, deviceFresh, imuFresh, imuTraceContinues, sampleFresh, servoStatus, tofStatus } from './state-status.js';
 import './style.css';
 import './simple-controls.css';
 import './theme.css';
@@ -19,13 +19,14 @@ import './interaction.css';
 import { createCalibrationControls } from './calibration-controls.js';
 import { createCalibrationCharts } from './calibration-charts.js';
 import { createDeviceStatus } from './device-status.js';
-import { createConnectionStatus, createLowVoltageIndicator, createNotifications, createSidebar, lowVoltageWarning, renderSidebarVoltage } from './sidebar.js';
+import { createConnectionStatus, createLowVoltageIndicator, createNotifications, createSidebar, displayVoltage, lowVoltageWarning, renderSidebarVoltage } from './sidebar.js';
 import { createServoPanel } from './servo-panel.js';
 import { createServoDebugMode } from './servo-debug-mode.js';
 import { createActionEditor } from './action-editor.js';
 import { createCameraPreview } from './camera-preview.js';
 import { createMediaPreview } from './media-preview.js';
 import { createViewerEnvironment } from './viewer-environment.js';
+import { createModelPaletteControl } from './model-palette.js';
 import { centerTrunkOnPlatform, createFootHeightAligner, positionForPose } from './ground-placement.js';
 import { createNetworkControls } from './network.js';
 import { createModelControls } from './models.js';
@@ -34,12 +35,12 @@ import { createActionReferenceView } from './action-reference-view.js';
 import { createJointHighlighter } from './joint-highlights.js';
 import { createReleaseConfirmation } from './release-confirm.js';
 import { friendlyErrorMessage } from './user-messages.js';
+import { getLanguage, onLanguageChange, setLanguage, setLocalizedText, translate } from '../../../webpadd/web/language.js';
 import { version as appVersion } from '../package.json';
 
 const $ = (id) => document.getElementById(id);
 const setText = (id, value) => {
-  const element = $(id), text = String(value);
-  if (element.textContent !== text) element.textContent = text;
+  setLocalizedText($(id), value);
 };
 const fontFamily = getComputedStyle(document.documentElement).fontFamily;
 const client = sessionStorage.getItem('console-client') || crypto.randomUUID?.() || `client-${Date.now()}-${Math.random()}`;
@@ -50,7 +51,7 @@ let token = '', lastImuKey = '', lastGood = 0, responseSequence = 0, lastAuxSequ
 let auxValid = false;
 let lowVoltageActive = false, lastLowVoltageNotice = -Infinity;
 let connectionError = '';
-let stateRequestPending = false;
+let stateRequestPending = false, stateRequestStarted = 0;
 let resourceRequestPending = false, nextResourceRequest = 0;
 let previousStateStarted = 0, statePollInterval = 0, stateRequestDuration = 0, stateRenderDuration = 0;
 let lastHeadDiagnostic = -Infinity;
@@ -71,7 +72,7 @@ const fmt = (n, digits = 1) => Number.isFinite(n) ? n.toFixed(digits) : '--';
 const iconsRefresh = () => {
   createIcons({ icons: { Bot, Power, PowerOff, Menu, PanelLeftClose, Crosshair, Play,
     SlidersHorizontal, LayoutGrid, RotateCcw, Undo2, Lock, LockOpen, Plus, Minus, ListPlus, RefreshCw, Download, Trash2, ArrowUp, ArrowDown, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-    FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery }, attrs: { 'stroke-width': 1.8 } });
+    FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, Languages }, attrs: { 'stroke-width': 1.8 } });
   // Lucide retains this attribute on rendered SVGs and would otherwise replace them again.
   document.querySelectorAll('svg[data-lucide]').forEach(icon => icon.removeAttribute('data-lucide'));
 };
@@ -80,6 +81,8 @@ $('app-version').textContent = `v${appVersion}`;
 
 const sampleElapsed = () => Math.max(0, performance.now() - lastGood);
 const stateFresh = () => sampleFresh(state, sampleElapsed(), connectionError);
+const liveServoFresh = servo => deviceFresh(servo, state, sampleElapsed(), connectionError,
+  Number.isFinite(state?.device_report_age_ms) ? SERVO_STATUS_MAX_AGE_MS : SAMPLE_MAX_AGE_MS);
 
 const setConnectionStatus = createConnectionStatus($);
 const setSidebarOpen = createSidebar($, iconsRefresh);
@@ -140,6 +143,7 @@ async function request(path, body, timeoutMs = null) {
     }
     if (Number.isFinite(data.aux_imu?.age_ms)) data.aux_imu.age_ms += readTime;
     if (Number.isFinite(data.aux_imu?.sample?.age_us)) data.aux_imu.sample.age_us += readTime * 1000;
+    if (Number.isFinite(data.imu?.raw_sample?.age_us)) data.imu.raw_sample.age_us += readTime * 1000;
     for (const calibration of [data.calibration, data.head_calibration]) {
       if (Number.isFinite(calibration?.sample_age_ms)) calibration.sample_age_ms += readTime;
     }
@@ -227,17 +231,17 @@ const actionEditor = createActionEditor({ request, toast, confirmAction, iconsRe
   context: () => ({ info, state, armed, fresh: stateFresh(), connectionError }) });
 setInterval(renewControl, 1000);
 document.addEventListener('visibilitychange', () => {
-  if (info?.studio && token && (workspace === 'status' || !document.hidden && resumePages.has(workspace))) {
+  if (info?.studio && token && (workspace === 'status' || !document.hidden && shouldResumeWorkspace())) {
     advanceHeadSubscription();
     if (document.hidden && workspace === 'status') request('state').catch(error => console.debug('设备状态采集切换失败', error.message));
   }
   if (document.hidden) releaseControl();
-  else if (info?.studio && resumePages.has(workspace)) restoreWorkspaceOnVisible();
+  else if (info?.studio && shouldResumeWorkspace()) restoreWorkspaceOnVisible();
   else renewControl();
 });
 window.addEventListener('pagehide', releaseControl);
 window.addEventListener('pageshow', () => {
-  if (info?.studio && resumePages.has(workspace)) {
+  if (info?.studio && shouldResumeWorkspace()) {
     advanceHeadSubscription();
     restoreWorkspaceOnVisible();
   } else renewControl();
@@ -301,6 +305,9 @@ const maintenancePages = new Set(['action', 'debug', 'calibration']);
 const restBeforeWorkspace = new Set(['status', 'action', 'debug', 'calibration']);
 const restrictedPages = new Set(['maze', 'person', 'target']);
 const resumePages = new Set(['status', 'action', 'debug', ...restrictedPages]);
+// Active calibration owns a separate session. Only re-enter calibration here
+// when it was opened as a read-only observation after an unconfirmed release.
+const shouldResumeWorkspace = () => resumePages.has(workspace) || (workspace === 'calibration' && info?.readonly);
 let switchingWorkspace = false;
 let pendingWorkspaceResume = false, workspaceRestoreInFlight = false;
 let workspaceRetryRequired = false;
@@ -308,7 +315,7 @@ let statusReleaseUnconfirmed = false;
 let queuedWorkspace = null, workspaceQueueTimer = null;
 
 function restoreWorkspaceOnVisible() {
-  if (!info?.studio || document.hidden || !token || workspaceRetryRequired || !resumePages.has(workspace)) return;
+  if (!info?.studio || document.hidden || !token || workspaceRetryRequired || !shouldResumeWorkspace()) return;
   if (switchingWorkspace || workspaceRestoreInFlight) { pendingWorkspaceResume = true; return; }
   const target = workspace, revision = headSubscriptionRevision;
   const frame = target === 'debug' ? $('debug-frame') : controlPages.has(target) ? $('control-workspace') : null;
@@ -321,9 +328,14 @@ function restoreWorkspaceOnVisible() {
   request('workspace', { workspace: target }).then(async result => {
     if (document.hidden || switchingWorkspace || workspace !== target || headSubscriptionRevision !== revision) return;
     if (target === 'status' && result?.ready !== true) throw new Error(result?.error || '设备状态采集尚未就绪');
-    if ((target === 'action' || target === 'debug') && result?.maintenance !== true) throw new Error('维护工作区尚未就绪');
+    if (maintenancePages.has(target) && result?.maintenance !== true
+        && !(result?.readonly === true && result?.release_unconfirmed === true)) throw new Error('维护工作区尚未就绪');
+    if (result?.release_unconfirmed === true && !info?.readonly) {
+      info = await request('info');
+      token = info.token;
+    }
     if (target === 'debug' && frame) {
-      await loadWorkspaceFrame(frame, '/debug.html');
+      await loadWorkspaceFrame(frame, result?.readonly ? '/debug.html?preview=1' : '/debug.html');
       if (document.hidden || switchingWorkspace || workspace !== target || headSubscriptionRevision !== revision) {
         frame.src = 'about:blank';
         return;
@@ -331,9 +343,9 @@ function restoreWorkspaceOnVisible() {
     }
     restored = true;
     document.body.dataset.studioReady = 'true';
-    statusReleaseUnconfirmed = target === 'status' && result?.release_unconfirmed === true;
+    statusReleaseUnconfirmed = result?.release_unconfirmed === true;
     const warning = statusReleaseUnconfirmed
-      ? `${friendlyErrorMessage(result.warning || '卸力未确认')} 当前仅可查看设备状态。` : '';
+      ? `${friendlyErrorMessage(result.warning || '卸力未确认')} 当前页面仅可查看。` : '';
     previewWorkspace(target, warning, true, !!warning);
     if (frame) frame.inert = false;
     if (target === 'debug') notifyFrames('studio-workspace', { page: target });
@@ -406,6 +418,20 @@ function notifyFrames(type, data = {}) {
   }
 }
 
+function updateLanguageToggle(language) {
+  const button = $('language-toggle');
+  const target = language === 'en' ? '中文' : 'English';
+  button.querySelector('span').textContent = target;
+  button.title = language === 'en' ? '切换到中文' : 'Switch to English';
+  button.setAttribute('aria-label', button.title);
+}
+onLanguageChange(language => {
+  updateLanguageToggle(language);
+  notifyFrames('studio-language', { language });
+});
+$('language-toggle').addEventListener('click', () => setLanguage(getLanguage() === 'en' ? 'zh' : 'en'));
+updateLanguageToggle(getLanguage());
+
 function syncDebugMode() {
   notifyFrames('studio-debug-mode', { enabled: false });
 }
@@ -440,6 +466,20 @@ function pollControlAction() {
     else finishControlAction(result);
   }).catch(error => toast(`动作状态读取失败：${error.message}`, true))
     .finally(() => { controlActionPollBusy = false; });
+}
+
+async function networkAnnouncementSetting(event) {
+  const { requestId, enabled } = event.data;
+  if (!Number.isSafeInteger(requestId)) return;
+  const reply = data => event.source.postMessage({ type: 'studio-network-announcement-result', requestId, ...data }, event.origin);
+  try {
+    if (workspace !== 'system') throw new Error('请先打开系统设置');
+    if (enabled !== undefined && typeof enabled !== 'boolean') throw new Error('设置无效');
+    const result = await request('network-announcement', enabled === undefined ? undefined : { enabled });
+    reply({ enabled: result.enabled });
+  } catch (error) {
+    reply({ error: error.message });
+  }
 }
 
 async function controlAction(event) {
@@ -517,8 +557,10 @@ $('sidebar-restart').addEventListener('click', async () => {
   if (sidebarRestartBusy || !info?.supports_service_restart) return;
   sidebarRestartBusy = true;
   updateSidebarRestart();
-  const previousToken = token;
   try {
+    if (!await confirmAction('重启服务', '重启期间操控会短暂中断，请扶稳机器。确定要重启服务吗？')) return;
+    if (!info?.supports_service_restart) return;
+    const previousToken = token;
     await request('service/restart', {}, 20000);
     toast('服务正在重启，恢复后页面将自动刷新');
     const deadline = performance.now() + 60000;
@@ -538,6 +580,7 @@ $('sidebar-restart').addEventListener('click', async () => {
     throw new Error('未检测到服务恢复，请检查设备后刷新页面');
   } catch (error) {
     toast(`重启服务失败：${error.message}`, true);
+  } finally {
     sidebarRestartBusy = false;
     updateSidebarRestart();
   }
@@ -631,9 +674,14 @@ window.addEventListener('message', event => {
   } else if (controlPages.has(workspace) && control.src && control.src !== 'about:blank'
       && event.source === control.contentWindow && event.origin === new URL(control.src).origin) {
     if (event.data?.type === 'studio-feedback' && typeof event.data.text === 'string' && typeof event.data.error === 'boolean') {
-      toast(event.data.text, event.data.error, { routine: event.data.routine === true });
+      toast(event.data.text, event.data.error, { routine: event.data.routine === true,
+        source: event.data.source === 'settings-status' ? 'control:settings-status' : null });
+    } else if (event.data?.type === 'studio-feedback-clear' && event.data.source === 'settings-status') {
+      toast.clearRoutine('control:settings-status');
     } else if (event.data?.type === 'studio-action-request') {
       controlAction(event);
+    } else if (event.data?.type === 'studio-network-announcement-request') {
+      networkAnnouncementSetting(event);
     }
   }
 });
@@ -652,6 +700,29 @@ function loadWorkspaceFrame(frame, url) {
   });
 }
 
+let controlWorkspaceRequestId = 0;
+function activateControlWorkspace(page) {
+  const frame = $('control-workspace');
+  const origin = new URL(frame.src).origin;
+  const requestId = ++controlWorkspaceRequestId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error('页面准备超时，请重试')), 5000);
+    function receive(event) {
+      if (event.source !== frame.contentWindow || event.origin !== origin
+          || event.data?.type !== 'studio-workspace-ready' || event.data.requestId !== requestId
+          || event.data.page !== page) return;
+      finish();
+    }
+    function finish(error) {
+      clearTimeout(timer);
+      window.removeEventListener('message', receive);
+      if (error) reject(error); else resolve();
+    }
+    window.addEventListener('message', receive);
+    frame.contentWindow.postMessage({ type: 'studio-workspace', page, requestId }, origin);
+  });
+}
+
 function clearDebugFrame() {
   const frame = $('debug-frame');
   frame.classList.add('frame-clearing');
@@ -664,6 +735,7 @@ function previewDebugFrame() {
     if (workspace === 'debug' && workspaceRetryRequired && !document.body.dataset.studioReady
         && frame.getAttribute('src') === '/debug.html?preview=1') {
       frame.classList.remove('frame-clearing');
+      notifyFrames('studio-language', { language: getLanguage() });
       notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
       notifyFrames('studio-workspace', { page: 'debug' });
     }
@@ -683,8 +755,10 @@ function previewWorkspace(page, message, ready = false, dismissible = false) {
     choice.classList.toggle('active', active);
     if (active) choice.setAttribute('aria-current', 'page'); else choice.removeAttribute('aria-current');
   }
-  $('control-workspace').hidden = !controlPages.has(page);
-  $('control-workspace').inert = !ready;
+  const control = $('control-workspace');
+  if (controlPages.has(page) && !ready) control.classList.add('frame-clearing');
+  control.hidden = !controlPages.has(page);
+  control.inert = !ready;
   $('monitor').hidden = controlPages.has(page) || page === 'network' || page === 'models';
   $('network-workspace').hidden = page !== 'network';
   $('network-workspace').inert = !ready;
@@ -736,6 +810,7 @@ async function selectWorkspace(next) {
   if (pauseCalibration) calibrationCharts.setActive(false);
   let restFallback = false;
   let statusWarning = '';
+  let releaseUnconfirmed = false;
   if (info?.studio) {
     delete document.body.dataset.studioReady;
     controlGeneration++;
@@ -762,9 +837,15 @@ async function selectWorkspace(next) {
       restFallback = result?.rest_fallback === true;
       if (result?.ready === false) throw new Error(result.error || '设备操作尚未就绪');
       if (next === 'status' && result?.ready !== true) throw new Error(result?.error || '设备状态采集尚未就绪');
-      if (maintenancePages.has(next) && result?.maintenance !== true) throw new Error(result?.error || '维护工作区尚未就绪');
-      if (next === 'status' && result?.release_unconfirmed === true) {
-        statusWarning = `${friendlyErrorMessage(result.warning || '卸力未确认')} 当前仅可查看设备状态。`;
+      if (maintenancePages.has(next) && result?.maintenance !== true
+          && !(result?.readonly === true && result?.release_unconfirmed === true)) {
+        throw new Error(result?.error || '维护工作区尚未就绪');
+      }
+      if (result?.release_unconfirmed === true) {
+        releaseUnconfirmed = true;
+        statusWarning = `${friendlyErrorMessage(result.warning || '卸力未确认')} 当前页面仅可查看。`;
+      } else if (next !== 'calibration' && result?.partial === true && Array.isArray(result.unavailable_ids)) {
+        statusWarning = `ID ${result.unavailable_ids.join('、')} 无回复，其他舵机可正常操作。`;
       }
       info = await request('info');
       token = info.token;
@@ -772,7 +853,7 @@ async function selectWorkspace(next) {
     if (queuedWorkspace && queuedWorkspace !== next) {
       workspace = next;
       highlightSelectedJoints();
-      statusReleaseUnconfirmed = !!statusWarning;
+      statusReleaseUnconfirmed = releaseUnconfirmed;
       workspaceRetryRequired = false;
       return;
     }
@@ -781,17 +862,28 @@ async function selectWorkspace(next) {
     if (controlPages.has(next) && (!control.src || control.src === 'about:blank')) {
       const url = new URL(location.href);
       url.port = location.protocol === 'https:' ? '9444' : '8081'; url.pathname = '/';
-      url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=0`; url.hash = '';
+      url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=0&lang=${getLanguage()}`; url.hash = '';
       await loadWorkspaceFrame(control, url.href);
     }
     if (next === 'debug' && (previous !== 'debug' || !$('debug-frame').src || $('debug-frame').src === 'about:blank'
-        || $('debug-frame').getAttribute('src')?.includes('preview=1'))) {
-      await loadWorkspaceFrame($('debug-frame'), '/debug.html');
+        || Boolean($('debug-frame').getAttribute('src')?.includes('preview=1')) !== Boolean(info?.readonly))) {
+      await loadWorkspaceFrame($('debug-frame'), info?.readonly ? '/debug.html?preview=1' : '/debug.html');
       $('debug-frame').classList.remove('frame-clearing');
     }
     workspace = next;
     highlightSelectedJoints();
-    statusReleaseUnconfirmed = !!statusWarning;
+    statusReleaseUnconfirmed = releaseUnconfirmed;
+    if (controlPages.has(workspace)) {
+      notifyFrames('studio-language', { language: getLanguage() });
+      notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
+      syncDebugMode();
+      await activateControlWorkspace(workspace);
+      if (queuedWorkspace && queuedWorkspace !== next) {
+        workspaceRetryRequired = false;
+        return;
+      }
+      control.classList.remove('frame-clearing');
+    }
     document.body.dataset.studioReady = 'true';
     previewWorkspace(workspace, statusWarning, true, !!statusWarning);
     if (restFallback) toast('休息未完成，已关闭策略并卸力');
@@ -804,27 +896,30 @@ async function selectWorkspace(next) {
     $('models-workspace').hidden = workspace !== 'models';
     modelControls.setActive(workspace === 'models');
     if (controlPages.has(workspace)) {
-      notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
-      syncDebugMode();
-      notifyFrames('studio-workspace', { page: workspace });
       notifyFrames('studio-device-versions', { versions: info?.device_versions || null });
     }
     for (const panel of document.querySelectorAll('[data-workspace-panel]')) panel.hidden = panel.dataset.workspacePanel !== workspace;
-    if (controlPages.has(previous) && !controlPages.has(workspace)) control.src = 'about:blank';
+    if (controlPages.has(previous) && !controlPages.has(workspace)) {
+      control.classList.add('frame-clearing');
+      control.src = 'about:blank';
+    }
     if (previous === 'debug' && workspace !== 'debug') {
       clearDebugFrame();
       $('debug-frame').style.height = '';
       selected = [];
       highlightSelectedJoints();
     }
-    if (workspace === 'debug') notifyFrames('studio-workspace', { page: workspace });
+    if (workspace === 'debug') {
+      notifyFrames('studio-language', { language: getLanguage() });
+      notifyFrames('studio-workspace', { page: workspace });
+    }
     updateCameraPreview();
     calibrationCharts.setActive(workspace === 'calibration');
     calibrationView.setActive(workspace === 'calibration');
     updateReferenceView();
     if (workspace === 'action') {
       renewControl();
-      if (info?.studio) actionEditor.refreshGroups().catch(error => toast(error.message, true));
+      if (info?.studio && !info.readonly) actionEditor.refreshGroups().catch(error => toast(error.message, true));
     }
     if (window.matchMedia('(max-width:720px)').matches) setSidebarOpen(false);
     if (state && info) renderState();
@@ -876,7 +971,7 @@ for (const button of document.querySelectorAll('button[data-workspace]')) {
 }
 
 setInterval(() => {
-  if (info?.studio && document.body.dataset.studioReady && maintenancePages.has(workspace) && !document.hidden && !switchingWorkspace && !workspaceRestoreInFlight) {
+  if (info?.studio && !info.readonly && document.body.dataset.studioReady && maintenancePages.has(workspace) && !document.hidden && !switchingWorkspace && !workspaceRestoreInFlight) {
     request('workspace', { operation: 'heartbeat' }).catch(error => { setArmed(false); toast(error.message, true); });
   }
 }, 5000);
@@ -911,13 +1006,18 @@ function renderState() {
   calibrationCharts.updateState(state, connectionError);
   calibrationView.update(state, sampleElapsed(), connectionError);
   const fresh = stateFresh();
-  const valid = deviceFresh(state.imu, state, sampleElapsed(), connectionError) && validQuaternion(state.imu.quaternion_wxyz);
+  const valid = imuFresh(state.imu, state, sampleElapsed(), connectionError) && validQuaternion(state.imu.quaternion_wxyz);
   const deviceReportsFresh = state.online && Number.isFinite(state.device_report_age_ms) &&
     state.device_report_age_ms + sampleElapsed() < SAMPLE_MAX_AGE_MS;
-  const sidebarState = state.control_servos ? { ...state, online: state.control_online, error: state.control_error,
+  const useIndependentStatus = Number.isFinite(state.device_report_age_ms) && !state.device_paused;
+  const sidebarState = state.control_servos && !info?.readonly && !useIndependentStatus ? { ...state, online: state.control_online, error: state.control_error,
     servos: state.control_servos } : state;
-  const sidebarFresh = sampleFresh(sidebarState, sampleElapsed(), connectionError);
-  const servoKinds = sidebarState.servos.map(servo => servoStatus(servo, sidebarState, sampleElapsed(), connectionError).kind);
+  const sidebarFresh = useIndependentStatus
+    ? !connectionError && sidebarState.online && sidebarState.device_report_age_ms >= 0
+      && sidebarState.device_report_age_ms + sampleElapsed() < SERVO_STATUS_MAX_AGE_MS
+    : sampleFresh(sidebarState, sampleElapsed(), connectionError);
+  const sidebarServoAge = Number.isFinite(sidebarState.device_report_age_ms) ? SERVO_STATUS_MAX_AGE_MS : SAMPLE_MAX_AGE_MS;
+  const servoKinds = sidebarState.servos.map(servo => servoStatus(servo, sidebarState, sampleElapsed(), connectionError, sidebarServoAge).kind);
   const faults = servoKinds.includes('fault');
   const communication = servoKinds.includes('communication');
   const missing = servoKinds.filter(kind => kind === 'offline').length;
@@ -929,11 +1029,11 @@ function renderState() {
   const playbackSamplingPaused = state.action_playback?.state === 'playing' && state.online && !state.error && !connectionError;
   const handoff = transitionHandoff || stateRequestPending || playbackSamplingPaused;
   const measuredVoltages = workspace === 'status' && !state.device_paused
-    ? state.servos.filter(servo => deviceFresh(servo, state, sampleElapsed(), connectionError)).map(servo => servo.voltage)
+    ? state.servos.filter(servo => liveServoFresh(servo)).map(servo => servo.voltage)
     : [];
   const lowVoltage = updateLowVoltage(state.robot?.low_voltage, measuredVoltages, performance.now());
   if (!(handoff && !connectionError && ((state.online && !fresh) || waitingForFirstSample(state)))) {
-    const voltage = state.robot?.health?.battery?.volts;
+    const voltage = displayVoltage(state, sampleElapsed(), connectionError);
     const calibrating = !!state.calibration?.active || !!state.head_calibration?.active;
     const warning = lowVoltageWarning(lowVoltage);
     renderSidebarVoltage($, { calibrating, voltage, fresh: sidebarFresh, lowVoltage });
@@ -975,16 +1075,19 @@ function renderState() {
   renderImuComparison();
   const auxiliary = auxImuStatus(state.aux_imu, sampleElapsed(), connectionError);
   if (!document.hidden && (workspace === 'status' || workspace === 'calibration' && calibrationControls.source() === 'head') &&
-      auxiliary.kind === 'stale' && performance.now() - lastHeadDiagnostic >= 10000) {
+      ['stale', 'pending'].includes(auxiliary.kind) && performance.now() - lastHeadDiagnostic >= 10000) {
     lastHeadDiagnostic = performance.now();
     console.warn('头部 IMU 过期诊断', { backend_status: state.aux_imu?.status, backend_age_ms: state.aux_imu?.age_ms,
       elapsed_ms: sampleElapsed(), poll_interval_ms: Math.round(statePollInterval),
-      request_ms: Math.round(stateRequestDuration), render_ms: Math.round(stateRenderDuration) });
+      request_ms: Math.round(stateRequestDuration), render_ms: Math.round(stateRenderDuration),
+      pending_request: stateRequestPending,
+      pending_request_ms: stateRequestPending ? Math.round(performance.now() - stateRequestStarted) : null });
   }
   const auxChanged = auxValid !== auxiliary.valid;
   auxValid = auxiliary.valid;
   if (workspace === 'status') {
-    const statuses = deviceStatus.render(info, state, fresh, sampleElapsed(), connectionError, auxiliary, transitionHandoff, lowVoltage);
+    const statuses = deviceStatus.render(info, state, fresh, sampleElapsed(), connectionError, auxiliary, transitionHandoff, lowVoltage,
+      displayVoltage(state, sampleElapsed(), connectionError));
     jointHighlighter.setStatuses(statuses);
     $('model-servo-alert').hidden = !jointHighlighter.hasIssues();
   }
@@ -995,7 +1098,8 @@ function renderState() {
   let chartChanged = auxChanged;
   const imuKey = `${state.imu?.t_ns ?? state.sequence}:${valid}`;
   if (imuKey !== lastImuKey) {
-    samples.push({ time: performance.now(), angles: valid ? angles.map(angle => Number(angle.toFixed(1))) : null });
+    samples.push({ time: performance.now(), angles: valid ? angles.map(angle => Number(angle.toFixed(1))) : null,
+      maxGapMs: Number.isFinite(state.device_report_age_ms) ? INDEPENDENT_IMU_MAX_AGE_MS : 600 });
     lastImuKey = imuKey;
     while (samples.length && samples[0].time < performance.now() - 20000) samples.shift();
     chartChanged = true;
@@ -1015,7 +1119,7 @@ function renderState() {
   }
   for (const servo of state.servos) {
     const joint = rigJoints.get(servo.name);
-    if (joint && deviceFresh(servo, state, sampleElapsed(), connectionError) && Number.isFinite(servo.radians)) {
+    if (joint && liveServoFresh(servo) && Number.isFinite(servo.radians)) {
       joint.target.setFromAxisAngle(joint.axis, servo.radians);
     }
   }
@@ -1043,6 +1147,7 @@ async function poll() {
       .finally(() => { resourceRequestPending = false; });
   }
   stateRequestPending = true;
+  stateRequestStarted = started;
   try {
     state = await request('state');
     stateRequestDuration = performance.now() - started;
@@ -1074,7 +1179,7 @@ async function poll() {
 
 setInterval(() => {
   if (state && ((!stateFresh() && !state.calibration?.active && !state.head_calibration?.active &&
-      !['数据过期', '采集异常', '连接中断'].includes($('connection').textContent)) ||
+      !['数据过期', '采集异常', '连接中断'].map(translate).includes($('connection').textContent)) ||
       auxImuStatus(state.aux_imu, sampleElapsed(), connectionError).valid !== auxValid)) renderState();
 }, 100);
 
@@ -1120,7 +1225,7 @@ function drawTrace(canvas, history) {
       if (!p.angles) { prev = null; continue; }
       const x = left + (right - left) * (1 - (now - p.time) / 20000);
       const y = center - (p.angles[axis] - middle) / halfRange * (bottom - top) / 2;
-      if (!imuTraceContinues(prev, p, axis)) ctx.moveTo(x, y);
+      if (!imuTraceContinues(prev, p, axis, p.maxGapMs)) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
       prev = p;
     }
@@ -1225,7 +1330,15 @@ function applyModelPalette() {
   referenceView?.invalidate();
   calibrationView.invalidate();
 }
-$('model-palette').addEventListener('change', applyModelPalette);
+const paletteControl = createModelPaletteControl({
+  select: $('model-palette'),
+  valid: value => typeof value === 'string' && Object.hasOwn(modelPalettes, value),
+  apply: applyModelPalette,
+  request,
+  onError: error => toast(`模型配色保存失败：${error.message}`, true),
+  onLoadError: error => console.warn('读取模型配色失败', error.message),
+});
+paletteControl.load();
 
 function highlightSelectedJoints() {
   jointHighlighter.setContext(workspace, selected, info?.joints || []);
@@ -1402,10 +1515,10 @@ function animate(now) {
     const fraction = 1 - Math.exp(-22 * dt);
     if (modelPositionTarget) modelRoot.position.lerp(modelPositionTarget, fraction);
     if (!$('model-imu-follow').checked) trunk.quaternion.identity();
-    else if (deviceFresh(state?.imu, state, sampleElapsed(), connectionError)) trunk.quaternion.slerp(attitudeTarget, fraction);
+    else if (imuFresh(state?.imu, state, sampleElapsed(), connectionError)) trunk.quaternion.slerp(attitudeTarget, fraction);
     for (const servo of state?.servos || []) {
       const joint = rigJoints.get(servo.name);
-      if (joint && deviceFresh(servo, state, sampleElapsed(), connectionError)) joint.node.quaternion.slerp(joint.target, fraction);
+      if (joint && liveServoFresh(servo)) joint.node.quaternion.slerp(joint.target, fraction);
     }
     if (alignLiveFeet && modelPlatform) {
       const center = modelPlatform.getWorldPosition(new THREE.Vector3());

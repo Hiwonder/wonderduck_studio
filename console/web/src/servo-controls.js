@@ -28,15 +28,23 @@ export function createServoControls({ request, command, toast, cancel, setBusy, 
     }
     cancel(); scanning = true; stopRequested = false; setBusy(true);
     const found = [];
+    const total = 252;
+    let completed = 0;
+    const progress = get('scan-progress');
+    progress.hidden = false;
+    progress.textContent = `0/${total} · 发现 0`;
     get('scan-servos').textContent = '停止';
     try {
       for (let id = 1; id <= 255; id++) {
         if (stopRequested) break;
         if ([200, 254, 255].includes(id)) continue;
         if (!active()) throw new Error('扫描已停止：控制状态已变化');
-        get('last-command').textContent = `扫描 ${id}/255 · 已发现 ${found.length} 个舵机`;
+        progress.title = `正在扫描 ID ${id}`;
+        get('last-command').textContent = `正在扫描 ID ${id} · 已完成 ${completed}/${total}`;
         const result = await request('command', { action: 'scan_servo', id });
         if (result.found) { found.push(id); onDiscovery(result.joint); }
+        completed++;
+        progress.textContent = `${completed}/${total} · 发现 ${found.length}`;
       }
       const message = `${stopRequested ? '扫描已停止' : '扫描完成'}：发现 ${found.length} 个舵机，ID ${found.join('、') || '无'}`;
       get('last-command').textContent = message; toast(message);
@@ -44,7 +52,8 @@ export function createServoControls({ request, command, toast, cancel, setBusy, 
       const message = `${error.message}；已发现 ${found.length} 个舵机，扫描未完成`;
       get('last-command').textContent = message; toast(message, true);
     } finally {
-      scanning = false; stopRequested = false; get('scan-servos').textContent = '扫描'; setBusy(false);
+      scanning = false; stopRequested = false; progress.hidden = true;
+      get('scan-servos').textContent = '扫描'; setBusy(false);
     }
   });
 

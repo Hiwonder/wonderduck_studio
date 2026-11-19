@@ -30,6 +30,20 @@ class RegisterReadTimeout(TimeoutError):
         self.corrupted = corrupted
 
 
+def parse_live_imu_diagnostics(payload):
+    """Decode the MCU's live sensor diagnostics, rather than its last sync-read snapshot."""
+    if len(payload) != 80:
+        raise ValueError("IMU 实时诊断长度无效")
+    fields = struct.unpack("<20I", payload)
+    if fields[0] != ((80 << 16) | 1):
+        raise ValueError("IMU 实时诊断版本无效")
+    names = ("flags", "main_sequence", "sample_sequence", "sample_age_us", "init_failures",
+             "imu_bus_failures", "imu_fifo_failures", "last_error", "last_error_sequence",
+             "uart_rx_bytes", "sync_requests", "tx_completed", "uart_errors", "last_uart_error_flags",
+             "checksum_errors", "rx_overruns", "diagnostic_requests", "reset_flags", "invalid_lengths")
+    return dict(zip(names, fields[1:]))
+
+
 class Hardware(ServoLayout):
     # Only the bus-owner thread accesses this short-lived offset editing session.
     offset_lock = None
@@ -209,12 +223,12 @@ class Hardware(ServoLayout):
         if address == 55 and len(data) == 1 and hasattr(self, 'offset_lock_cache'):
             self.offset_lock_cache[device_id] = data
 
-    def set_temporary_position_p_gain(self, value):
+    def set_temporary_position_p_gain(self, value, ids=None):
         if type(value) is not int or value not in (15, 66):
             raise ValueError("临时位置 P 必须为 15 或 66")
         self.restore_offset_lock(force=True)
         failures, locked = [], []
-        for device_id in self.ids:
+        for device_id in self.ids if ids is None else ids:
             try:
                 self.write_verified(device_id, 55, b'\x01', configuration_phase="确认写保护")
                 locked.append(device_id)
@@ -233,30 +247,35 @@ class Hardware(ServoLayout):
         if failures:
             raise RuntimeError(f"临时位置 P={value} 未全部确认：" + "；".join(failures))
 
-    def sample(self):
+    def sample_imu(self):
+        return self.sample(include_servos=False)
+
+    def sample(self, *, include_servos=True):
         started = time.monotonic()
         self.restore_offset_lock()
         imu_source = getattr(self, "imu_source", "id200")
         read_id200 = imu_source in ("id200", "compare")
         read_i2c = imu_source in ("i2c", "compare")
-        ids = ((200,) if read_id200 else ()) + tuple(self.ids)
+        ids = ((200,) if read_id200 else ()) + (tuple(self.ids) if include_servos else ())
         blocks, errors, statuses, observed = self.individual_read(ids, 56, 12)
         id200_read_at = observed.get(200)
         replies = dict(statuses)
         now = time.monotonic()
         if read_id200 and now - self.diagnostic_time >= 1:
             try:
-                self.select_baud(0)
-                diagnostic = self.live.read_fault_snapshot(self.fd)
+                # The 208/52 fault block describes the last broadcast sync read.
+                # Maintenance reads ID 200 individually, so that snapshot stops
+                # advancing. The 128/80 block is the MCU's live sensor state.
+                diagnostic = parse_live_imu_diagnostics(self.read(200, 128, 80))
                 if diagnostic["sample_sequence"] != self.previous_sequence:
                     self.sequence_time = time.monotonic()
                 self.previous_sequence = diagnostic["sample_sequence"]
                 self.diagnostic = diagnostic
                 self.diagnostic_time = time.monotonic()
-            except (OSError, RuntimeError, TimeoutError):
+            except (OSError, RuntimeError, TimeoutError, ValueError):
                 self.diagnostic = None
                 self.diagnostic_time = time.monotonic()
-        if now - self.torque_time >= 1:
+        if include_servos and now - self.torque_time >= 1:
             torque, _, torque_statuses, _ = self.individual_read(self.ids, 40, 1)
             self.torque = {i: b[0] for i, b in torque.items()}
             for device_id, status in torque_statuses.items():
@@ -300,7 +319,7 @@ class Hardware(ServoLayout):
             i2c_imu.pop("acquired_monotonic", None)
         imu = i2c_imu if imu_source == "i2c" else id200_imu
         servos = []
-        for joint in self.joints:
+        for joint in self.joints if include_servos else ():
             device_id = joint["id"]
             status = replies.get(device_id)
             register_status = blocks[device_id][9] if device_id in blocks else None

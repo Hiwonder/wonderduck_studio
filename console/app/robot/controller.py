@@ -12,9 +12,9 @@ from app.paths import CONSOLE_ROOT
 from app.actions.action_documents import document_from_json
 from app.actions.action_playback import ActionPlayback, action_frames
 from app.robot.parameter_batch import ParameterBatch, save_parameters
-from app.robot.protocol import (POSE_SPEED, ServoLayout, encode_register, integer,
+from app.robot.protocol import (IDS, POSE_SPEED, ServoLayout, encode_register, integer,
                                 motion_targets, parse_registers, pose_targets,
-                                register_definition, scan_id, servo_faults)
+                                register_definition, scan_id, servo_faults, target_values)
 from app.sensors.calibration import Calibration
 from app.sensors.i2c_imu import compare_samples
 
@@ -67,12 +67,15 @@ class DemoHardware(ServoLayout):
             b[62:64] = bytes((78, 30))
             self.raw[joint["id"]] = b
 
-    def sample(self):
+    def sample_imu(self):
+        return self.sample(include_servos=False)
+
+    def sample(self, *, include_servos=True):
         sampled = time.monotonic()
         t = sampled - self.started
         angle = math.sin(t * .7) * .23
         servos = []
-        for joint in self.joints:
+        for joint in self.joints if include_servos else ():
             b = self.raw[joint["id"]]
             raw = int.from_bytes(b[56:58], "little")
             degrees = 180 - raw * 360 / 4096
@@ -100,10 +103,10 @@ class DemoHardware(ServoLayout):
             raise ValueError("IMU 来源必须是 id200、i2c 或 compare")
         self.imu_source = source
 
-    def set_temporary_position_p_gain(self, value):
+    def set_temporary_position_p_gain(self, value, ids=None):
         if type(value) is not int or value not in (15, 66):
             raise ValueError("临时位置 P 必须为 15 或 66")
-        for device_id in self.ids:
+        for device_id in self.ids if ids is None else ids:
             self.raw[device_id][55] = 1
             self.offset_lock_cache[device_id] = b'\x01'
             self.raw[device_id][21] = value
@@ -254,7 +257,7 @@ class DemoHardware(ServoLayout):
 
 
 class Controller:
-    def __init__(self, hardware, hz, demo=False, hardware_factory=None, calibration_script=None, port="/dev/ttyS3", full_servo_range=False, maintenance=False):
+    def __init__(self, hardware, hz, demo=False, hardware_factory=None, calibration_script=None, port="/dev/ttyS3", full_servo_range=False, maintenance=False, imu_only=False):
         self.hardware, self.hz, self.demo = hardware, hz, demo
         self.imu_source = getattr(hardware, "imu_source", "id200")
         self.full_servo_range = full_servo_range
@@ -270,6 +273,9 @@ class Controller:
         self.emergency_in_progress = False
         self.emergency_pending = 0
         self.calibration_release_verified = False
+        self.partial_maintenance = False
+        self.partial_unavailable_ids = set()
+        self.imu_only = imu_only
         self.state = dict(imu=dict(valid=False), servos=[], online=False)
         self.maintenance_voltage_ready = False
         self.maintenance_voltage_after = 0.0
@@ -284,6 +290,7 @@ class Controller:
         self.action_generation = 0
         self.servo_debug_request_lock = threading.Lock()
         self.servo_debug = "off"
+        self.servo_debug_ids = set()
         self.servo_debug_pending = set()
         self.worker = threading.Thread(target=self.run, name="hx-bus", daemon=True)
         self.worker.start()
@@ -291,6 +298,19 @@ class Controller:
     def armed(self, client):
         with self.lock:
             return self.owner == client and time.monotonic() < self.armed_until
+
+    def unavailable_servo_ids(self):
+        """Select individual failures from the most recent maintenance scan."""
+        with self.lock:
+            rows = self.state.get("servos", [])
+            online = self.state.get("online") is True
+            by_id = {row.get("id"): row for row in rows if isinstance(row, dict)}
+            ids = [joint["id"] for joint in self.joints]
+            now = time.monotonic()
+            return {device_id for device_id in ids if not online
+                    or by_id.get(device_id, {}).get("valid") is not True
+                    or type(by_id[device_id].get("sampled_monotonic")) not in (int, float)
+                    or not 0 <= now - by_id[device_id]["sampled_monotonic"] <= 3}
 
     def arm(self, client, on):
         with self.lock:
@@ -332,6 +352,9 @@ class Controller:
             return self.emergency_release(locked)
         if action == "save_parameters" or action not in READ_ACTIONS | WRITE_ACTIONS | CALIBRATION_ACTIONS:
             raise ValueError("未知操作")
+        if (action in {"torque", "move", "move_direct", "write_register", "offset_direct"}
+                and command.get("id") in self.unavailable_servo_ids()):
+            raise ValueError(f"ID {command.get('id')} 未连接或数据已过期")
         if action == "release_all":
             return self.emergency_release()
         if action == "servo_debug":
@@ -425,22 +448,41 @@ class Controller:
                 with self.lock:
                     self.servo_debug = "restore_failed"
             raise RuntimeError("串口未就绪，无法设置临时位置 P")
+        ids = None
+        if enabled:
+            unavailable = self.unavailable_servo_ids()
+            if self.partial_maintenance or unavailable:
+                ids = [joint["id"] for joint in self.joints if joint["id"] not in unavailable]
+                if not ids:
+                    raise RuntimeError("没有可用的舵机")
+        elif self.servo_debug_ids:
+            ids = list(self.servo_debug_ids)
+        def set_gain(value):
+            if ids is None:
+                self.hardware.set_temporary_position_p_gain(value)
+            else:
+                self.hardware.set_temporary_position_p_gain(value, ids=ids)
         with self.lock:
             self.servo_debug = "restore_failed"
+            if enabled and ids is not None:
+                self.servo_debug_ids = set(ids)
         try:
-            self.hardware.set_temporary_position_p_gain(66 if enabled else 15)
+            set_gain(66 if enabled else 15)
         except Exception as error:
             if not enabled:
                 raise RuntimeError(f"恢复位置 P=15 失败：{error}") from error
             try:
-                self.hardware.set_temporary_position_p_gain(15)
+                set_gain(15)
             except Exception as restore_error:
                 raise RuntimeError(f"开启调试模式失败：{error}；恢复位置 P=15 失败：{restore_error}") from error
             with self.lock:
                 self.servo_debug = "off"
+                self.servo_debug_ids.clear()
             raise RuntimeError(f"开启调试模式失败，已恢复位置 P=15：{error}") from error
         with self.lock:
             self.servo_debug = "on" if enabled else "off"
+            if not enabled:
+                self.servo_debug_ids.clear()
             return dict(servo_debug=self.servo_debug)
 
     def parameter_task(self, command, client):
@@ -492,10 +534,16 @@ class Controller:
         locked = command.get("locked_ids", [])
         if not isinstance(locked, list) or any(type(item) is not int for item in locked):
             raise ValueError("锁定舵机列表无效")
-        if not set(locked).issubset({joint["id"] for joint in self.joints}):
+        known_ids = {joint["id"] for joint in self.joints} | (set(IDS) if self.partial_maintenance else set())
+        if not set(locked).issubset(known_ids):
             raise ValueError("锁定列表包含未知舵机")
+        locked = list(set(locked) | self.unavailable_servo_ids()
+                      | (set(IDS) - {joint["id"] for joint in self.joints} if self.partial_maintenance else set()))
+        available_frames = action_frames(document, [joint["id"] for joint in self.joints], locked)
+        if not any(targets for _, targets in available_frames):
+            raise ValueError("动作没有可用的舵机")
         if operation == "send_frame":
-            frames = action_frames(document, [joint["id"] for joint in self.joints], locked)
+            frames = available_frames
             if len(frames) != 1:
                 raise ValueError("单次运行只能发送一帧")
             duration, targets = frames[0]
@@ -543,8 +591,13 @@ class Controller:
         self.calibration_release_verified = False
         released = self.hardware.execute({"action": "release_all"})
         if not released.get("verified"):
-            raise RuntimeError("卸力未全部确认，标定未启动；请检查舵机状态")
-        self.calibration_release_verified = True
+            unavailable = (self.partial_unavailable_ids if self.imu_only else self.unavailable_servo_ids()) if self.partial_maintenance else set()
+            failures = {device_id: str(value) for device_id, value in released.get("results", {}).items()
+                        if value != "已读回关闭"}
+            if not failures or any(device_id not in unavailable or not ("超时" in error or "timeout" in error.lower())
+                                   for device_id, error in failures.items()):
+                raise RuntimeError("在线舵机卸力未确认，标定未启动；请检查舵机状态")
+        self.calibration_release_verified = released.get("verified") is True
         self.hardware.close()
         self.hardware = None
         with self.lock:
@@ -654,7 +707,17 @@ class Controller:
                         self.batch.begin(self.hardware.parameter_batch(command, self.batch.check, self.batch.progress))
                         continue
                     else:
-                        result = self.hardware.execute(command)
+                        actual_command = command
+                        if command["action"] in ("center_all", "home_all", "run_targets"):
+                            unavailable = self.unavailable_servo_ids()
+                            if unavailable:
+                                ids = self.hardware.ids
+                                values = (target_values(command.get("targets"), ids, 4096 if self.full_servo_range else 4095)
+                                          if command["action"] == "run_targets" else
+                                          pose_targets(command["action"], ids, self.hardware.home_policy))
+                                actual_command = dict(action="run_targets", targets=[
+                                    [device_id, None if device_id in unavailable else values.get(device_id)] for device_id in ids])
+                        result = self.hardware.execute(actual_command)
                     if command["action"] == "set_imu_source":
                         self.imu_source = result["imu_source"]
                     if command["action"] in ("center_all", "home_all") and result.get("verified"):
@@ -697,12 +760,12 @@ class Controller:
                     self.hardware = self.hardware_factory()
                     self.hardware.set_imu_source(self.imu_source)
                     self.joints = self.hardware.joints
-                state = self.hardware.sample()
+                state = self.hardware.sample_imu() if self.imu_only else self.hardware.sample()
                 self.sequence += 1
                 self.failures += int(bool(state.get("errors")))
                 state.update(sequence=self.sequence, timestamp_ms=int(time.time() * 1000),
                              sampled_monotonic=time.monotonic(), online=True,
-                             hz=self.hz, failures=self.failures)
+                             hz=self.hz, failures=self.failures, individual_device_scan=True)
                 voltage_ready = not self.batch.active() and time.monotonic() >= self.maintenance_voltage_after
                 if last_sample_error is not None:
                     logging.info("sample recovered")

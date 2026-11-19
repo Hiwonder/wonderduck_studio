@@ -20,7 +20,7 @@ html[data-theme=dark] .sidebar .sidebar-footer #status-dot{border-color:#1a2b36}
 .sidebar-voltage output{font-variant-numeric:tabular-nums}
 .sidebar-voltage.low-voltage,#runtime-battery.low-voltage{color:var(--red);font-weight:600}
 .sidebar-collapsed .sidebar-voltage{flex-direction:column;justify-content:center;gap:0;padding:8px 0 0;font-size:10px;line-height:12px}
-.sidebar-actions{display:flex;flex-direction:column;gap:4px}
+.sidebar-actions{display:flex;flex-direction:column;gap:4px;padding-top:8px;border-top:1px solid var(--line)}
 .sidebar-footer-button{width:100%;min-height:36px;justify-content:flex-start;gap:10px;padding:8px 10px;border:0;background:transparent;color:var(--muted);font-size:13px}
 .sidebar-footer-button:hover{background:#edf2ef;color:#203b2d}
 html[data-theme=dark] .sidebar-footer-button{border:0;background:transparent;color:#b9c8c4}
@@ -54,7 +54,7 @@ html[data-theme=dark] #calibration-workspace{background:#11161b}
 body:is([data-workspace=control],[data-workspace=target],[data-workspace=person],[data-workspace=maze],[data-workspace=system]) main{height:100dvh}
 #debug-workspace{overflow:hidden;padding:0;background:#f7f9f8}
 html[data-theme=dark] #debug-workspace{background:#11161b}
-#debug-frame.frame-clearing{visibility:hidden}
+#control-workspace.frame-clearing,#debug-frame.frame-clearing{visibility:hidden}
 .runtime-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px 12px;margin:0;padding:8px 0 10px;border-bottom:1px solid var(--line)}
 .runtime-stats div{min-width:0}.runtime-stats dt{color:var(--muted);font-size:12px;line-height:18px}.runtime-stats dd{margin:4px 0 0;font-size:14px;font-weight:600;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .camera-preview video.turn90{transform:rotate(90deg)}.camera-preview video.turn180{transform:rotate(180deg)}.camera-preview video.turn270{transform:rotate(270deg)}

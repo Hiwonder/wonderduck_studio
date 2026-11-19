@@ -1,6 +1,8 @@
+import { setLocalizedText } from '../../../webpadd/web/language.js';
+
 export function createCalibrationControls({ request, confirmAction, toast }) {
   const get = id => document.getElementById(id);
-  const setText = (element, value) => { if (element.textContent !== value) element.textContent = value; };
+  const setText = (element, value) => setLocalizedText(element, value);
   let pending = false;
   let bodyState = {}, headState = {}, headImu = {};
   let selectedSource = 'body';

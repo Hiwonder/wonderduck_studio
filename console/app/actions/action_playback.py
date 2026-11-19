@@ -8,7 +8,7 @@ def action_frames(document, ids, locked_ids=()):
     frames = []
     for frame in document.clip.frames:
         entries = [(index, value) for index, value in enumerate(frame.positions, 1) if value is not None]
-        unknown = [device_id for device_id, _ in entries if device_id not in ids]
+        unknown = [device_id for device_id, _ in entries if device_id not in ids and device_id not in locked_ids]
         if unknown:
             raise ValueError("动作包含当前机器人没有的舵机 ID：" + ", ".join(map(str, unknown)))
         frames.append((frame.duration_ms, {device_id: value for device_id, value in entries

@@ -24,6 +24,7 @@
 
   function render() {
     const name = selected ? selected.replace(/\.csv$/i, '') : '选择动作';
+    selectedName.toggleAttribute('data-i18n-skip', !!selected);
     if (selectedName.textContent !== name) selectedName.textContent = name;
     select.disabled = active || busy;
     run.disabled = busy || (!active && !selected);

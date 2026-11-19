@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createElement, RotateCcw } from 'lucide';
-import { deviceFresh } from './state-status.js';
+import { imuFresh } from './state-status.js';
 
 const FACES = ['+X', '-X', '+Y', '-Y', '+Z', '-Z'];
 const UP = new THREE.Vector3(0, 1, 0);
@@ -64,7 +64,7 @@ export function currentCalibrationPose(source, state, elapsed = 0, error = '') {
     return rotation ? { rotation, detail: '实时倾角 · 传感器坐标' } : { detail: '加速度方向无效' };
   }
   if (source === 'body') {
-    if (!deviceFresh(state?.imu, state, elapsed, error)) return { detail: '躯体 IMU 数据不可用' };
+    if (!imuFresh(state?.imu, state, elapsed, error)) return { detail: '躯体 IMU 数据不可用' };
     const rotation = orientationInView(state.imu.quaternion_wxyz);
     return rotation ? { rotation, detail: '实时姿态 · 机身坐标' } : { detail: '躯体 IMU 姿态无效' };
   }
