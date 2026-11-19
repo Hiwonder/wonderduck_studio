@@ -81,12 +81,12 @@ class NetworkAnnouncementStore:
             except FileNotFoundError:
                 return dict(enabled=True)
             if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
-                raise ValueError("开机网络播报设置无效")
+                raise ValueError("网络播报设置无效")
             return dict(enabled=value["enabled"])
 
     def save(self, enabled):
         if type(enabled) is not bool:
-            raise ValueError("开机网络播报设置无效")
+            raise ValueError("网络播报设置无效")
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             descriptor, name = tempfile.mkstemp(prefix=".network-announcement-", suffix=".tmp", dir=str(self.path.parent))

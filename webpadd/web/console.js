@@ -215,7 +215,7 @@
       if (requestId !== announcementRequestId) return;
       if (announcementConfirmed !== null) networkAnnouncement.checked = announcementConfirmed;
       networkAnnouncement.disabled = announcementConfirmed === null;
-      sendFeedback('开机网络播报设置超时，请重试', true);
+      sendFeedback('网络播报设置超时，请重试', true);
     }, 8000);
   }
   networkAnnouncement.addEventListener('change', () => requestNetworkAnnouncement(networkAnnouncement.checked));
@@ -322,7 +322,7 @@
       } else {
         if (announcementConfirmed !== null) networkAnnouncement.checked = announcementConfirmed;
         networkAnnouncement.disabled = announcementConfirmed === null;
-        sendFeedback(`开机网络播报设置失败：${event.data.error || '请重试'}`, true);
+        sendFeedback(`网络播报设置失败：${event.data.error || '请重试'}`, true);
       }
     }
   });

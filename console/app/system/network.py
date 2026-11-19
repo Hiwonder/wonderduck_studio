@@ -1,6 +1,7 @@
 """Read NetworkManager state and forward requests to the existing Wi-Fi service."""
 
 import json
+import logging
 import os
 import re
 import socket
@@ -9,6 +10,7 @@ import time
 
 
 INTERFACE = "wlan0"
+ANNOUNCEMENT_SOCKET = "/run/wonderduck-network-speech.sock"
 
 
 def _run(*args, timeout=15):
@@ -154,14 +156,56 @@ def _send(port, payload):
     return dict(sent=True)
 
 
+def _current_mode():
+    try:
+        values = _run("nmcli", "-g", "GENERAL.STATE,GENERAL.CON-UUID",
+                      "device", "show", INTERFACE, timeout=2).splitlines()
+        if len(values) != 2 or not values[0].startswith("100 ") or not values[1]:
+            return None
+        mode = _run("nmcli", "-g", "802-11-wireless.mode", "connection", "show",
+                    "uuid", values[1], timeout=2).strip()
+        if mode == "ap":
+            return "ap"
+        if mode in ("infrastructure", "", "--"):
+            return "station"
+    except (OSError, RuntimeError):
+        pass
+    return None
+
+
+def _announce_switch(mode, ssid=None):
+    message = json.dumps(dict(watch=mode, ssid=ssid), ensure_ascii=True).encode("ascii") + b"\n"
+    if len(message) > 512:
+        return
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.5)
+            client.connect(ANNOUNCEMENT_SOCKET)
+            client.sendall(message)
+            response = client.recv(32).strip()
+            if response not in (b"queued", b"disabled"):
+                logging.warning("网络切换播报请求未接受")
+    except OSError:
+        # A missing speaker service must not prevent a network change.
+        logging.warning("网络切换播报服务不可用")
+
+
 def connect(command):
     ssid, password = command.get("ssid"), command.get("password")
     if not isinstance(ssid, str) or not ssid or not isinstance(password, str):
         raise ValueError("请输入 Wi-Fi 名称和密码")
     payload = json.dumps({"setwifi": {"ssid": ssid, "passwd": password}},
                          ensure_ascii=False).encode("utf-8")
-    return _send(9026, payload)
+    before = _current_mode()
+    result = _send(9026, payload)
+    if before != "station":
+        _announce_switch("station", ssid)
+    return result
 
 
 def hotspot():
-    return _send(9028, b"resetwifi")
+    before = _current_mode()
+    result = _send(9028, b"resetwifi")
+    if before != "ap":
+        _announce_switch("ap")
+    return result
