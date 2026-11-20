@@ -6,7 +6,7 @@ from app.models.update_control import UpdateControl
 from app.robot.robotd_state import query_robotd
 
 
-REST_TIMEOUT = 6.0
+REST_TIMEOUT = 4.0
 POLL_INTERVAL = .25
 
 

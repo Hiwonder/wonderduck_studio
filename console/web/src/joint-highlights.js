@@ -1,5 +1,5 @@
 // A servo's model parts belong to its nearest joint, not descendant joints.
-const ISSUE_KINDS = new Set(['fault', 'offline', 'communication', 'invalid', 'stale', 'configuration']);
+const ISSUE_KINDS = new Set(['fault', 'offline', 'timeout', 'communication', 'invalid', 'stale', 'configuration']);
 
 export function createJointHighlighter() {
   const groups = new Map();

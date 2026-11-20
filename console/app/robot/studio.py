@@ -210,7 +210,7 @@ class StudioController:
                 return None
             if row.get("valid") is True and row.get("torque") == 0 and row.get("error") is None:
                 available += 1
-            elif row.get("valid") is False and row.get("error") == "读取超时":
+            elif row.get("valid") is False and row.get("error") == "未连接":
                 missing.append(row["id"])
             else:
                 return None

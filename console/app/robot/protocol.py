@@ -124,9 +124,23 @@ class ServoLayout:
 
     def update_layout(self, device_id, new_id=None, baud=None, persist=True):
         joint = next(j for j in self.joints if j["id"] == device_id)
-        if new_id is not None:
-            old_baud = self.baud_codes.pop(device_id, 0)
-            joint["id"] = new_id
+        if new_id is not None and new_id != device_id:
+            old_baud = self.baud_codes.get(device_id, 0)
+            target = next((j for j in self.joints if j["id"] == new_id), None)
+            if target is None or target.get("discovered"):
+                if target is not None:
+                    self.joints.remove(target)
+                joint["id"] = new_id
+                self.baud_codes.pop(device_id, None)
+            elif joint.get("discovered"):
+                # A scanned replacement inherits the configured joint at its new ID.
+                self.joints.remove(joint)
+                self.baud_codes.pop(device_id, None)
+                joint = target
+            else:
+                # Both IDs represent configured joints. Keep their slots, now with
+                # the old ID empty and the replacement answering at the target ID.
+                joint = target
             self.baud_codes[new_id] = old_baud
         if baud is not None:
             self.baud_codes[joint["id"]] = baud

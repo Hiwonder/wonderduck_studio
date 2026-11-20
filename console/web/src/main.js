@@ -848,7 +848,7 @@ async function selectWorkspace(next) {
         releaseUnconfirmed = true;
         statusWarning = `${friendlyErrorMessage(result.warning || '卸力未确认')} 当前页面仅可查看。`;
       } else if (next !== 'calibration' && result?.partial === true && Array.isArray(result.unavailable_ids)) {
-        statusWarning = `ID ${result.unavailable_ids.join('、')} 无回复，其他舵机可正常操作。`;
+        statusWarning = `ID ${result.unavailable_ids.join('、')} 未连接，其他舵机可正常操作。`;
       }
       info = await request('info');
       token = info.token;
@@ -1004,7 +1004,11 @@ function renderTof() {
 }
 
 function renderState() {
-  if (state.joints.length !== info.joints.length) { info.joints = state.joints; servoPanel.reset(info.joints); actionEditor.render(); }
+  if (state.joints.length !== info.joints.length || state.joints.some((joint, index) => joint.id !== info.joints[index].id)) {
+    info.joints = state.joints;
+    servoPanel.reset(info.joints);
+    actionEditor.render();
+  }
   calibrationControls.render(state.calibration, info?.demo, state.imu_source, state.head_calibration, state.aux_imu);
   calibrationCharts.updateState(state, connectionError);
   calibrationView.update(state, sampleElapsed(), connectionError);
@@ -1023,6 +1027,7 @@ function renderState() {
   const servoKinds = sidebarState.servos.map(servo => servoStatus(servo, sidebarState, sampleElapsed(), connectionError, sidebarServoAge).kind);
   const faults = servoKinds.includes('fault');
   const communication = servoKinds.includes('communication');
+  const timeout = servoKinds.includes('timeout');
   const missing = servoKinds.filter(kind => kind === 'offline').length;
   const invalid = servoKinds.includes('invalid');
   const stale = servoKinds.includes('stale');
@@ -1048,10 +1053,11 @@ function renderState() {
     }
     lowVoltageActive = warning;
     const connectionStatus = connectionError ? '连接中断' : calibrating ? '设备在线' : !sidebarState.online ? '采集异常' : !sidebarFresh ? '数据过期'
-      : faults ? '舵机故障' : communication ? '总线通信异常' : missing === info.joints.length ? '舵机无回复' : missing ? '部分舵机无回复'
+      : faults ? '舵机故障' : communication ? '总线通信异常' : timeout ? '舵机读取超时'
+        : missing === info.joints.length ? '舵机未连接' : missing ? '部分舵机未连接'
         : invalid ? '舵机数据异常' : stale ? '设备数据过期'
           : (info.readonly ? 'robotd · 只读' : info.demo ? '演示连接' : '设备在线');
-    setConnectionStatus(connectionStatus, !connectionError && (calibrating || sidebarFresh && !faults && !communication && !missing && !invalid && !stale) ? 'live' : 'error',
+    setConnectionStatus(connectionStatus, !connectionError && (calibrating || sidebarFresh && !faults && !communication && !timeout && !missing && !invalid && !stale) ? 'live' : 'error',
       connectionError || sidebarState.error || '');
   }
   setText('pose-status', state.device_paused ? '维护占用' : state.calibration?.active ? '标定中'

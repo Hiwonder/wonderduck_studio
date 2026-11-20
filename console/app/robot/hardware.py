@@ -89,6 +89,7 @@ class Hardware(ServoLayout):
         self.sequence_time = 0
         self.torque = {}
         self.torque_time = 0
+        self.servo_timeouts = set()
         self.closed = False
 
     def set_imu_source(self, source):
@@ -109,6 +110,7 @@ class Hardware(ServoLayout):
         self.live.write_all(self.fd, request)
         parser = self.live.FrameParser()
         blocks, errors, statuses = {}, {}, {}
+        received_bytes = False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             ready, _, _ = select.select([self.fd], [], [], max(0, deadline - time.monotonic()))
@@ -120,6 +122,7 @@ class Hardware(ServoLayout):
                 continue
             if not data:
                 raise OSError("串口 EOF")
+            received_bytes = True
             parser.feed(data)
             while True:
                 frame = parser.pop()
@@ -146,11 +149,15 @@ class Hardware(ServoLayout):
                     errors[device_id] += f"；总线校验错误 {parser.checksum_errors} 次"
                 if parser.invalid_lengths:
                     errors[device_id] += f"；总线无效帧长度 {parser.invalid_lengths} 次"
+                if received_bytes and not (parser.checksum_errors or parser.invalid_lengths):
+                    errors[device_id] = "总线收到其他或不完整的回复"
         return blocks, errors, statuses
 
-    def read(self, device_id, address, length):
-        self.select_baud(self.baud_codes.get(device_id, 0))
+    def read(self, device_id, address, length, *, baud=None):
+        self.select_baud(self.baud_codes.get(device_id, 0) if baud is None else baud)
         blocks, errors, statuses = self.exchange(self.live.make_read(device_id, address, length), (device_id,), length)
+        if device_id in statuses or errors.get(device_id) not in (None, "读取超时"):
+            self.servo_timeouts.discard(device_id)
         if device_id in errors:
             error = f"ID {device_id} · 地址 0x{address:02X} · {length} 字节：{errors[device_id]}"
             if device_id not in statuses:
@@ -158,10 +165,10 @@ class Hardware(ServoLayout):
             raise RuntimeError(error)
         return blocks[device_id]
 
-    def read_configuration(self, device_id, address, length, phase):
+    def read_configuration(self, device_id, address, length, phase, **options):
         for attempt in range(1, 4):
             try:
-                data = self.read(device_id, address, length)
+                data = self.read(device_id, address, length, **options)
             except RegisterReadTimeout as error:
                 logging.warning("configuration read id=%s address=0x%02X phase=%s attempt=%s/3: %s",
                                 device_id, address, phase, attempt, error)
@@ -208,15 +215,15 @@ class Hardware(ServoLayout):
         fcntl.ioctl(self.fd, 0x402C542B, attributes)
         self.current_baud = code
 
-    def send_write(self, device_id, address, data):
-        self.select_baud(self.baud_codes.get(device_id, 0))
+    def send_write(self, device_id, address, data, *, baud=None):
+        self.select_baud(self.baud_codes.get(device_id, 0) if baud is None else baud)
         self.live.write_all(self.fd, packet(254, 0x83, (address, len(data), device_id, *data)))
 
-    def write_verified(self, device_id, address, data, *, configuration_phase=None):
+    def write_verified(self, device_id, address, data, *, configuration_phase=None, **options):
         # Broadcast to one selected ID, as in robotd; reads establish the outcome.
-        self.send_write(device_id, address, data)
-        got = (self.read(device_id, address, len(data)) if configuration_phase is None else
-               self.read_configuration(device_id, address, len(data), configuration_phase))
+        self.send_write(device_id, address, data, **options)
+        got = (self.read(device_id, address, len(data), **options) if configuration_phase is None else
+               self.read_configuration(device_id, address, len(data), configuration_phase, **options))
         if got != data:
             phase = f"{configuration_phase}：" if configuration_phase else ""
             raise RuntimeError(phase + "已发出写入，但寄存器读回不一致；请重新读取，不要自动重发")
@@ -252,6 +259,7 @@ class Hardware(ServoLayout):
 
     def sample(self, *, include_servos=True):
         started = time.monotonic()
+        previous_timeouts, self.servo_timeouts = self.servo_timeouts, set()
         self.restore_offset_lock()
         imu_source = getattr(self, "imu_source", "id200")
         read_id200 = imu_source in ("id200", "compare")
@@ -318,6 +326,11 @@ class Hardware(ServoLayout):
                     if "acquired_monotonic" in i2c_imu else None)
             i2c_imu.pop("acquired_monotonic", None)
         imu = i2c_imu if imu_source == "i2c" else id200_imu
+        if include_servos:
+            self.servo_timeouts = {device_id for device_id in self.ids
+                                   if device_id not in replies and errors.get(device_id) == "读取超时"}
+            for device_id in previous_timeouts & self.servo_timeouts:
+                errors[device_id] = "未连接"
         servos = []
         for joint in self.joints if include_servos else ():
             device_id = joint["id"]
@@ -435,6 +448,21 @@ class Hardware(ServoLayout):
         return save_parameters(command, self.ids, self.read_configuration,
                                self.send_write, check, progress)
 
+    def check_id_available(self, device_id, target_id):
+        if target_id == 200:
+            raise ValueError("总线设备 ID 必须唯一，ID 200 已保留给躯体 IMU")
+        target_baud = self.baud_codes.get(target_id, 0)
+        source_baud = self.baud_codes.get(device_id, 0)
+        for baud in dict.fromkeys((target_baud, source_baud)):
+            for _ in range(2):
+                try:
+                    self.read(target_id, 5, 1, baud=baud)
+                except RegisterReadTimeout as error:
+                    if not error.corrupted:
+                        continue
+                    raise RuntimeError(f"无法确认 ID {target_id} 是否空闲：{error}") from error
+                raise ValueError(f"总线设备 ID 必须唯一，ID {target_id} 已有回复")
+
     def write_register(self, device_id, command):
         address = integer(command.get("address"), 0, 70, "地址")
         if address not in BY_ADDRESS:
@@ -443,12 +471,17 @@ class Hardware(ServoLayout):
         register = register_definition(address, mode)
         value = command.get("value")
         data = encode_register(register, value)
-        if address == 5 and value != device_id and value in (*self.ids, 200):
-            raise ValueError("总线设备 ID 必须唯一")
         if self.offset_lock is not None and (address != 31 or self.offset_lock[0] != device_id or not self.offset_lock[3]):
             self.restore_offset_lock(force=True)
+        id_change = address == 5 and value != device_id
+        baud_options = {"baud": self.baud_codes.get(device_id, 0)} if id_change else {}
+        if id_change:
+            if self.read_configuration(device_id, 5, 1, "确认原 ID") != bytes((device_id,)):
+                raise RuntimeError(f"ID {device_id} 的寄存器读回不一致")
+            self.check_id_available(device_id, value)
         saved_lock = None
         target_id = device_id
+        id_verified = False
         try:
             if register["region"] == "NVS":
                 if address == 31 and self.offset_lock is not None:
@@ -459,23 +492,31 @@ class Hardware(ServoLayout):
                         self.offset_lock = (device_id, saved_lock, time.monotonic() + 1, True)
                     if saved_lock != b"\x00":
                         self.write_verified(device_id, 55, b"\x00", configuration_phase="解除写保护")
-            self.send_write(device_id, address, data)
-            if address == 5:
+            if id_change:
                 target_id = value
-                self.update_layout(device_id, new_id=value, persist=False)
-            elif address == 6:
+            self.send_write(device_id, address, data)
+            if address == 6:
                 termios.tcdrain(self.fd)
                 self.update_layout(device_id, baud=value, persist=False)
             if address == 40 and value == 128:
                 if int.from_bytes(self.read(target_id, 56, 2), "little") != 2048:
                     raise RuntimeError("中位校准已发出，但当前位置未读回 2048")
             else:
-                actual = (self.read_configuration(target_id, address, len(data), "参数读回")
+                actual = (self.read_configuration(target_id, address, len(data), "参数读回", **baud_options)
                           if register["region"] == "NVS" and address != 31 else
                           self.read(target_id, address, len(data)))
                 if actual != data:
                     raise RuntimeError("已发出写入，但寄存器读回不一致；请重新读取，不要自动重发")
-            if address in (5, 6):
+            if id_change:
+                id_verified = True
+                self.update_layout(device_id, new_id=value)
+                self.servo_timeouts.difference_update((device_id, value))
+                self.torque.pop(device_id, None)
+                self.torque.pop(value, None)
+                self.offset_lock_cache.pop(device_id, None)
+                self.offset_lock_cache.pop(value, None)
+                self.torque_time = 0
+            elif address == 6:
                 self.save_layout()
             if address == 55 and hasattr(self, 'offset_lock_cache'):
                 self.offset_lock_cache[target_id] = data
@@ -486,7 +527,14 @@ class Hardware(ServoLayout):
             if address == 31 and saved_lock is not None:
                 self.restore_offset_lock(force=True)
             elif saved_lock is not None and saved_lock != b"\x00":
-                self.write_verified(target_id, 55, saved_lock, configuration_phase="恢复写保护")
+                if id_change and target_id != device_id and not id_verified:
+                    # Recover the original servo's lock if the rename never took effect.
+                    try:
+                        if self.read(device_id, 5, 1) == bytes((device_id,)):
+                            target_id = device_id
+                    except (OSError, RuntimeError, ValueError):
+                        pass
+                self.write_verified(target_id, 55, saved_lock, configuration_phase="恢复写保护", **baud_options)
         return dict(verified=True, id=target_id, previous_id=device_id, action="write_register",
                     address=address, value=value)
 

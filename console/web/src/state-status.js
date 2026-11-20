@@ -89,15 +89,17 @@ export function servoStatus(servo, state, elapsed = 0, connectionError = '', max
   if (!servo) return result('invalid', '数据异常', '本次采集没有该舵机的状态');
   const observationAge = servo.observation_age_ms;
   if (!Number.isFinite(observationAge)) return result('waiting', '等待采集', servo.error || '尚未读取该舵机');
+  if (servo.online === false && servo.error === '未连接') {
+    return result('offline', '未连接', '连续两次未收到舵机回复');
+  }
   if (observationAge < 0 || observationAge + Math.max(0, elapsed) >= maxAgeMs) {
     const label = servo.valid ? '数据过期' : /超时|timeout/i.test(servo.error || '') ? '读取超时（已过期）' : '读取失败（已过期）';
     return result('stale', label, [`该舵机的读取结果已超过 ${maxAgeMs} ms`, servo.error].filter(Boolean).join('；'));
   }
   if (servo.online === false) {
-    return /校验|帧长度/.test(servo.error || '')
-      ? result('communication', '通信异常', servo.error)
-      : result('offline', /超时|timeout/i.test(servo.error || '') ? '读取超时' : '读取失败',
-        servo.error || '本次读取未收到舵机回复');
+    if (/超时|timeout/i.test(servo.error || '')) return result('timeout', '读取超时', servo.error);
+    if (servo.error) return result('communication', '通信异常', servo.error);
+    return result('communication', '读取失败', '本次读取未收到舵机回复');
   }
   if (servo.valid && !fresh) return result('stale', '数据过期', `该舵机的采样数据已超过 ${maxAgeMs} ms`);
   const torque = ({ 0: '关闭', 1: '开启', 128: '校准' })[servo.torque] || '--';

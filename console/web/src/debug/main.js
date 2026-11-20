@@ -761,7 +761,10 @@ function renderImuComparison() {
 const calibrationControls = createCalibrationControls({ request, confirmAction, toast });
 
 function renderState() {
-  if (state.joints.length !== info.joints.length) { info.joints = state.joints; makeServoRows(); }
+  if (state.joints.length !== info.joints.length || state.joints.some((joint, index) => joint.id !== info.joints[index].id)) {
+    info.joints = state.joints;
+    makeServoRows();
+  }
   calibrationControls.render(state.calibration, info?.demo, state.imu_source);
   $('imu-source').value = state.imu_source || info.imu_source || 'id200';
   const fresh = stateFresh();
@@ -769,13 +772,15 @@ function renderState() {
   const servoKinds = fresh ? state.servos.map(servo => servoStatus(servo, state, sampleElapsed(), connectionError).kind) : [];
   const faults = servoKinds.includes('fault');
   const communication = servoKinds.includes('communication');
+  const timeout = servoKinds.includes('timeout');
   const missing = servoKinds.filter(kind => kind === 'offline').length;
   const invalid = servoKinds.includes('invalid');
   $('connection').textContent = connectionError ? '连接中断' : state.calibration?.active ? '标定中 · 采集暂停' : !state.online ? '采集异常' : !fresh ? '数据过期'
-    : faults ? '舵机故障' : communication ? '总线通信异常' : missing === info.joints.length ? '舵机无回复' : missing ? '部分舵机离线'
+    : faults ? '舵机故障' : communication ? '总线通信异常' : timeout ? '舵机读取超时'
+      : missing === info.joints.length ? '舵机未连接' : missing ? '部分舵机未连接'
       : invalid ? '舵机数据异常' : (info.readonly ? 'robotd · 只读' : info.demo ? '演示连接' : '设备在线');
   $('connection').title = connectionError || state.error || '';
-  $('status-dot').className = `dot ${fresh && !faults && !communication && !missing && !invalid ? 'live' : 'error'}`;
+  $('status-dot').className = `dot ${fresh && !faults && !communication && !timeout && !missing && !invalid ? 'live' : 'error'}`;
   $('pose-status').textContent = state.calibration?.active ? '标定中'
     : state.imu_source === 'compare' ? (state.imu_comparison?.valid ? '双路有效' : '对比中')
       : valid ? '实时' : 'IMU 无效';
