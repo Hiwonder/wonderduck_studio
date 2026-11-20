@@ -238,10 +238,11 @@ body[data-console-page="system"] .system-panel { grid-column: 1; grid-row: 1 / -
 .audio-volume-control output { color: var(--accent); font-variant-numeric: tabular-nums; }
 .audio-volume-control .speed-range { width: 100%; }
 .network-announcement-control { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
-.network-announcement-control input { appearance: none; position: relative; width: 38px; height: 22px; border: 0; border-radius: 11px; background: var(--line); cursor: pointer; }
-.network-announcement-control input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
-.network-announcement-control input:checked { background: var(--accent); }
-.network-announcement-control input:checked::after { transform: translateX(16px); }
+.performance-mode-control { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--font-note); white-space: nowrap; }
+.network-announcement-control input, .performance-mode-control input { appearance: none; position: relative; width: 38px; height: 22px; border: 0; border-radius: 11px; background: var(--line); cursor: pointer; }
+.network-announcement-control input::after, .performance-mode-control input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.network-announcement-control input:checked, .performance-mode-control input:checked { background: var(--accent); }
+.network-announcement-control input:checked::after, .performance-mode-control input:checked::after { transform: translateX(16px); }
 .network-announcement-control input:disabled { opacity: .5; cursor: default; }
 .audio-record-controls { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 16px; }
 .audio-record-controls #audio-record, .audio-record-controls #audio-record-delete { min-width: 140px; }

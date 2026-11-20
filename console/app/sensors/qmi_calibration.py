@@ -30,7 +30,8 @@ _gyro_spec.loader.exec_module(gyro_quality)
 
 
 def empty_profile():
-    return dict(schema=1, model="QMI8658", bus="/dev/i2c-3", address=0x6a,
+    return dict(schema=1, model="QMI8658", bus="unoq-i2c4" if os.environ.get("WONDERDUCK_UNOQ_ROUTER") else "/dev/i2c-3",
+                address=int(os.environ.get("WONDERDUCK_HEAD_IMU_ADDRESS", "0x6a"), 0),
                 configuration="40034300110083", revision="uncalibrated", accel=None, gyro=None)
 
 

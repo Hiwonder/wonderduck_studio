@@ -15,11 +15,15 @@
 html[data-theme=dark] .sidebar .sidebar-footer #status-dot{border-color:#1a2b36}
 .sidebar .sidebar-footer #demo-badge{margin-left:-4px;padding:2px;font-size:10px}
 .sidebar .sidebar-meta{height:54px;min-height:54px;overflow-y:auto;visibility:visible;transition:visibility 0s linear 240ms;-webkit-user-select:none;user-select:none;cursor:default}
-.sidebar-voltage{display:flex;align-items:center;gap:10px;min-height:39px;padding:8px 10px 0;border-top:1px solid var(--line);color:var(--muted);font-size:12px;white-space:nowrap}
+.sidebar-telemetry{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:39px;padding:8px 10px 0;border-top:1px solid var(--line);color:var(--muted);font-size:12px;white-space:nowrap}
+.sidebar-voltage,.sidebar-cpu{display:flex;align-items:center;gap:6px}
+.sidebar-cpu{flex-direction:column;gap:0;font-variant-numeric:tabular-nums}
+#sidebar-cpu-throttled{color:var(--red);font-size:10px;font-weight:600}
+.sidebar-collapsed .sidebar-telemetry{flex-direction:column;justify-content:center;gap:4px;padding:8px 0 0;font-size:10px;line-height:12px}
 .sidebar-voltage svg,.sidebar-footer-button svg{flex:none;width:17px;height:17px}
 .sidebar-voltage output{font-variant-numeric:tabular-nums}
 .sidebar-voltage.low-voltage,#runtime-battery.low-voltage{color:var(--red);font-weight:600}
-.sidebar-collapsed .sidebar-voltage{flex-direction:column;justify-content:center;gap:0;padding:8px 0 0;font-size:10px;line-height:12px}
+.sidebar-collapsed .sidebar-voltage{flex-direction:column;justify-content:center;gap:0}
 .sidebar-actions{display:flex;flex-direction:column;gap:4px;padding-top:8px;border-top:1px solid var(--line)}
 .sidebar-footer-button{width:100%;min-height:36px;justify-content:flex-start;gap:10px;padding:8px 10px;border:0;background:transparent;color:var(--muted);font-size:13px}
 .sidebar-footer-button:hover{background:#edf2ef;color:#203b2d}
@@ -27,6 +31,8 @@ html[data-theme=dark] .sidebar-footer-button{border:0;background:transparent;col
 html[data-theme=dark] .sidebar-footer-button:hover{background:#344852;color:#f2f4f6}
 .sidebar-collapsed .sidebar-footer-button{width:34px;padding:8px;justify-content:center}
 .sidebar-collapsed .sidebar-footer-button span{display:none}
+.sidebar-debug-mode{justify-content:space-between}
+.sidebar-collapsed .sidebar-debug-mode{padding-inline:2px}
 .sidebar-collapsed .sidebar .sidebar-footer .connection{justify-content:center;padding:0}
 .sidebar #last-command.error{color:var(--red)}
 .sidebar-collapsed .sidebar .sidebar-meta{display:grid;visibility:hidden;transition:none}

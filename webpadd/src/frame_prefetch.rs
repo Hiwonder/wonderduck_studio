@@ -178,6 +178,18 @@ impl FrameClient {
         Ok(Self { reader })
     }
 
+    pub(super) fn video(&mut self) -> Result<serde_json::Value> {
+        let request = proto::Request {
+            jsonrpc: "2.0".into(),
+            id: Some(proto::Id::Number(3)),
+            method: "media.video".into(),
+            params: None,
+        };
+        serde_json::to_writer(self.reader.get_mut(), &request)?;
+        self.reader.get_mut().write_all(b"\n")?;
+        response(&mut self.reader, 3)
+    }
+
     pub(super) fn next(&mut self) -> Result<Frame> {
         let request = proto::Request {
             jsonrpc: "2.0".into(),

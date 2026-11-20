@@ -1,7 +1,7 @@
 //! Classic control semantics; this module has no hardware or socket access.
 
 use super::*;
-use robotd_params::{PadDriveParams, PadParams};
+use robotd_params::PadDriveParams;
 
 const DRIVE_AXIS_LOCK_ANGLE: f64 = 20.0 * std::f64::consts::PI / 180.0;
 
@@ -215,6 +215,10 @@ pub(super) enum Action {
     HeadMode,
     HeadDriveMode,
     BodyPoseMode,
+    SitToggle,
+    GroundPick,
+    KickLeft,
+    KickRight,
     A,
     B,
     X,
@@ -239,22 +243,19 @@ impl Action {
             _ => None,
         }
     }
-    pub fn calls(self, bindings: &PadParams) -> Vec<proto::Call> {
-        let button = match self {
-            Self::A => Some("a"),
-            Self::B => Some("b"),
-            Self::X => Some("x"),
-            Self::Y => Some("y"),
-            Self::Lb => Some("lb"),
-            Self::Rb => Some("rb"),
+    fn skill_name(self) -> Option<&'static str> {
+        match self {
+            Self::A | Self::SitToggle => Some("sit_toggle"),
+            Self::B | Self::GroundPick => Some("ground_pick"),
+            Self::Lb | Self::KickLeft => Some("kick_left"),
+            Self::Rb | Self::KickRight => Some("kick_right"),
             _ => None,
-        };
-        if let Some(button) = button {
-            return bindings
-                .skill(button)
-                .filter(|name| !name.is_empty())
-                .map(|name| vec![skill(name)])
-                .unwrap_or_default();
+        }
+    }
+
+    pub fn calls(self) -> Vec<proto::Call> {
+        if let Some(name) = self.skill_name() {
+            return vec![skill(name)];
         }
         match self {
             Self::Init => vec![proto::Call::RobotInit],
@@ -285,10 +286,31 @@ impl Action {
         }
     }
 }
+
 fn skill(name: &str) -> proto::Call {
     proto::Call::RobotDo(proto::DoParams {
         skill: name.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[test]
+    fn named_web_actions_and_legacy_aliases_dispatch_the_same_skills() {
+        for (name, alias) in [
+            ("sit_toggle", "a"),
+            ("ground_pick", "b"),
+            ("kick_left", "lb"),
+            ("kick_right", "rb"),
+        ] {
+            for command in [name, alias] {
+                let action: Action = serde_json::from_value(serde_json::json!(command)).unwrap();
+                assert!(matches!(action.calls().as_slice(), [proto::Call::RobotDo(p)] if p.skill == name));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -323,6 +345,16 @@ impl Hold {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+struct WebBindings {
+    a: &'static str,
+    b: &'static str,
+    x: &'static str,
+    y: &'static str,
+    lb: &'static str,
+    rb: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(super) struct ControlsView {
     pub mode: MotionMode,
     pub linear_speed: f64,
@@ -330,7 +362,7 @@ pub(super) struct ControlsView {
     pub armed: bool,
     pub start_seconds: f64,
     pub select_seconds: f64,
-    pub bindings: PadParams,
+    bindings: WebBindings,
     pub obstacle: Option<proto::ObstacleParams>,
     pub human_owner: Option<proto::HumanControlSource>,
     pub human_busy: bool,
@@ -345,7 +377,6 @@ pub(super) struct ControlState {
     pub mode: MotionMode,
     pub linear_speed: f64,
     pub turn_speed: f64,
-    pub bindings: PadParams,
     pub drive: PadDriveParams,
     pub up: bool,
     pub active: bool,
@@ -395,7 +426,6 @@ impl Default for ControlState {
             mode: MotionMode::Drive,
             linear_speed: MAX_LINEAR,
             turn_speed: MAX_ANGULAR,
-            bindings: PadParams::default(),
             drive: PadDriveParams::default(),
             up: false,
             active: true,
@@ -465,7 +495,15 @@ impl ControlState {
             armed: self.armed,
             start_seconds: (self.start.seconds(now) * 10.0).floor() / 10.0,
             select_seconds: (self.select.seconds(now) * 10.0).floor() / 10.0,
-            bindings: self.bindings.clone(),
+            // Retain the older web client's wire fields for a cached page.
+            bindings: WebBindings {
+                a: Action::SitToggle.skill_name().unwrap_or_default(),
+                b: Action::GroundPick.skill_name().unwrap_or_default(),
+                x: "",
+                y: "",
+                lb: Action::KickLeft.skill_name().unwrap_or_default(),
+                rb: Action::KickRight.skill_name().unwrap_or_default(),
+            },
             obstacle: self.obstacle,
             human_owner: self.human_owner,
             human_busy: self.human_blocked,
@@ -575,11 +613,6 @@ impl ControlState {
                 ] {
                     if rising & button.bit() != 0 {
                         actions.push(action);
-                    }
-                }
-                if self.input.held(Button::X) && rising & Button::X.bit() == 0 {
-                    if let Some(name) = self.bindings.skill("x").filter(|s| !s.is_empty()) {
-                        calls.push(skill(name));
                     }
                 }
                 let delta = i8::from(rising & Button::R3.bit() != 0)

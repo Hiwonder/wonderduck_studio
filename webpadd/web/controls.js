@@ -17,7 +17,6 @@
       const isMotionPage = () => ['control', 'target', 'person', 'maze'].includes(document.body.dataset.consolePage);
       const state = { left_x: 0, left_y: 0, right_x: 0, right_y: 0,
         left_trigger: 0, right_trigger: 0, buttons: [], active: !document.hidden };
-      const held = new Set();
       let studioLeaveRequest = null;
       let studioActive = true;
       const embeddedStudio = document.documentElement.dataset.studioEmbedded === 'true' && window.parent !== window;
@@ -27,7 +26,6 @@
       let restPhase = null, motionEnabled = null, motionHomed = null, powerSequence = 0;
       let powerPending = null, powerAcknowledged = false, powerRequestSequence = 0;
       const skillLabels = { sit_toggle: "坐下 / 站起", ground_pick: "地面拾取", roulade: "翻滚", headstand: "倒立", kick_left: "左踢", kick_right: "右踢" };
-      const skillIcons = { sit_toggle: 'armchair', ground_pick: 'hand-helping', kick_left: 'footprints', kick_right: 'footprints' };
       let linearSpeed = 0.4;
       let turnSpeed = 1;
       const modeCopy = {
@@ -65,7 +63,8 @@
       const knobs = new Map();
       const stickLocks = new Map([...document.querySelectorAll('[data-stick-lock]')]
         .map(input => [input.dataset.stickLock, input]));
-      const actionButtons = [...document.querySelectorAll("[data-action], [data-button]")];
+      const actionButtons = [...document.querySelectorAll('[data-action]')];
+      const skillButtons = [...document.querySelectorAll('.skill-actions [data-action]')];
       let sequence = 0;
       let socket = null;
       let reconnectTimer = null;
@@ -158,8 +157,8 @@
       const followAreaDeadzone = document.querySelector('#follow-area-deadzone');
       const followStopDistance = document.querySelector('#follow-stop-distance');
       const followDistanceDeadzone = document.querySelector('#follow-distance-deadzone');
-      const personDefaults = {headPosition: 2200, area: 300000, areaDeadzone: 100000,
-        distance: 1000, distanceDeadzone: 200};
+      const personDefaults = {headPosition: 2100, area: 320000, areaDeadzone: 80000,
+        distance: 900, distanceDeadzone: 100};
       const targetHeadDefault = 2200;
       // Keep the staged target controller and its saved parameters for later re-enablement.
       const TARGET_BODY_TRACKING_ENABLED = false;
@@ -187,10 +186,14 @@
       let targetHeadHome = null, headPositionTarget = null;
       const headPositionKey = scope => `${scope}-follow-head-position`;
       const applyHeadPositionScope = scope => {
-        const value = scope === 'target' && !TARGET_BODY_TRACKING_ENABLED
+        let value = scope === 'target' && !TARGET_BODY_TRACKING_ENABLED
           ? (targetHeadHome === null ? '' : String(targetHeadHome))
           : localStorage.getItem(headPositionKey(scope))
             ?? String(scope === 'person' ? personDefaults.headPosition : targetHeadDefault);
+        if (scope === 'person' && [2200, 2150].includes(Number(value))) {
+          value = String(personDefaults.headPosition);
+          localStorage.setItem(headPositionKey(scope), value);
+        }
         headPosition.value = value;
         headPositionTarget = value !== '' && Number.isInteger(Number(value))
           && Number(value) >= 1024 && Number(value) <= 2250 ? Number(value) : null;
@@ -311,9 +314,8 @@
         stickLocks.forEach(input => { input.checked = false; });
         state.left_x = state.left_y = state.right_x = state.right_y = 0;
         state.left_trigger = state.right_trigger = 0;
-        held.clear(); state.buttons = [];
+        state.buttons = [];
         triggerRanges.forEach((range) => { range.value = "0"; });
-        actionButtons.forEach((button) => button.classList.remove("is-held"));
         document.querySelectorAll(".pad").forEach((pad) => {
           pad.classList.remove("is-active");
           if (pad.dataset.pointer) {
@@ -907,6 +909,8 @@
       };
       const sendCoordinated = (action, target = null, newPitch = null) => {
         const trackingCamera = coordinatedFrameReady ? camera : null;
+        // Saved area settings use 720p pixels; the robot compares against native frame pixels.
+        const areaScale = camera ? (camera.width * camera.height) / (1280 * 720) : 1;
         const personFollow = document.body.dataset.consolePage === 'person';
         const headOnly = targetHeadOnly();
         const startPitch = headOnly ? targetHeadHome : headPositionTarget;
@@ -925,8 +929,8 @@
           final_lateral_limit: finalLateralLimit,
           final_point: coordinatedFinalPoint,
           final_tolerance: coordinatedFinalTolerance,
-          stop_area_px: personFollow ? followStopAreaValue : null,
-          stop_area_deadzone_px: personFollow ? followAreaDeadzoneValue : 0,
+          stop_area_px: personFollow ? Math.max(1, Math.round(followStopAreaValue * areaScale)) : null,
+          stop_area_deadzone_px: personFollow ? Math.round(followAreaDeadzoneValue * areaScale) : 0,
           stop_distance_mm: personFollow ? followStopDistanceValue : null,
           stop_distance_deadzone_mm: personFollow ? followDistanceDeadzoneValue : 0,
           arrival_skill: personFollow || headOnly ? '' : coordinatedArrivalSkill,
@@ -1620,11 +1624,17 @@
         if (window.WonderduckLanguage) window.WonderduckLanguage.setLocalizedText(element, value);
         else if (element.textContent !== String(value)) element.textContent = String(value);
       };
+      const updateActionAvailability = (connected) => {
+        skillButtons.forEach(button => {
+          button.disabled = !connected || !availableSkills.includes(button.dataset.action);
+        });
+        document.querySelector('[data-action="stop"]').disabled = !connected;
+      };
       const setConnected = (connected, text) => {
         dot.classList.toggle("online", connected);
         dot.setAttribute("aria-label", connected ? "控制已就绪" : "控制未连接");
         setText(connection, text || (connected ? '控制已连接' : '控制未连接'));
-        actionButtons.forEach((button) => { button.disabled = !connected || button.dataset.unbound === "true"; });
+        updateActionAvailability(connected);
         renderMotionPower();
         speedInput.disabled = !connected;
         speedRange.disabled = !connected;
@@ -1717,6 +1727,7 @@
         if (JSON.stringify(skills) !== JSON.stringify(availableSkills)) {
           availableSkills = skills;
           renderArrivalSkills();
+          updateActionAvailability(socket?.readyState === WebSocket.OPEN);
         }
         robotConnected = connected;
         updatePowerState(status);
@@ -1769,7 +1780,7 @@
       };
       const sendInput = () => {
         if (!studioActive || !socket || socket.readyState !== WebSocket.OPEN || maze || mazePending) return;
-        state.buttons = [...held];
+        state.buttons = [];
         const visionInput = isVisionPage()
           && state.active && !sticksBlocked()
           && [state.left_x, state.left_y, state.right_x, state.right_y].some(value => value !== 0);
@@ -1842,7 +1853,7 @@
         if (shutdownConfirm.returnValue === 'confirm') sendAction('shutdown');
       });
       const blockedMotionTarget = target => target instanceof Element && target.closest(
-        '.pad, [data-button], [data-trigger-range], #tracking-start, #maze, #control-action-run, #head-position');
+        '.pad, .skill-actions [data-action], [data-trigger-range], #tracking-start, #maze, #control-action-run, #head-position');
       for (const type of ['pointerdown', 'click']) document.addEventListener(type, event => {
         if (!motionUnavailable() || !blockedMotionTarget(event.target)) return;
         event.preventDefault(); event.stopImmediatePropagation(); remindMotion();
@@ -1921,22 +1932,6 @@
           obstacleEnabled.disabled = obstacleDistance.disabled = obstacleDelay.disabled = !ready;
         }
         updateMode(controls.mode, false);
-        const bindings = controls.bindings || {};
-        document.querySelectorAll("[data-binding]").forEach((button) => {
-          const name = bindings[button.dataset.binding];
-          button.dataset.skill = name || '';
-          const label = name ? (skillLabels[name] || name) : "未绑定";
-          button.hidden = !name || name === 'roulade' || name === 'headstand';
-          if (button.hidden && held.delete(button.dataset.button)) { button.classList.remove('is-held'); sendInput(); }
-          const icon = Object.hasOwn(skillIcons, name) ? skillIcons[name] : 'blocks';
-          const iconNode = button.querySelector('svg use'), iconHref = `#icon-${icon}`;
-          if (iconNode.getAttribute('href') !== iconHref) iconNode.setAttribute('href', iconHref);
-          setText(button.querySelector(".skill-name"), label);
-          button.title = label;
-          button.dataset.unbound = String(!name);
-          button.disabled = !name || !socket || socket.readyState !== WebSocket.OPEN;
-          actionNames[button.dataset.binding] = label;
-        });
         updateSettingsState();
         restoreSharedSettings();
         prepareDriveOnEntry();
@@ -2376,36 +2371,14 @@
         pad.addEventListener("lostpointercapture", release);
       });
 
-      actionButtons.forEach((button) => {
-        button.disabled = true;
-        if (button.dataset.action) { button.addEventListener("click", () => sendAction(button.dataset.action)); return; }
-        const press = () => {
-          if (button.disabled || !state.active || maze || mazePending) return;
-          const firstPress = !held.has(button.dataset.button);
-          held.add(button.dataset.button);
-          button.classList.add("is-held"); sendInput();
-          if (firstPress && button.dataset.skill === 'ground_pick' && document.body.dataset.consolePage === 'control') {
-            schedulePickMouth(button.dataset.button);
+      actionButtons.forEach(button => {
+        button.addEventListener('click', () => {
+          const action = button.dataset.action;
+          if (action === 'ground_pick' && state.active && studioActive
+              && !maze && !mazePending && socket?.readyState === WebSocket.OPEN) {
+            schedulePickMouth(action);
           }
-        };
-        const release = () => {
-          held.delete(button.dataset.button);
-          button.classList.remove("is-held"); sendInput();
-        };
-        button.addEventListener("pointerdown", (event) => { event.preventDefault(); button.setPointerCapture(event.pointerId); press(); });
-        button.addEventListener("pointerup", release);
-        // Cancellation is input loss, never a deliberate Select release.
-        button.addEventListener("pointercancel", () => { suspend(); setTimeout(resume, 50); });
-        button.addEventListener("lostpointercapture", () => {
-          if (button.classList.contains("is-held")) { suspend(); setTimeout(resume, 50); }
-        });
-        button.addEventListener("keydown", (event) => {
-          if (!["Space", "Enter"].includes(event.code)) return;
-          event.preventDefault(); if (!event.repeat) press();
-        });
-        button.addEventListener("keyup", (event) => {
-          if (!["Space", "Enter"].includes(event.code)) return;
-          event.preventDefault(); release();
+          sendAction(action);
         });
       });
       triggerRanges.forEach((range) => range.addEventListener("input", () => {
@@ -2479,7 +2452,6 @@
         }
       });
       window.addEventListener('console-view-change', () => {
-        // Switching views cancels a held Start/Select rather than releasing it.
         const active = state.active;
         state.active = false;
         keys.clear();

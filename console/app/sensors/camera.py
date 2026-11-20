@@ -12,6 +12,12 @@ import threading
 import time
 
 
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 360
+CAMERA_FPS = 30
+CAMERA_BITRATE = 800_000
+
+
 def h264_payload(sdp):
     """Select an offered H.264 packetization-mode=1 payload in the video media."""
     if not isinstance(sdp, str) or not 0 < len(sdp) <= 60000:
@@ -179,10 +185,10 @@ class Camera:
             # it as nominal 30 fps without changing capture timing or pixels.
             pipeline = Gst.parse_launch(
                 "v4l2src device=/dev/video0 io-mode=mmap do-timestamp=true ! "
-                "video/x-raw,format=NV12,width=1280,height=720 ! "
+                f"video/x-raw,format=NV12,width={CAMERA_WIDTH},height={CAMERA_HEIGHT} ! "
                 "queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream ! "
-                'capssetter caps="video/x-raw,framerate=(fraction)30/1" ! '
-                "mpph264enc name=encoder bps=2000000 gop=30 rc-mode=cbr "
+                f'capssetter caps="video/x-raw,framerate=(fraction){CAMERA_FPS}/1" ! '
+                f"mpph264enc name=encoder bps={CAMERA_BITRATE} gop={CAMERA_FPS} rc-mode=cbr "
                 "profile=baseline header-mode=each-idr ! h264parse ! "
                 f"rtph264pay name=pay pt={payload} config-interval=-1 "
                 "webrtcbin name=rtc bundle-policy=max-bundle")
@@ -263,7 +269,7 @@ class Camera:
         if description is not None:
             session["reply"].set_result(dict(session=session["id"], type="answer",
                 sdp=complete_sdp(description.sdp.as_text(), session["candidates"]),
-                width=1280, height=720, rotation=0))
+                width=CAMERA_WIDTH, height=CAMERA_HEIGHT, rotation=0))
 
     def _connection_state(self, rtc, _, session):
         if rtc.get_property("connection-state") in (
@@ -330,7 +336,7 @@ class Camera:
     def status(self):
         session = self.active
         return dict(active=session is not None, error=self.error, encoder="mpph264enc",
-                    width=1280, height=720, fps=30, bitrate=2000000,
+                    width=CAMERA_WIDTH, height=CAMERA_HEIGHT, fps=CAMERA_FPS, bitrate=CAMERA_BITRATE,
                     frames=session["frames"] if session else 0)
 
     def close(self):

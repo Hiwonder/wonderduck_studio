@@ -96,6 +96,14 @@ export function renderSidebarVoltage($, { calibrating, voltage, fresh, lowVoltag
   if (sampling.hasAttribute('hidden') === calibrating) sampling.toggleAttribute('hidden', !calibrating);
 }
 
+export function renderSidebarCpu($, health) {
+  const temperature = health?.cpu_temp_c;
+  const throttle = health?.cpu_throttle;
+  const throttled = throttle?.level > 0 || (throttle?.max_khz > 0 && throttle.khz < throttle.max_khz);
+  setLocalizedText($('sidebar-cpu-temperature'), Number.isFinite(temperature) ? 'CPU ' + temperature.toFixed(0) + ' °C' : 'CPU --');
+  $('sidebar-cpu-throttled').hidden = !throttled;
+}
+
 export function createSidebar($, iconsRefresh) {
   const compactSidebar = window.matchMedia('(max-width:720px)');
   let sidebarOpen = null;

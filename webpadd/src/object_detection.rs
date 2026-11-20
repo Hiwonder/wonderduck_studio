@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use uyvy::{Turn, letterbox_from_uyvy_with_pad};
 
 use crate::AppState;
+use duck_detect::{onnx, rknn};
 use crate::frame_prefetch::{FramePrefetch, camera_recoverable, media_socket, source_root};
 
 #[derive(Clone, Serialize)]
@@ -149,6 +150,9 @@ fn paths() -> Result<(PathBuf, PathBuf)> {
 }
 
 fn model_path_from(executable: &Path) -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("WONDERDUCK_OBJECT_MODEL") {
+        return Ok(PathBuf::from(path));
+    }
     Ok(source_root(executable)?.join("models/object-detection.rknn"))
 }
 
@@ -179,33 +183,63 @@ fn worker(shared: Arc<(Mutex<Subscribers>, Condvar)>, events: watch::Sender<Even
     }
 }
 
+enum Model {
+    Rockchip(rknn::Model),
+    Onnx(onnx::Model),
+}
+
+impl Model {
+    fn open(path: &Path) -> Result<Self> {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("onnx") => {
+                let model = onnx::Model::open(path)?;
+                tracing::info!(path = %path.display(), "ONNX object detector started");
+                Ok(Self::Onnx(model))
+            }
+            Some("rknn") => {
+                let runtime = path.with_file_name("librknnrt.so");
+                let model = rknn::Model::open_outputs_with_library(path, 2, Some(&runtime))?;
+                tracing::info!(api = %model.api_version, driver = %model.driver_version, "RKNN object detector started");
+                Ok(Self::Rockchip(model))
+            }
+            _ => anyhow::bail!("expected an .onnx or .rknn object model: {}", path.display()),
+        }
+    }
+
+    fn infer_with<T>(&mut self, rgb: &[u8], decode: impl FnOnce(&[&[f32]]) -> Result<T>) -> Result<T> {
+        match self {
+            Self::Rockchip(model) => model.infer_with(rgb, decode),
+            Self::Onnx(model) => model.infer_with(rgb, decode),
+        }
+    }
+}
+
 fn run(shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &watch::Sender<Event>,
     recorder: Option<&crate::vision_record::Recorder>) -> Result<()> {
     let (socket, path) = paths()?;
-    let runtime = path.with_file_name("librknnrt.so");
-    let mut model = duck_detect::rknn::Model::open_outputs_with_library(&path, 2, Some(&runtime))?;
-    ensure!(
-        model.input == (640, 640, 3),
-        "model input is not 640×640 RGB"
-    );
-    let score_index = model
-        .output_shapes
-        .iter()
-        .position(|shape| shape.as_slice() == [1, 80, 8400])
+    let mut model = Model::open(&path)?;
+    let (input, outputs) = match &model {
+        Model::Rockchip(model) => (model.input, model.output_shapes.iter().map(|shape| {
+            shape.iter().map(|&dimension| dimension as i64).collect::<Vec<_>>()
+        }).collect::<Vec<_>>()),
+        Model::Onnx(model) => (model.input, model.output_shapes.clone()),
+    };
+    ensure!(input == (640, 640, 3), "model input is not 640×640 RGB");
+    let score_index = outputs.iter().position(|shape| shape == &[1, 80, 8400])
         .context("missing class score tensor [1,80,8400]")?;
-    let box_index = model
-        .output_shapes
-        .iter()
-        .position(|shape| shape.as_slice() == [1, 4, 8400])
+    let box_index = outputs.iter().position(|shape| shape == &[1, 4, 8400])
         .context("missing box tensor [1,4,8400]")?;
-    tracing::info!(api = %model.api_version, driver = %model.driver_version, "object detector started");
     let mut rgb = Vec::new();
-    let mut rga = match duck_detect::rga::Converter::open() {
-        Ok(converter) => Some(converter),
-        Err(error) => {
-            tracing::warn!(error = %format!("{error:#}"), "RGA unavailable; using CPU frame conversion");
-            None
+    let mut rga = if matches!(&model, Model::Rockchip(_)) {
+        match duck_detect::rga::Converter::open() {
+            Ok(converter) => Some(converter),
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "RGA unavailable; using CPU frame conversion");
+                None
+            }
         }
+    } else {
+        None
     };
     let mut frames = FramePrefetch::camera(&socket)?;
     let mut recovering = false;

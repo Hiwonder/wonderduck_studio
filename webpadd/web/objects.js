@@ -60,24 +60,26 @@
   }
 
   function draw(frame) {
-    if (!video.srcObject || video.paused || !frame.width || !frame.height) { clear(); return; }
-    if (canvas.width !== frame.width || canvas.height !== frame.height) {
-      canvas.width = frame.width;
-      canvas.height = frame.height;
-    }
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.lineWidth = Math.max(2, frame.width / 400);
     const area = (object) => (object.bounds[2] - object.bounds[0]) * (object.bounds[3] - object.bounds[1]);
     let selected = null;
     for (const object of frame.objects) {
       if (object.class === personClass && (!selected || area(object) > area(selected))) selected = object;
     }
     const areaPx = selected ? Math.round(area(selected)) : null;
-    areaValue.textContent = selected ? `${areaPx} px²` : '--';
-    if (selected) {
-      const [left, top, right, bottom] = selected.bounds;
-      context.strokeStyle = '#8fc7e7';
-      context.strokeRect(left, top, right - left, bottom - top);
+    const areaFraction = selected ? area(selected) / (frame.width * frame.height) : null;
+    areaValue.textContent = selected ? `${Math.round(areaFraction * 1280 * 720)} px²` : '--';
+    if (video.srcObject && !video.paused) {
+      if (canvas.width !== frame.width || canvas.height !== frame.height) {
+        canvas.width = frame.width;
+        canvas.height = frame.height;
+      }
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      if (selected) {
+        const [left, top, right, bottom] = selected.bounds;
+        context.lineWidth = Math.max(2, frame.width / 400);
+        context.strokeStyle = '#8fc7e7';
+        context.strokeRect(left, top, right - left, bottom - top);
+      }
     }
     if (status.textContent) status.textContent = '';
     // Detection bounds are already upright; the camera's CSS rotation must
@@ -86,7 +88,7 @@
       (selected.bounds[0] + selected.bounds[2]) / frame.width - 1,
       (selected.bounds[1] + selected.bounds[3]) / frame.height - 1,
     ] : null;
-    publishTarget(true, point, selected ? area(selected) / (frame.width * frame.height) : null,
+    publishTarget(true, point, areaFraction,
       frame.captured_at_unix_us, areaPx);
     clearTimeout(expiry);
     expiry = setTimeout(clear, 2000);
@@ -134,8 +136,9 @@
     if (event.detail === 'object') start();
   });
   window.addEventListener('vision-recognition-stop', () => { if (socket) stop(); });
-  video.addEventListener('pause', clear);
-  video.addEventListener('emptied', clear);
+  window.addEventListener('camera-preview-paused', event => {
+    if (event.detail) context.clearRect(0, 0, canvas.width, canvas.height);
+  });
   window.addEventListener('console-page-changed', () => {
     if (document.body.dataset.consolePage !== 'person' && socket) stop();
   });

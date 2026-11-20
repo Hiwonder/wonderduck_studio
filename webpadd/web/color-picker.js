@@ -242,21 +242,20 @@
     showReference();
     if (completed) window.dispatchEvent(new CustomEvent('color-reference-changed', {detail: reference}));
     recordFrame('color');
-    if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-      clearTarget();
-      return;
-    }
-    sizeOverlay(data);
+    const drawOverlay = video.srcObject && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+    if (drawOverlay) sizeOverlay(data);
     let point = null;
     if (data.bounds) {
       const [x, y, width, height] = data.bounds;
-      output.strokeStyle = 'rgb(255,255,0)';
-      output.lineWidth = 2;
-      output.strokeRect(x, y, width, height);
+      if (drawOverlay) {
+        output.strokeStyle = 'rgb(255,255,0)';
+        output.lineWidth = 2;
+        output.strokeRect(x, y, width, height);
+      }
       let u = (x + width / 2) / data.width, v = (y + height / 2) / data.height;
-      if (video.classList.contains('turn90')) [u, v] = [1 - v, u];
-      else if (video.classList.contains('turn180')) [u, v] = [1 - u, 1 - v];
-      else if (video.classList.contains('turn270')) [u, v] = [v, 1 - u];
+      if (data.rotate === 90) [u, v] = [1 - v, u];
+      else if (data.rotate === 180) [u, v] = [1 - u, 1 - v];
+      else if (data.rotate === 270) [u, v] = [v, 1 - u];
       point = [Math.max(-1, Math.min(1, 2 * u - 1)), Math.max(-1, Math.min(1, 2 * v - 1))];
     }
     // A selected reference is ready even when no matching contour is present.
@@ -433,8 +432,13 @@
     thresholdValue.textContent = Number(threshold.value).toFixed(2);
     sendSettings();
   });
-  video.addEventListener('pause', clearTarget);
-  video.addEventListener('emptied', clearTarget);
+  window.addEventListener('camera-preview-paused', event => {
+    const paused = event.detail;
+    if (paused && (phase === 'choose' || phase === 'sampling')) clear();
+    if (paused) output.clearRect(0, 0, overlay.width, overlay.height);
+    button.disabled = paused;
+    button.title = paused ? '请关闭性能模式后取色' : '';
+  });
   window.addEventListener('console-page-changed', () => {
     if (!visionPageActive()) {
       suspendedByPage = true;

@@ -659,7 +659,7 @@ pub(super) async fn perform_action(action: Action, generation: u64, state: &AppS
             Err(error) => return action_result(action, Err(error)),
         }
     } else {
-        action.calls(&state.control.lock().await.bindings)
+        action.calls()
     };
     if calls.is_empty() && !matches!(action, Action::SitOnLoss | Action::ManualPrepareDrive) {
         return action_result(action, Err("该按键未绑定动作".into()));

@@ -113,7 +113,7 @@ impl CoordinatedTrackingSettings {
             head_gains: [[2.0, 0.0, 0.1], [2.8, 0.2, 0.5]],
             body_gains: [2.0, 0.2, 1.0],
             final_point: [160.0, 90.0],
-            final_tolerance: [80.0, 50.0],
+            final_tolerance: [60.0, 20.0],
             arrival_delay_s: 1.0,
             arrival_skill: "ground_pick".into(),
             mouth_before: proto::TimedMouthPosition { enabled: true, open: 1.0, duration_s: 0.5 },

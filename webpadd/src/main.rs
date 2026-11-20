@@ -434,7 +434,6 @@ async fn main() -> ExitCode {
         control.linear_speed = saved.linear_speed;
         control.turn_speed = saved.turn_speed;
     }
-    control.bindings = params.pad;
     control.drive = params.pad_drive;
     let (view_tx, views) = watch::channel(control.view(Instant::now()));
     let (feedback, _) = broadcast::channel(32);
@@ -512,6 +511,18 @@ async fn shutdown_signal() {
     tracing::info!("interrupt received; browser control stopped");
 }
 
+async fn camera_metadata() -> Result<axum::Json<serde_json::Value>, axum::http::StatusCode> {
+    tokio::task::spawn_blocking(|| {
+        let path = frame_prefetch::media_socket()?;
+        frame_prefetch::FrameClient::connect(&path)?.video()
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(axum::Json)
+    .ok_or(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+}
+
 fn router(state: AppState, media_port: u16) -> Router {
     Router::new()
         .route(
@@ -524,6 +535,7 @@ fn router(state: AppState, media_port: u16) -> Router {
         .route("/control", get(control_upgrade))
         .route("/objects", get(object_detection::upgrade))
         .route("/colors", get(color_detection::upgrade))
+        .route("/camera-metadata", get(camera_metadata))
         .route("/console.css", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], include_str!("../web/console.css")) }))
         .route("/console.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/console.js")) }))
         .route("/language.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/language.js")) }))
@@ -1185,7 +1197,6 @@ async fn config_worker(path: PathBuf, control: Arc<Mutex<ControlState>>) {
         match robotd_params::Params::load(&path, true) {
             Ok(params) => {
                 let mut control = control.lock().await;
-                control.bindings = params.pad;
                 control.drive = params.pad_drive;
             }
             Err(error) => {

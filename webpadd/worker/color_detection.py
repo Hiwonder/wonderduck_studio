@@ -16,6 +16,9 @@ import cv2
 import numpy as np
 
 
+COLOR_BOUNDARY_MARGIN = 1e-6
+
+
 def _integer(value, name):
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a nonnegative integer")
@@ -73,7 +76,8 @@ class ColorDetectionEngine:
         self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         self.lookup_key = None
         self.lookup = None
-        self.sum_channels = np.ones((1, 3), dtype=np.float64)
+        self.precise_lookup = None
+        self.sum_channels = np.ones((1, 3), dtype=np.float32)
 
     def _configure(self, settings):
         generation = _integer(settings["generation"], "generation")
@@ -114,14 +118,20 @@ class ColorDetectionEngine:
             self.reference = reference
         return threshold
 
-    def _sample(self, rgb, timestamp):
+    def _sample(self, uyvy, timestamp):
         if timestamp in self.sample_timestamps:
             return
-        height, width = rgb.shape[:2]
+        height, width = uyvy.shape[:2]
         x = min(width - 1, math.floor(self.point[0] * width))
         y = min(height - 1, math.floor(self.point[1] * height))
-        patch = rgb[max(0, y - 2):min(height, y + 3),
-                    max(0, x - 2):min(width, x + 3)]
+        left, right = max(0, x - 2), min(width, x + 3)
+        # A UYVY chroma pair starts at an even column. Convert the aligned crop,
+        # then select the original sampling pixels.
+        aligned_left = left & ~1
+        aligned_right = (right + 1) & ~1
+        crop = uyvy[max(0, y - 2):min(height, y + 3), aligned_left:aligned_right]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_YUV2RGB_UYVY)
+        patch = rgb[:, left - aligned_left:right - aligned_left]
         lab = cv2.cvtColor(patch, cv2.COLOR_RGB2Lab)
         self.samples_rgb.append(_upper_median(patch.reshape(-1, 3)))
         self.samples_lab.append(_upper_median(lab.reshape(-1, 3)))
@@ -132,6 +142,25 @@ class ColorDetectionEngine:
                 "lab": _upper_median(self.samples_lab).tolist(),
             }
 
+    def _color_mask(self, lab, threshold):
+        lookup_key = (tuple(self.reference["lab"]), threshold)
+        if lookup_key != self.lookup_key:
+            delta = np.maximum(0.01, np.array([140.0, 60.0, 60.0]) * threshold)
+            distance = (np.arange(256, dtype=np.float64)[:, None]
+                        - self.reference["lab"]) / delta
+            self.precise_lookup = (distance * distance).reshape(256, 1, 3)
+            self.lookup = self.precise_lookup.astype(np.float32)
+            self.lookup_key = lookup_key
+        squared = cv2.LUT(lab, self.lookup)
+        distance = cv2.transform(squared, self.sum_channels)
+        # Sum of nonnegative terms. Near the decision boundary, recompute
+        # using the original double-precision calculation to preserve equality.
+        near_boundary = cv2.inRange(distance, 1.0 - COLOR_BOUNDARY_MARGIN, 1.0 + COLOR_BOUNDARY_MARGIN)
+        if cv2.countNonZero(near_boundary):
+            squared = cv2.LUT(lab, self.precise_lookup)
+            distance = cv2.transform(squared, self.sum_channels)
+        return cv2.compare(distance, 1.0, cv2.CMP_LE)
+
     def _detect(self, rgb, threshold):
         height, width = rgb.shape[:2]
         detection_width = 320
@@ -141,18 +170,7 @@ class ColorDetectionEngine:
                              interpolation=cv2.INTER_LINEAR)
         lab = cv2.cvtColor(resized, cv2.COLOR_RGB2Lab)
         blurred = cv2.GaussianBlur(lab, (3, 3), 0.8)
-        lookup_key = (tuple(self.reference["lab"]), threshold)
-        if lookup_key != self.lookup_key:
-            delta = np.maximum(0.01, np.array([140.0, 60.0, 60.0]) * threshold)
-            distance = (np.arange(256, dtype=np.float64)[:, None]
-                        - self.reference["lab"]) / delta
-            self.lookup = (distance * distance).reshape(256, 1, 3)
-            self.lookup_key = lookup_key
-        # OpenCV performs the same per-channel ellipsoid calculation in native
-        # loops; avoid several image-sized NumPy temporaries every frame.
-        squared = cv2.LUT(blurred, self.lookup)
-        distance = cv2.transform(squared, self.sum_channels)
-        mask = cv2.compare(distance, 1.0, cv2.CMP_LE)
+        mask = self._color_mask(blurred, threshold)
         opened = cv2.dilate(cv2.erode(mask, self.kernel), self.kernel)
         contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL,
                                       cv2.CHAIN_APPROX_SIMPLE)
@@ -185,15 +203,15 @@ class ColorDetectionEngine:
             raise ValueError("raw frame byte length does not match header.bytes")
         threshold = self._configure(settings)
         uyvy = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 2)
-        rgb = cv2.cvtColor(uyvy, cv2.COLOR_YUV2RGB_UYVY)
         if self.reference is None:
-            self._sample(rgb, header["captured_at_unix_us"])
+            self._sample(uyvy, header["captured_at_unix_us"])
             if self.reference is None:
                 return {
                     "type": "sampling", "generation": self.generation,
                     "width": width, "height": height,
                     "point": self.point, "count": len(self.samples_rgb),
                 }
+        rgb = cv2.cvtColor(uyvy, cv2.COLOR_YUV2RGB_UYVY)
         bounds, area = self._detect(rgb, threshold)
         return {
             "type": "frame", "generation": self.generation,
@@ -207,24 +225,30 @@ class ColorDetectionEngine:
 def run(input_stream, output_stream):
     """Read sequential length-prefixed records until a clean record boundary EOF."""
     engine = ColorDetectionEngine()
+    payload = bytearray()
     while True:
         line = input_stream.readline()
         if not line:
             return
         request = json.loads(line)
         _, _, size = _frame_geometry(request["header"])
-        payload = bytearray()
-        while len(payload) < size:
-            chunk = input_stream.read(size - len(payload))
-            if not chunk:
-                raise EOFError("truncated raw UYVY frame")
-            payload.extend(chunk)
+        if len(payload) != size:
+            payload = bytearray(size)
+        with memoryview(payload) as view:
+            offset = 0
+            while offset < size:
+                count = input_stream.readinto(view[offset:])
+                if not count:
+                    raise EOFError("truncated raw UYVY frame")
+                offset += count
         response = engine.process_frame(request["header"], payload, request["settings"])
         output_stream.write(json.dumps(response, allow_nan=False, separators=(",", ":")) + "\n")
         output_stream.flush()
 
 
 if __name__ == "__main__":
+    # At this image size, OpenCV's worker pool costs more CPU than it saves.
+    cv2.setNumThreads(1)
     # OpenCV initializes its RGB-to-Lab lookup on the first conversion.
     cv2.cvtColor(np.zeros((5, 5, 3), dtype=np.uint8), cv2.COLOR_RGB2Lab)
     print('{"type":"ready"}', flush=True)

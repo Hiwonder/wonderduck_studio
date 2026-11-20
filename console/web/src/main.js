@@ -19,7 +19,7 @@ import './interaction.css';
 import { createCalibrationControls } from './calibration-controls.js';
 import { createCalibrationCharts } from './calibration-charts.js';
 import { createDeviceStatus } from './device-status.js';
-import { createConnectionStatus, createLowVoltageIndicator, createNotifications, createSidebar, displayVoltage, lowVoltageWarning, renderSidebarVoltage } from './sidebar.js';
+import { createConnectionStatus, createLowVoltageIndicator, createNotifications, createSidebar, displayVoltage, lowVoltageWarning, renderSidebarCpu, renderSidebarVoltage } from './sidebar.js';
 import { createServoPanel } from './servo-panel.js';
 import { createServoDebugMode } from './servo-debug-mode.js';
 import { createActionEditor } from './action-editor.js';
@@ -432,9 +432,12 @@ onLanguageChange(language => {
 $('language-toggle').addEventListener('click', () => setLanguage(getLanguage() === 'en' ? 'zh' : 'en'));
 updateLanguageToggle(getLanguage());
 
+const sidebarDebugMode = $('sidebar-debug-mode');
+sidebarDebugMode.checked = false;
 function syncDebugMode() {
-  notifyFrames('studio-debug-mode', { enabled: false });
+  notifyFrames('studio-debug-mode', { enabled: sidebarDebugMode.checked });
 }
+sidebarDebugMode.addEventListener('change', syncDebugMode);
 
 function notifyControlAction(result) {
   const frame = $('control-workspace');
@@ -862,7 +865,7 @@ async function selectWorkspace(next) {
     if (controlPages.has(next) && (!control.src || control.src === 'about:blank')) {
       const url = new URL(location.href);
       url.port = location.protocol === 'https:' ? '9444' : '8081'; url.pathname = '/';
-      url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=0&lang=${getLanguage()}`; url.hash = '';
+      url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=${Number(sidebarDebugMode.checked)}&lang=${getLanguage()}`; url.hash = '';
       await loadWorkspaceFrame(control, url.href);
     }
     if (next === 'debug' && (previous !== 'debug' || !$('debug-frame').src || $('debug-frame').src === 'about:blank'
@@ -1032,6 +1035,7 @@ function renderState() {
     ? state.servos.filter(servo => liveServoFresh(servo)).map(servo => servo.voltage)
     : [];
   const lowVoltage = updateLowVoltage(state.robot?.low_voltage, measuredVoltages, performance.now());
+  renderSidebarCpu($, connectionError ? null : state.robot?.health);
   if (!(handoff && !connectionError && ((state.online && !fresh) || waitingForFirstSample(state)))) {
     const voltage = displayVoltage(state, sampleElapsed(), connectionError);
     const calibrating = !!state.calibration?.active || !!state.head_calibration?.active;

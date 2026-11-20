@@ -1,6 +1,6 @@
 //! Native color recognition runs outside the control and HTTP executor threads.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -379,7 +379,7 @@ impl ProcessControl {
 
 struct NativeProcess {
     process: Arc<ProcessControl>,
-    input: ChildStdin,
+    input: BufWriter<ChildStdin>,
     output: BufReader<ChildStdout>,
 }
 
@@ -426,7 +426,7 @@ impl NativeProcess {
         process.attach(child)?;
         Ok(Self {
             process,
-            input,
+            input: BufWriter::new(input),
             output,
         })
     }

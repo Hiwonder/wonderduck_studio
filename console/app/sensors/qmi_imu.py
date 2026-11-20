@@ -4,6 +4,7 @@ import importlib.util
 import json
 import logging
 import math
+import os
 from collections import deque
 from pathlib import Path
 import signal
@@ -18,7 +19,7 @@ from app.sensors.qmi_calibration import HeadCalibration, ProfileStore
 
 
 BUS_PATH = "/dev/i2c-3"
-ADDRESS = 0x6a
+ADDRESS = int(os.environ.get("WONDERDUCK_HEAD_IMU_ADDRESS", "0x6a"), 0)
 RESET_CONFIG = bytes.fromhex("20 00 00 00 00 00 00")
 LEGACY_ACTIVE_CONFIG = bytes.fromhex("40 03 43 00 11 00 03")
 ACTIVE_CONFIG = bytes.fromhex("40 03 43 00 11 00 83")
@@ -85,6 +86,8 @@ def load_probe():
 
 
 def require_unbound_sensor():
+    if os.environ.get("WONDERDUCK_UNOQ_ROUTER"):
+        return
     if Path("/sys/bus/i2c/devices/3-006a").exists():
         raise ConfigurationError("I2C3 IMU 已绑定内核驱动，不能访问")
 
@@ -171,7 +174,11 @@ class QmiSampler:
 
     def open(self):
         self.binding_check()
-        self.device = self.probe.I2cDevice(BUS_PATH, ADDRESS)
+        if os.environ.get("WONDERDUCK_UNOQ_ROUTER"):
+            from unoq_io import HeadImu
+            self.device = HeadImu(ADDRESS)
+        else:
+            self.device = self.probe.I2cDevice(BUS_PATH, ADDRESS)
         try:
             config = self._configuration()
             if config not in KNOWN_CONFIGURATIONS:
