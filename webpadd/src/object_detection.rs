@@ -16,7 +16,7 @@ use uyvy::{Turn, letterbox_rect_from_uyvy_with_pad};
 
 use crate::AppState;
 use duck_detect::{onnx, rknn};
-use crate::frame_prefetch::{FramePrefetch, camera_recoverable, media_socket, source_root};
+use crate::frame_prefetch::{CameraFrames, camera_recoverable, media_socket, source_root};
 use crate::person_models::PersonDecoder;
 
 #[derive(Clone, Serialize)]
@@ -52,14 +52,14 @@ pub(super) enum PersonModel {
     Yolo26n,
 }
 
+fn board_compatible(compatible: &[u8]) -> bool {
+    std::fs::read("/proc/device-tree/compatible").is_ok_and(|data| {
+        data.split(|&value| value == 0).any(|value| value == compatible)
+    })
+}
+
 impl PersonModel {
     const ALL: [Self; 2] = [Self::Yolov5sReluWide, Self::Yolo26n];
-
-    fn rockchip_board() -> bool {
-        std::fs::read("/proc/device-tree/compatible").is_ok_and(|data| {
-            data.split(|&value| value == 0).any(|value| value == b"rockchip,rk3566")
-        })
-    }
 
     fn path(self, executable: &Path) -> Result<PathBuf> {
         let stem = match self {
@@ -73,7 +73,7 @@ impl PersonModel {
         };
         let path = source_root(executable)?.join("models").join(stem);
         let rk_model = path.with_extension("rknn");
-        if Self::rockchip_board() && rk_model.is_file() && rk_model.with_file_name("librknnrt.so").is_file() {
+        if board_compatible(b"rockchip,rk3566") && rk_model.is_file() && rk_model.with_file_name("librknnrt.so").is_file() {
             return Ok(rk_model);
         }
         Ok(path.with_extension("onnx"))
@@ -83,7 +83,7 @@ impl PersonModel {
         self.path(executable).is_ok_and(|path| {
             path.is_file() && match path.extension().and_then(|extension| extension.to_str()) {
                 Some("onnx") => true,
-                Some("rknn") => Self::rockchip_board() && path.with_file_name("librknnrt.so").is_file(),
+                Some("rknn") => board_compatible(b"rockchip,rk3566") && path.with_file_name("librknnrt.so").is_file(),
                 _ => false,
             }
         })
@@ -340,7 +340,10 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
     } else {
         None
     };
-    let mut frames = FramePrefetch::camera(&socket)?;
+    // UNO Q converts every requested NV12 frame to UYVY on the CPU. Request the next
+    // capture when ONNX can use it, so inference leaves the motor loop its CPU time.
+    let on_demand = matches!(&model, Model::Onnx(_)) && board_compatible(b"arduino,imola");
+    let mut frames = CameraFrames::camera(&socket, on_demand)?;
     let mut recovering = false;
     loop {
         if shared
@@ -382,7 +385,7 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
                     return Ok(());
                 }
                 drop(state);
-                frames = FramePrefetch::camera(&socket)?;
+                frames = CameraFrames::camera(&socket, on_demand)?;
                 continue;
             }
             Err(error) => return Err(error),

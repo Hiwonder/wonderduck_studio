@@ -1,4 +1,4 @@
-//! Fetch camera frames concurrently with inference, keeping only the latest result.
+//! Fetch camera frames on demand or keep the latest frame available during inference.
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -22,6 +22,27 @@ struct Slot {
 
 type Shared = Arc<(Mutex<Slot>, Condvar)>;
 
+pub(super) enum CameraFrames {
+    OnDemand { path: PathBuf, client: Option<FrameClient> },
+    Prefetched(FramePrefetch),
+}
+
+impl CameraFrames {
+    pub(super) fn camera(path: &Path, on_demand: bool) -> Result<Self> {
+        if on_demand {
+            return Ok(Self::OnDemand { path: path.to_owned(), client: None });
+        }
+        Ok(Self::Prefetched(FramePrefetch::camera(path)?))
+    }
+
+    pub(super) fn next(&mut self) -> Result<Frame> {
+        match self {
+            Self::OnDemand { path, client } => FrameClient::next_from(client, path),
+            Self::Prefetched(prefetch) => prefetch.next(),
+        }
+    }
+}
+
 pub(super) struct FramePrefetch {
     shared: Shared,
     thread: Option<JoinHandle<()>>,
@@ -31,15 +52,10 @@ impl FramePrefetch {
     pub(super) fn camera(path: &Path) -> Result<Self> {
         let path = path.to_owned();
         let mut client = None;
-        // Connect on the producer thread so startup failures use the same outer recovery
-        // loop as read failures. A failed producer exits; it never reconnects internally.
-        Self::start(move || match &mut client {
-            Some(client) => FrameClient::next(client),
-            None => client.insert(FrameClient::connect(&path)?).next(),
-        })
+        Self::start(move || FrameClient::next_from(&mut client, &path))
     }
 
-    pub(super) fn start(mut fetch: impl FnMut() -> Result<Frame> + Send + 'static) -> Result<Self> {
+    fn start(mut fetch: impl FnMut() -> Result<Frame> + Send + 'static) -> Result<Self> {
         let shared: Shared = Arc::new((Mutex::new(Slot::default()), Condvar::new()));
         let producer_shared = shared.clone();
         let thread = thread::Builder::new()
@@ -156,6 +172,14 @@ pub(super) struct FrameClient {
 }
 
 impl FrameClient {
+    // A connection error goes through the detector's normal recovery and cancellation path.
+    fn next_from(client: &mut Option<Self>, path: &Path) -> Result<Frame> {
+        match client {
+            Some(client) => client.next(),
+            None => client.insert(Self::connect(path)?).next(),
+        }
+    }
+
     pub(super) fn connect(path: &Path) -> Result<Self> {
         let mut stream = UnixStream::connect(path)
             .with_context(|| format!("camera socket {}", path.display()))?;
@@ -211,10 +235,10 @@ impl FrameClient {
 fn response(reader: &mut BufReader<UnixStream>, id: u64) -> Result<serde_json::Value> {
     let mut line = Vec::new();
     reader.take(4097).read_until(b'\n', &mut line)?;
-    ensure!(
-        line.len() <= 4096 && line.ends_with(b"\n"),
-        "invalid camera response"
-    );
+    ensure!(line.len() <= 4096, "invalid camera response");
+    if !line.ends_with(b"\n") {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "camera closed before its response").into());
+    }
     let response: proto::Response = serde_json::from_slice(&line)?;
     ensure!(
         response.jsonrpc == "2.0" && response.id == Some(proto::Id::Number(id)),
@@ -230,4 +254,52 @@ fn response(reader: &mut BufReader<UnixStream>, id: u64) -> Result<serde_json::V
         bail!("camera: {}", error.message);
     }
     response.result.context("camera response has no result")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn on_demand_camera_only_reads_for_the_next_inference() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let mut frames = CameraFrames::OnDemand {
+            path: PathBuf::new(),
+            client: Some(FrameClient { reader: BufReader::new(client) }),
+        };
+        let server = thread::spawn(move || {
+            let mut server = BufReader::new(server);
+            let mut line = String::new();
+            server.read_line(&mut line).unwrap();
+            let request: proto::Request = serde_json::from_str(&line).unwrap();
+            assert_eq!(request.method, proto::method::MEDIA_FRAME);
+            let header = MediaFrameHeader {
+                width: 2, height: 1, format: "UYVY".into(), bytes: 4,
+                captured_at_unix_us: 42, rotate: 0,
+            };
+            let reply = proto::Response::ok(request.id, &header);
+            serde_json::to_writer(server.get_mut(), &reply).unwrap();
+            server.get_mut().write_all(b"\n1234").unwrap();
+            server
+        });
+        let (header, data) = frames.next().unwrap();
+        assert_eq!(header.captured_at_unix_us, 42);
+        assert_eq!(data, b"1234");
+        let mut server = server.join().unwrap();
+        server.get_mut().set_nonblocking(true).unwrap();
+        assert_eq!(server.read(&mut [0]).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn both_camera_modes_retry_after_connection_loss() {
+        let missing = std::env::temp_dir().join(format!("wd-camera-{}-absent.sock", std::process::id()));
+        for on_demand in [true, false] {
+            let mut frames = CameraFrames::camera(&missing, on_demand).unwrap();
+            assert!(camera_recoverable(&frames.next().unwrap_err()));
+        }
+        let (client, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        let error = response(&mut BufReader::new(client), 2).unwrap_err();
+        assert!(camera_recoverable(&error));
+    }
 }
