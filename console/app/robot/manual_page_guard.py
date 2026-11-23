@@ -95,6 +95,10 @@ class ManualPageGuard:
         lease = self.leases.get(client)
         return lease is not None and lease.status_enabled and lease.alive()
 
+    def transition_enabled(self, client):
+        lease = self.leases.get(client)
+        return lease is not None and lease.transition_enabled and lease.alive()
+
     def set_transition(self, client, enabled):
         # Reuse the status guard's connection.  Creating a fresh lease here
         # could lose protection between the two guards if that connection died.

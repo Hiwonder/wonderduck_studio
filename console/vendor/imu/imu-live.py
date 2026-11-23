@@ -239,9 +239,11 @@ def decode_gyro_bias(data, *, allow_unloaded_bias=False):
 
 
 def read_gyro_bias(fd, imu_id=IMU_ID, *, allow_unloaded_bias=False):
+    # UNO Q forwards the HX transaction through the Arduino Router and STM32.
+    timeout = READ_TIMEOUT_SECONDS if os.environ.get("WONDERDUCK_UNOQ_ROUTER") else FAULT_TIMEOUT_SECONDS
     return decode_gyro_bias(read_blocks(
         fd, make_read(imu_id, 122, 48), (imu_id,), block_length=48,
-        timeout_seconds=FAULT_TIMEOUT_SECONDS)[imu_id], allow_unloaded_bias=allow_unloaded_bias)
+        timeout_seconds=timeout)[imu_id], allow_unloaded_bias=allow_unloaded_bias)
 
 
 def read_persistent_calibration(fd, imu_id=IMU_ID):

@@ -20,6 +20,7 @@ WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "control", "target", 
 MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "maze", "person", "target"))
 REST_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status",))
 OBSERVATION_WORKSPACES = REST_WORKSPACES
+SETTINGS_WORKSPACES = frozenset(("system", "network"))
 CLIENT_TIMEOUT = 30
 UNCONFIRMED_RELEASE_WARNING = "卸力未确认，运动控制不可用；设备状态为只读"
 REST_INVALIDATING_ACTIONS = frozenset(("move", "move_direct", "write_register", "offset_direct",
@@ -189,7 +190,7 @@ class StudioController:
             return dict(workspace=workspace, maintenance=False, ready=False,
                         error=f"{warning}；手动控制限制未确认：{error}")
 
-    def _partial_observation(self, client):
+    def _partial_observation(self, client, timeouts):
         """Wait for every servo's own read, including an explicit missing reply."""
         if not hasattr(self.observer, "snapshot"):
             return None
@@ -209,12 +210,22 @@ class StudioController:
             if type(observed) not in (int, float) or not 0 <= now - observed <= 10:
                 return None
             if row.get("valid") is True and row.get("torque") == 0 and row.get("error") is None:
+                timeouts.pop(row["id"], None)
                 available += 1
             elif row.get("valid") is False and row.get("error") == "未连接":
                 missing.append(row["id"])
+            elif row.get("valid") is False and row.get("error") == "读取超时":
+                # Older robotd builds publish each clean timeout under the same label.
+                previous, count = timeouts.get(row["id"], (None, 0))
+                if observed != previous:
+                    count += 1
+                    timeouts[row["id"]] = observed, count
+                if count >= 2:
+                    missing.append(row["id"])
             else:
+                timeouts.pop(row["id"], None)
                 return None
-        return missing if available and missing else None
+        return missing if available and missing and available + len(missing) == len(IDS) else None
 
     def _try_partial_maintenance(self, client, workspace, fallback):
         if workspace not in MAINTENANCE_WORKSPACES or not fallback.get("ready"):
@@ -225,6 +236,7 @@ class StudioController:
                     self.rest_transition_client = None
             return fallback
         deadline = time.monotonic() + 12
+        timeouts = {}
         while time.monotonic() < deadline:
             with self.lock:
                 if (self.rest_transition_client != client or client not in self.rest_unconfirmed
@@ -232,7 +244,7 @@ class StudioController:
                     if self.rest_transition_client == client:
                         self.rest_transition_client = None
                     return fallback
-            missing = self._partial_observation(client)
+            missing = self._partial_observation(client, timeouts)
             if missing:
                 break
             time.sleep(.05)
@@ -275,6 +287,18 @@ class StudioController:
         if not client or workspace not in WORKSPACES:
             raise ValueError("工作区无效")
         with self.lock:
+            if workspace in SETTINGS_WORKSPACES:
+                try:
+                    result = self._switch_workspace(client, workspace)
+                except (OSError, RuntimeError, ValueError) as error:
+                    # Settings remain usable while robotd completes a serial handoff.
+                    logging.warning("进入设置时维护串口未确认：%s", error)
+                    self.rest_unconfirmed.add(client)
+                    self.client_workspaces[client] = (workspace, time.monotonic())
+                    return dict(workspace=workspace, maintenance=False, ready=True)
+                if client not in self.rest_unconfirmed:
+                    self.manual_page_guard.release(client)
+                return result
             if self.rest_transition_client is not None:
                 raise RuntimeError("机器人正在休息，请等待页面切换完成")
             if client in self.rest_unconfirmed:
@@ -330,8 +354,9 @@ class StudioController:
                 return self.switch(client, workspace)
             if self.owner not in (None, client):
                 return self._unconfirmed_fallback(client, workspace, "另一浏览器正在使用维护工作区；设备操作不可用")
-            if any(other != client and self.manual_page_guard.status_enabled(other)
-                   for other in self.manual_page_guard.leases):
+            other_status_viewer = any(other != client and self.manual_page_guard.status_enabled(other)
+                                      for other in self.manual_page_guard.leases)
+            if other_status_viewer and workspace == "status" and self.owner is None:
                 return self._unconfirmed_fallback(client, workspace, "其他页面正在采集设备状态；维护接管暂不可用")
             previous_status_seen = self.status_viewers.get(client)
             retry_unconfirmed = client in self.rest_unconfirmed
@@ -344,7 +369,7 @@ class StudioController:
                 # Once release is unconfirmed, do not open a movement window
                 # while retrying it. Emergency release is a priority request
                 # and remains available with the status guard held.
-                self.manual_page_guard.ensure(client, status=retry_unconfirmed)
+                self.manual_page_guard.ensure(client, status=retry_unconfirmed or other_status_viewer)
             except (OSError, RuntimeError, PermissionError, ValueError) as error:
                 self.rest_transition_client = None
                 return self._unconfirmed_fallback(client, workspace, f"维护串口未安全交回：{error}；设备操作不可用")
@@ -362,7 +387,7 @@ class StudioController:
             # snapshots and unrelated status requests must remain responsive.
             fallback = False
             try:
-                if retry_unconfirmed:
+                if retry_unconfirmed or other_status_viewer:
                     raise RuntimeError("卸力尚未确认")
                 ensure_rest(self.path)
             except Exception as error:
@@ -385,7 +410,7 @@ class StudioController:
                 # maintenance lease needs that guard removed to acquire the
                 # bus, so overlap it with a separate movement block until the
                 # exclusive lease has actually taken over.
-                transition_guard = retry_unconfirmed and workspace in MAINTENANCE_WORKSPACES
+                transition_guard = (retry_unconfirmed or other_status_viewer) and workspace in MAINTENANCE_WORKSPACES
                 try:
                     if transition_guard:
                         self.manual_page_guard.set_transition(client, True)
@@ -488,7 +513,7 @@ class StudioController:
                 lease = self.lease_factory(self.path)
                 self.observer.set_stream_suspended(True)
                 try:
-                    lease.request("acquire_partial" if partial else "acquire")
+                    self._acquire_maintenance(client, lease, partial)
                 except BaseException:
                     self.observer.set_stream_suspended(False)
                     lease.close()
@@ -519,6 +544,27 @@ class StudioController:
                 raise
             self.error = None
             return dict(workspace=workspace, maintenance=True)
+
+    def _acquire_maintenance(self, client, lease, partial):
+        # Pause passive status reads during exclusive handoff. Their manual
+        # movement blocks stay held, and the status stream is already stopped.
+        paused = []
+        if self.manual_page_guard.transition_enabled(client):
+            peers = [other for other in self.manual_page_guard.leases
+                     if other != client and self.manual_page_guard.status_enabled(other)]
+        else:
+            peers = []
+        try:
+            for other in peers:
+                self.manual_page_guard.ensure(other, status=False)
+                paused.append(other)
+            lease.request("acquire_partial" if partial else "acquire")
+        finally:
+            for other in paused:
+                try:
+                    self.manual_page_guard.ensure(other, status=True)
+                except (OSError, RuntimeError, ValueError) as error:
+                    logging.warning("恢复设备状态采集限制失败：%s", error)
 
     def _set_status_viewer(self, client, active):
         previous = self.status_viewers.get(client)

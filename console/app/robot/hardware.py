@@ -368,7 +368,10 @@ class Hardware(ServoLayout):
             if self.imu_source == "i2c":
                 raise ValueError("当前 IMU 来源不是 ID200")
             self.select_baud(0)
-            sample = self.raw_imu.read_raw()
+            try:
+                sample = self.raw_imu.read_raw()
+            except TimeoutError as error:
+                raise RuntimeError("躯体 IMU 读取超时") from error
             return dict(sample, timestamp_ms=int(time.time() * 1000), frame="sensor")
         if action == "set_imu_source":
             self.set_imu_source(command.get("source"))

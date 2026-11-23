@@ -460,6 +460,7 @@ const ENGLISH = new Map(Object.entries({
   '重启控制台服务后启用': 'Restart the console service to enable this feature',
   '原始': 'Raw', '校准后': 'Calibrated', '勾选显示曲线': 'Select to show the curve',
   '采样中': 'Sampling', '等待头部 IMU 采样': 'Waiting for head IMU samples',
+  '躯体 IMU 读取超时': 'Body IMU read timed out',
   '等待摆放 · 实时采样': 'Waiting for placement · live sampling', '等待校准采样': 'Waiting for calibration samples',
   '实时 · 传感器坐标（只读）': 'Live · sensor frame (read-only)', '等待新样本': 'Waiting for a new sample',
   '实时 · 传感器坐标': 'Live · sensor frame', '采样不可用': 'Sampling unavailable',

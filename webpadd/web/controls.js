@@ -18,8 +18,8 @@
       const state = { left_x: 0, left_y: 0, right_x: 0, right_y: 0,
         left_trigger: 0, right_trigger: 0, buttons: [], active: !document.hidden };
       let studioLeaveRequest = null;
-      let studioActive = true;
       const embeddedStudio = document.documentElement.dataset.studioEmbedded === 'true' && window.parent !== window;
+      let studioActive = !embeddedStudio;
       let workspaceActivated = !embeddedStudio;
       let driveEntryPending = !embeddedStudio;
       let driveEntryInFlight = false, driveControlReady = false, driveEntryStatusSequence = 0;
@@ -2500,6 +2500,12 @@
           zero(); state.active = true; sendInput(); reconcileHeadPosition(); prepareDriveOnEntry();
         }
       };
+      window.addEventListener('studio-preview', () => {
+        suspend();
+        studioActive = false;
+        workspaceActivated = false;
+        renderMotionPower();
+      });
       window.addEventListener('studio-enter', () => {
         const returning = !workspaceActivated;
         workspaceActivated = true;

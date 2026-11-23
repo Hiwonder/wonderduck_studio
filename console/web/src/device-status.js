@@ -55,10 +55,11 @@ export function createDeviceStatus({ toast }) {
   const number = (value, digits, suffix = '') => Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : '--';
   const vector = (values, digits = 3) => Array.isArray(values) && values.length === 3 && values.every(Number.isFinite)
     ? values.map(value => value.toFixed(digits)).join('  /  ') : '--';
-  const reading = (id, value) => {
+  const reading = (id, value, historical = false) => {
     const element = get(id);
     setLocalizedText(element, value);
-    setLocalizedAttribute(element, 'title', value);
+    element.classList.toggle('historical', historical && value !== '--');
+    setLocalizedAttribute(element, 'title', historical && value !== '--' ? '数据过期' : value);
   };
   const setText = (id, value) => {
     const element = get(id);
@@ -90,6 +91,9 @@ export function createDeviceStatus({ toast }) {
     if (rows.size !== joints.length || joints.some(joint => !rows.has(joint.id))) rebuild(joints);
     const imu = state.imu || {};
     const valid = imuFresh(imu, state, elapsed, connectionError);
+    const historical = !valid && imu.valid && state.online && !state.device_paused &&
+      !state.calibration?.active && !connectionError;
+    const showImu = valid || historical;
     if (info?.studio) {
       const health = state.robot?.health || {}, safety = state.safety || {};
       const independent = state.individual_device_scan || Number.isFinite(state.device_report_age_ms);
@@ -124,10 +128,10 @@ export function createDeviceStatus({ toast }) {
       lastStatusNotice = statusNotice;
       if (statusNotice) toast(statusNotice, statusNotice !== '标定中 · 常规采集暂停');
     }
-    reading('status-gyro', valid ? vector(imu.gyro_rad_s) : '--');
-    reading('status-gravity', valid ? vector(imu.gravity) : '--');
-    reading('status-quaternion', valid && Array.isArray(imu.quaternion_wxyz) && imu.quaternion_wxyz.every(Number.isFinite)
-      ? imu.quaternion_wxyz.map(value => value.toFixed(3)).join('  /  ') : '--');
+    reading('status-gyro', showImu ? vector(imu.gyro_rad_s) : '--', historical);
+    reading('status-gravity', showImu ? vector(imu.gravity) : '--', historical);
+    reading('status-quaternion', showImu && Array.isArray(imu.quaternion_wxyz) && imu.quaternion_wxyz.every(Number.isFinite)
+      ? imu.quaternion_wxyz.map(value => value.toFixed(3)).join('  /  ') : '--', historical);
     const aux = state.aux_imu || {};
     for (const [index, axis] of ['roll', 'pitch', 'yaw'].entries()) {
       setText(`aux-curve-${axis}`, auxiliary.valid ? `${aux.rpy_deg[index].toFixed(1)}°` : '--');

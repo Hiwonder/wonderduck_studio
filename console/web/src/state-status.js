@@ -2,7 +2,9 @@ export const SAMPLE_MAX_AGE_MS = 500;
 // A missing servo can delay a complete independent scan by its timeout and
 // quiet interval; each displayed device still uses its own sample timestamp.
 export const SERVO_STATUS_MAX_AGE_MS = 3000;
-export const INDEPENDENT_IMU_MAX_AGE_MS = 1500;
+// The body IMU is read once per individual device sweep. An unanswered servo
+// adds a timeout and a quiet interval before the sweep can continue.
+export const INDEPENDENT_IMU_MAX_AGE_MS = SERVO_STATUS_MAX_AGE_MS;
 
 export function sampleFresh(state, elapsed = 0, connectionError = '') {
   const limit = state?.individual_device_scan ? SERVO_STATUS_MAX_AGE_MS : SAMPLE_MAX_AGE_MS;

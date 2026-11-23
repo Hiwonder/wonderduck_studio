@@ -115,6 +115,8 @@ html[data-theme=dark] #debug-workspace{background:#11161b}
 .calibration-primary,.calibration-resume{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
 .calibration-mode{display:flex;align-items:center;flex:0 0 100%;gap:6px}
 .calibration-primary #calibration-status{color:var(--muted)}
+#calibration-stream-status{margin:8px 0 0;color:var(--muted)}
+#calibration-stream-status.error{color:var(--red)}
 .calibration-primary a{color:var(--green)}
 .calibration-panel details{margin-top:10px}
 .calibration-resume input{flex:1;min-width:180px;width:auto;min-height:34px;margin:0;padding:5px 8px;text-align:left}

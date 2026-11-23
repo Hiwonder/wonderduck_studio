@@ -276,7 +276,7 @@
     if (window.parent === window || event.source !== window.parent || !document.referrer) return;
     const parent = new URL(document.referrer);
     if (parent.protocol !== location.protocol || parent.hostname !== location.hostname || event.origin !== parent.origin) return;
-    if (event.data?.type === 'studio-workspace') {
+    if (event.data?.type === 'studio-workspace' && ['control', 'target', 'person', 'maze', 'system'].includes(event.data.page)) {
       if (document.documentElement.dataset.studioEmbedded === 'true') {
         const firstHandshake = studioOrigin === null;
         studioOrigin = event.origin;
@@ -290,9 +290,11 @@
           pendingErrors.length = 0;
         }
       }
+      const enabled = event.data.enabled !== false;
+      if (!enabled) window.dispatchEvent(new Event('studio-preview'));
       const button = document.querySelector(`button[data-page="${event.data.page}"]`);
       button?.click();
-      window.dispatchEvent(new Event('studio-enter'));
+      if (enabled) window.dispatchEvent(new Event('studio-enter'));
       if (button && Number.isSafeInteger(event.data.requestId)) {
         window.parent.postMessage({ type: 'studio-workspace-ready', page: event.data.page,
           requestId: event.data.requestId }, event.origin);

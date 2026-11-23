@@ -285,7 +285,13 @@ function renderImuComparison() {
 
 const calibrationControls = createCalibrationControls({ request, confirmAction, toast });
 const calibrationCharts = createCalibrationCharts({ request, context: () => ({ info, connectionError, elapsed: sampleElapsed() }),
-  onError: message => toast(message, true), onStatus: message => toast(message), onClear: toast.dismiss });
+  onStatus: (message, error) => {
+    const status = $('calibration-stream-status');
+    setLocalizedText(status, message);
+    status.hidden = !message;
+    status.classList.toggle('error', error);
+  },
+});
 document.addEventListener('calibration-source-change', event => {
   calibrationCharts.setSource(event.detail);
   advanceHeadSubscription();
@@ -410,7 +416,9 @@ function leaveControlWorkspace() {
 function notifyFrames(type, data = {}) {
   const control = $('control-workspace');
   if (control.contentWindow && control.src && control.src !== 'about:blank') {
-    control.contentWindow.postMessage({ type, ...data }, new URL(control.src).origin);
+    const message = { type, ...data };
+    if (type === 'studio-workspace') message.enabled = document.body.dataset.studioReady === 'true';
+    control.contentWindow.postMessage(message, new URL(control.src).origin);
   }
   const debug = $('debug-frame');
   if (debug.contentWindow && debug.src && debug.src !== 'about:blank') {
@@ -703,8 +711,19 @@ function loadWorkspaceFrame(frame, url) {
   });
 }
 
+function loadControlFrame() {
+  const frame = $('control-workspace');
+  if (frame.getAttribute('src') && frame.getAttribute('src') !== 'about:blank') return Promise.resolve();
+  const url = new URL(location.href);
+  url.port = location.protocol === 'https:' ? '9444' : '8081';
+  url.pathname = '/';
+  url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=${Number(sidebarDebugMode.checked)}&lang=${getLanguage()}`;
+  url.hash = '';
+  return loadWorkspaceFrame(frame, url.href);
+}
+
 let controlWorkspaceRequestId = 0;
-function activateControlWorkspace(page) {
+function activateControlWorkspace(page, enabled = true) {
   const frame = $('control-workspace');
   const origin = new URL(frame.src).origin;
   const requestId = ++controlWorkspaceRequestId;
@@ -722,7 +741,7 @@ function activateControlWorkspace(page) {
       if (error) reject(error); else resolve();
     }
     window.addEventListener('message', receive);
-    frame.contentWindow.postMessage({ type: 'studio-workspace', page, requestId }, origin);
+    frame.contentWindow.postMessage({ type: 'studio-workspace', page, requestId, enabled }, origin);
   });
 }
 
@@ -862,12 +881,7 @@ async function selectWorkspace(next) {
     }
     if (queuedWorkspace === next) queuedWorkspace = null;
     const control = $('control-workspace');
-    if (controlPages.has(next) && (!control.src || control.src === 'about:blank')) {
-      const url = new URL(location.href);
-      url.port = location.protocol === 'https:' ? '9444' : '8081'; url.pathname = '/';
-      url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=${Number(sidebarDebugMode.checked)}&lang=${getLanguage()}`; url.hash = '';
-      await loadWorkspaceFrame(control, url.href);
-    }
+    if (controlPages.has(next)) await loadControlFrame();
     if (next === 'debug' && (previous !== 'debug' || !$('debug-frame').src || $('debug-frame').src === 'about:blank'
         || Boolean($('debug-frame').getAttribute('src')?.includes('preview=1')) !== Boolean(info?.readonly))) {
       await loadWorkspaceFrame($('debug-frame'), info?.readonly ? '/debug.html?preview=1' : '/debug.html');
@@ -931,7 +945,6 @@ async function selectWorkspace(next) {
     console.warn('页面切换失败', error);
     const message = `${friendlyErrorMessage(error.message)} 设备操作暂不可用，请重新点击当前页面重试。`;
     if (next === 'debug' || previous === 'debug') clearDebugFrame();
-    if (controlPages.has(next) && !controlPages.has(previous)) $('control-workspace').src = 'about:blank';
     workspace = next;
     highlightSelectedJoints();
     statusReleaseUnconfirmed = false;
@@ -941,6 +954,16 @@ async function selectWorkspace(next) {
     if (queuedWorkspace && queuedWorkspace !== next) return;
     if (queuedWorkspace === next) queuedWorkspace = null;
     previewWorkspace(workspace, message, false, true);
+    if (controlPages.has(workspace)) {
+      try {
+        await loadControlFrame();
+        await activateControlWorkspace(workspace, false);
+        $('control-workspace').classList.remove('frame-clearing');
+        notifyFrames('studio-device-versions', { versions: info?.device_versions || null });
+      } catch (previewError) {
+        console.debug('操控页面预览不可用', previewError.message);
+      }
+    }
     if (workspace === 'debug') previewDebugFrame();
     networkControls.setActive(false);
     modelControls.setActive(false);
@@ -965,7 +988,6 @@ $('control-workspace').addEventListener('load', () => {
   if (!controlPages.has(workspace)) return;
   notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
   syncDebugMode();
-  notifyFrames('studio-workspace', { page: workspace });
   notifyFrames('studio-device-versions', { versions: info?.device_versions || null });
 });
 $('debug-frame').addEventListener('load', () => notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme }));
@@ -974,7 +996,7 @@ for (const button of document.querySelectorAll('button[data-workspace]')) {
 }
 
 setInterval(() => {
-  if (info?.studio && !info.readonly && document.body.dataset.studioReady && maintenancePages.has(workspace) && !document.hidden && !switchingWorkspace && !workspaceRestoreInFlight) {
+  if (info?.studio && !info.readonly && state?.maintenance_owner && document.body.dataset.studioReady && maintenancePages.has(workspace) && !document.hidden && !switchingWorkspace && !workspaceRestoreInFlight) {
     request('workspace', { operation: 'heartbeat' }).catch(error => { setArmed(false); toast(error.message, true); });
   }
 }, 5000);
@@ -1052,22 +1074,27 @@ function renderState() {
         : '电压过低，请及时充电；持续低压将坐下并卸力', true);
     }
     lowVoltageActive = warning;
-    const connectionStatus = connectionError ? '连接中断' : calibrating ? '设备在线' : !sidebarState.online ? '采集异常' : !sidebarFresh ? '数据过期'
+    const imuWorkspace = workspace === 'calibration';
+    const imuOnline = calibrating || valid || auxImuStatus(state.aux_imu, sampleElapsed(), connectionError).valid;
+    const connectionStatus = connectionError ? '连接中断' : imuWorkspace ? (imuOnline ? '设备在线' : '等待采样')
+      : !sidebarState.online ? '采集异常' : !sidebarFresh ? '数据过期'
       : faults ? '舵机故障' : communication ? '总线通信异常' : timeout ? '舵机读取超时'
         : missing === info.joints.length ? '舵机未连接' : missing ? '部分舵机未连接'
         : invalid ? '舵机数据异常' : stale ? '设备数据过期'
           : (info.readonly ? 'robotd · 只读' : info.demo ? '演示连接' : '设备在线');
-    setConnectionStatus(connectionStatus, !connectionError && (calibrating || sidebarFresh && !faults && !communication && !timeout && !missing && !invalid && !stale) ? 'live' : 'error',
-      connectionError || sidebarState.error || '');
+    const sidebarOnline = imuWorkspace ? imuOnline : sidebarFresh && !faults && !communication && !timeout && !missing && !invalid && !stale;
+    setConnectionStatus(connectionStatus, !connectionError && sidebarOnline ? 'live' : 'error',
+      connectionError || (imuWorkspace ? '' : sidebarState.error) || '');
   }
+  const heldAngles = !valid && state.imu?.valid && state.online && !state.device_paused &&
+    !state.calibration?.active && !connectionError && $('curve-roll').textContent !== '--';
   setText('pose-status', state.device_paused ? '维护占用' : state.calibration?.active ? '标定中'
     : state.imu_source === 'compare' ? (state.imu_comparison?.valid ? '双路有效' : '对比中')
-      : valid ? '正常' : 'IMU 无效');
+      : valid ? '正常' : heldAngles ? '数据过期' : 'IMU 无效');
   $('pose-status').title = state.imu_source === 'compare'
     ? [state.imu_sources?.id200?.error, state.imu_sources?.i2c?.error].filter(Boolean).join('；')
     : state.imu?.error || state.error || '';
   const angles = valid ? quaternionAngles(state.imu.quaternion_wxyz) : [null, null, null];
-  const heldAngles = !valid && state.imu?.valid && $('curve-roll').textContent !== '--';
   $('chart').closest('.chart-layout').classList.toggle('historical', heldAngles);
   renderTof();
   for (const [index, id] of ['roll', 'pitch', 'yaw'].entries()) {
@@ -1093,7 +1120,6 @@ function renderState() {
       pending_request: stateRequestPending,
       pending_request_ms: stateRequestPending ? Math.round(performance.now() - stateRequestStarted) : null });
   }
-  const auxChanged = auxValid !== auxiliary.valid;
   auxValid = auxiliary.valid;
   if (workspace === 'status') {
     const statuses = deviceStatus.render(info, state, fresh, sampleElapsed(), connectionError, auxiliary, transitionHandoff, lowVoltage,
@@ -1105,24 +1131,22 @@ function renderState() {
     referenceView?.setTargets(state.pose_targets, info.joints);
   }
   updateControls();
-  let chartChanged = auxChanged;
   const imuKey = `${state.imu?.t_ns ?? state.sequence}:${valid}`;
-  if (imuKey !== lastImuKey) {
-    samples.push({ time: performance.now(), angles: valid ? angles.map(angle => Number(angle.toFixed(1))) : null,
+  if (workspace === 'status' && imuKey !== lastImuKey) {
+    const captured = valid ? lastGood - state.imu.age_ms : performance.now();
+    const time = Math.max(samples.at(-1)?.time ?? 0, captured);
+    samples.push({ time, angles: valid ? angles.map(angle => Number(angle.toFixed(1))) : null,
       maxGapMs: Number.isFinite(state.device_report_age_ms) ? INDEPENDENT_IMU_MAX_AGE_MS : 600 });
     lastImuKey = imuKey;
     while (samples.length && samples[0].time < performance.now() - 20000) samples.shift();
-    chartChanged = true;
   }
-  if (responseSequence !== lastAuxSequence) {
+  if (workspace === 'status' && responseSequence !== lastAuxSequence) {
     auxSamples.push({ time: performance.now(),
       angles: auxiliary.valid ? state.aux_imu.rpy_deg.map(value => Number(value.toFixed(1))) : null,
       reset_count: auxiliary.valid ? state.aux_imu.reset_count : null });
     lastAuxSequence = responseSequence;
     while (auxSamples.length && auxSamples[0].time < performance.now() - 20000) auxSamples.shift();
-    chartChanged = true;
   }
-  if (chartChanged) drawChart();
   if (valid) {
     const [w, x, y, z] = state.imu.quaternion_wxyz;
     attitudeTarget.set(x, y, z, w).normalize();
@@ -1517,8 +1541,13 @@ async function loadModel() {
 }
 
 let lastFrame = 0;
+let lastChartFrame = 0;
 function animate(now) {
   requestAnimationFrame(animate);
+  if (!document.hidden && workspace === 'status' && now - lastChartFrame >= 16) {
+    lastChartFrame = now;
+    drawChart();
+  }
   if (!renderer || document.hidden || $('monitor').hidden || workspace === 'calibration' || cameraPreview?.expanded || now - lastFrame < 1000 / 30) return;
   const dt = Math.min(.1, (now - lastFrame) / 1000); lastFrame = now;
   if (trunk) {

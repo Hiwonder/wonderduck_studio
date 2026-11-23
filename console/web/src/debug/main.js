@@ -29,6 +29,7 @@ let token = '', lastGood = 0;
 let connectionError = '';
 let targetInitialized = false;
 let parameterReadBusy = false, parameterReadPending = false, parameterReadTimer = null, parameterRevision = 0;
+let servoLayoutRevision = 0;
 let parameterAddress = 5, parameterDraft = null, parameterWriteBusy = false;
 let parameterView = 'compact';
 const parameterScrollPositions = new Map();
@@ -53,6 +54,7 @@ iconsRefresh();
 
 const sampleElapsed = () => Math.max(0, performance.now() - lastGood);
 const stateFresh = () => sampleFresh(state, sampleElapsed(), connectionError);
+const canScanServos = () => armed && !document.hidden && !connectionError;
 window.addEventListener('message', event => {
   if (event.source === window.parent && event.origin === location.origin && event.data?.type === 'studio-theme'
       && ['light', 'dark'].includes(event.data.theme)) document.documentElement.dataset.theme = event.data.theme;
@@ -193,7 +195,7 @@ function setArmed(value) {
 
 async function renewControl() {
   if (!info || info.readonly || emergencyReleasePending || document.hidden || controlPending || performance.now() < nextControlAttempt) return;
-  if (state && !stateFresh()) return;
+  if (state && (!state.online || connectionError)) return;
   const generation = controlGeneration;
   controlPending = true;
   try {
@@ -238,7 +240,9 @@ handle('release', async () => { if (await confirmRelease()) return command('rele
 const servoControls = createServoControls({ request, command, toast,
   cancel: () => { stopSliderTrack(); liveTarget.cancel(); liveParameter.cancel(); },
   setBusy: value => { scanBusy = value; updateControls(); if (!value && parameterReadPending) queueParameterRead(); },
-  active: () => armed && !document.hidden && stateFresh(),
+  // Discovery probes can delay the next telemetry snapshot. Every probe still
+  // requires an active maintenance session and an armed client on the server.
+  active: canScanServos,
   onDiscovery: joint => {
     if (info.joints.some(current => current.id === joint.id)) return;
     info.joints.push(joint); makeServoRows(); renderServos(); updateControls();
@@ -334,7 +338,7 @@ function updateControls() {
   servoControls.update({ center: poseEnabled,
     home: armed && !operationBusy && !parameterWriteBusy && !document.hidden && online &&
       info?.joints.filter(joint => !joint.discovered).some(joint => state.servos.some(servo => servo.id === joint.id && servo.valid)),
-    scan: armed && !operationBusy && !parameterWriteBusy && !parameterReadBusy && !document.hidden && online });
+    scan: canScanServos() && !operationBusy && !parameterWriteBusy && !parameterReadBusy });
   $('torque').disabled = !armed || operationBusy || parameterWriteBusy || !online || !current?.valid;
   $('torque').checked = current?.torque === 1;
   $('target-slider').disabled = !liveTarget.enabled();
@@ -711,7 +715,16 @@ const parameterSave = createParameterSave({ request, command, toast,
   setBusy: value => { busy = value; parameterRevision++; updateControls(); },
   refresh: async result => {
     parameterDraft = null;
-    if (result?.address === 5 && result.id !== selected) { info = await request('info'); makeServoRows(); selectServo(result.id); }
+    if (result?.address === 5 && result.id !== result.previous_id) {
+      const joints = result.joints ?? (await request('info')).joints;
+      servoLayoutRevision++;
+      info.joints = joints;
+      if (state) state.joints = joints;
+      sliderTargets.delete(result.previous_id);
+      sliderTargets.delete(result.id);
+      makeServoRows();
+      selectServo(result.id);
+    }
     await readParameters();
   },
 });
@@ -834,8 +847,10 @@ $('imu-source').addEventListener('change', async event => {
 
 async function poll() {
   const started = performance.now();
+  const layoutRevision = servoLayoutRevision;
   try {
     state = await request('state');
+    if (layoutRevision !== servoLayoutRevision) state.joints = info.joints;
     state.age_ms += performance.now() - started;
     lastGood = performance.now();
     connectionError = '';

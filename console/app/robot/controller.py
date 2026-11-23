@@ -729,6 +729,9 @@ class Controller:
                     elif command["action"] == "move_direct" and result.get("sent"):
                         with self.lock:
                             self.pose_targets[result["id"]] = result["target"]
+                    elif (command["action"] == "write_register" and result.get("address") == 5
+                          and result.get("verified") and result["id"] != result["previous_id"]):
+                        result["joints"] = [dict(joint) for joint in self.joints]
                     if command["action"] == "registers":
                         result["registers"] = parse_registers(bytes(result["raw"]))
                     if command["action"] in WRITE_ACTIONS:
