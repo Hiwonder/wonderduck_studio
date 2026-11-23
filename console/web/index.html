@@ -14,6 +14,8 @@
         <nav class="workspace-nav" aria-label="控制台页面">
           <button type="button" data-workspace="control" class="studio-only" title="运动控制" hidden><i data-lucide="gamepad-2"></i><span>运动控制</span></button>
           <button type="button" data-workspace="target" class="studio-only" title="目标追踪" hidden><i data-lucide="crosshair"></i><span>目标追踪</span></button>
+          <button type="button" data-workspace="pickup" class="studio-only" title="拾取搬运" hidden><i data-lucide="hand-helping"></i><span>拾取搬运</span></button>
+          <button type="button" data-workspace="line" class="studio-only" title="自主巡线" hidden><i data-lucide="footprints"></i><span>自主巡线</span></button>
           <button type="button" data-workspace="person" class="studio-only" title="行人跟随" hidden><i data-lucide="user-round-search"></i><span>行人跟随</span></button>
           <button type="button" data-workspace="maze" class="studio-only" title="避障行走" hidden><i data-lucide="radar"></i><span>避障行走</span></button>
           <button type="button" data-workspace="status" title="设备状态"><i data-lucide="activity"></i><span>设备状态</span></button>
@@ -242,6 +244,13 @@
     </main>
     <dialog id="action-select"><form method="dialog"><h2 id="action-select-title"></h2><label class="field">实机动作文件<select id="action-select-name" required><option value="">请选择动作</option></select></label><div class="dialog-actions"><button value="cancel" formnovalidate>取消</button><button id="action-select-confirm" value="ok" class="primary">确认</button></div></form></dialog>
     <dialog id="confirm"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div class="dialog-actions"><button value="cancel">取消</button><button value="ok" class="primary">确认</button></div></form></dialog>
+    <dialog id="software-update-progress" aria-labelledby="software-update-title">
+      <h2 id="software-update-title">软件更新</h2>
+      <p id="software-update-stage" role="status"></p>
+      <progress id="software-update-download" aria-label="下载进度" max="100" hidden></progress>
+      <p id="software-update-error" role="alert" hidden></p>
+      <form method="dialog" class="dialog-actions"><button id="software-update-close" type="submit">关闭</button></form>
+    </dialog>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

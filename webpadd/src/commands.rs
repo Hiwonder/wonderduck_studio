@@ -113,7 +113,8 @@ pub(super) async fn dispatch_save_coordinated_settings(request_id: u64, scope: s
     let error = |reason| ServerMessage::SettingsResult { request_id, accepted: false, reason: Some(reason) };
     if !requested.valid() { return error("联合追踪参数无效，未保存".into()); }
     let store = match scope { settings::TrackingScope::Target => &state.coordinated_settings,
-        settings::TrackingScope::Person => &state.person_coordinated_settings };
+        settings::TrackingScope::Person => &state.person_coordinated_settings,
+        settings::TrackingScope::PickupAfter => &state.pickup_after_settings };
     let mut guard = store.lock().await;
     let mut pending = guard.clone();
     match tokio::task::spawn_blocking(move || pending.save(requested).map(|()| pending)).await {
@@ -126,7 +127,8 @@ pub(super) async fn dispatch_save_coordinated_settings(request_id: u64, scope: s
 pub(super) async fn dispatch_save_tracking_phases(request_id: u64, scope: settings::TrackingScope, requested: settings::TrackingPhaseSettings, state: &AppState) -> ServerMessage {
     let error = |reason| ServerMessage::SettingsResult { request_id, accepted: false, reason: Some(reason) };
     let store = match scope { settings::TrackingScope::Target => &state.tracking_phases,
-        settings::TrackingScope::Person => &state.person_tracking_phases };
+        settings::TrackingScope::Person => &state.person_tracking_phases,
+        settings::TrackingScope::PickupAfter => &state.pickup_after_phases };
     let mut guard = store.lock().await;
     let mut pending = guard.clone();
     match tokio::task::spawn_blocking(move || pending.save(requested).map(|()| pending)).await {
@@ -510,6 +512,14 @@ pub(super) async fn dispatch_action(session: u64, action: Action, state: &AppSta
         if !control.connected || (!control.armed && action != Action::Stop) {
             return action_result(action, Err("请等待机器人连接并松开所有控制，再操作".into()));
         }
+        if action == Action::CenterHead {
+            let result = if control.center_head(&state.status.borrow(), Instant::now()) {
+                Ok(proto::IntentResult::accepted())
+            } else {
+                Err("当前无法回中，请松开头部摇杆并确认运动控制已就绪".into())
+            };
+            return action_result(action, result);
+        }
         if let Some(mode) = action.mode() {
             let calls = control.set_mode(mode);
             enqueue_notifications(&state.commands, calls, Some(control.human_generation));
@@ -789,6 +799,7 @@ pub(super) async fn finish_coordinated_tracking(session: u64, state: &AppState) 
                     arrival_skill: String::new(),
                     mouth_before: proto::TimedMouthPosition::default(),
                     mouth_after: proto::TimedMouthPosition::default(),
+                    pickup_after: None,
                 })],
                 sit_on_loss: false, generation: None, created: Instant::now(), reply,
             });
@@ -826,6 +837,7 @@ pub(super) async fn release_session(session: u64, state: &AppState) {
         return;
     }
     control.owner = None;
+    control.owner_client = ControlClient::Unknown;
     control.last_input = None;
     control.maze_active = false;
     // The next tick releases held sound and schedules a sitting-state check after input loss.

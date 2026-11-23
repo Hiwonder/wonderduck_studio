@@ -1,7 +1,7 @@
 import { createIcons, Bot, PowerOff,
   RotateCcw, Download, RefreshCw,
   Save, Pencil, Menu, PanelLeftClose, Crosshair, House, FolderOpen } from 'lucide';
-import { createLinkedTarget } from './linked-target.js';
+import { createLinkedTarget } from '../linked-target.js';
 import { createLiveParameter } from './live-parameter.js';
 import { imuFresh, sampleFresh, servoStatus } from './state-status.js';
 import './style.css';
@@ -257,13 +257,12 @@ const liveTarget = createLinkedTarget({
   isSelected: id => parameterSave.isServoSelected(id),
   send: async data => {
     const result = await request('command', {
-      action: 'move', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
+      action: 'move_direct', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
     });
-    $('last-command').textContent = `ID ${data.id} · 目标编码器 ${data.raw} 步`;
+    if (result.sent) $('last-command').textContent = `ID ${data.id} · 目标编码器 ${data.raw} 步 · 已发送`;
     return result;
   },
   onError: error => { targetInitialized = false; toast(error.message, true); },
-  onComplete: id => { if (id === selected) queueParameterRead(); },
   onTarget: (id, raw) => sliderTargets.set(id, raw),
 });
 

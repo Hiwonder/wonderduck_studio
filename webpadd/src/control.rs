@@ -4,6 +4,11 @@ use super::*;
 use robotd_params::PadDriveParams;
 
 const DRIVE_AXIS_LOCK_ANGLE: f64 = 20.0 * std::f64::consts::PI / 180.0;
+const HEAD_STEP_INTERVAL: Duration = Duration::from_millis(5);
+const HEAD_STEP_COUNTS: f64 = 10.0;
+const HEAD_PITCH_RAW_LIMITS: (u16, u16) = (1100, 2300);
+const HEAD_YAW_LIMIT_RAD: f64 = std::f64::consts::FRAC_PI_2;
+const HEAD_FEEDBACK_TTL: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Input {
@@ -11,6 +16,7 @@ pub(super) struct Input {
     pub left_y: f64,
     pub right_x: f64,
     pub right_y: f64,
+    pub head_stick: Option<[f64; 2]>,
     pub left_trigger: f64,
     pub right_trigger: f64,
     pub buttons: u16,
@@ -24,11 +30,15 @@ impl Input {
             && [self.left_trigger, self.right_trigger]
                 .into_iter()
                 .all(|v| v.is_finite() && (0.0..=1.0).contains(&v))
+            && self.head_stick.is_none_or(|[x, y]| {
+                (-1.0..=1.0).contains(&x) && (-1.0..=1.0).contains(&y) && (x == 0.0 || y == 0.0)
+            })
     }
     pub fn neutral(self) -> bool {
         self.buttons == 0
             && self.left_trigger < 0.05
             && self.right_trigger < 0.05
+            && self.head_stick.is_none_or(|axes| axes == [0.0; 2])
             && [self.left_x, self.left_y, self.right_x, self.right_y]
                 .into_iter()
                 .all(|v| v.abs() < 0.05)
@@ -92,6 +102,8 @@ pub(super) enum BrowserMessage {
         left_y: f64,
         right_x: f64,
         right_y: f64,
+        #[serde(default)]
+        head_stick: Option<[f64; 2]>,
         left_trigger: f64,
         right_trigger: f64,
         buttons: Vec<Button>,
@@ -147,6 +159,8 @@ pub(super) enum BrowserMessage {
         action: proto::MotionTrackingAction,
         initial_pitch: Option<u16>,
         target: Option<[f64; 2]>,
+        #[serde(default)]
+        line_speed: Option<f64>,
         reference_area: f64,
         deadzone: [f64; 2],
         gains: [[f64; 3]; 2],
@@ -185,6 +199,8 @@ pub(super) enum BrowserMessage {
         arrival_skill: String,
         mouth_before: proto::TimedMouthPosition,
         mouth_after: proto::TimedMouthPosition,
+        #[serde(default)]
+        pickup_after: Option<Box<proto::CoordinatedTrackingParams>>,
     },
     Maze {
         action: proto::MotionTrackingAction,
@@ -215,6 +231,7 @@ pub(super) enum Action {
     HeadMode,
     HeadDriveMode,
     BodyPoseMode,
+    CenterHead,
     SitToggle,
     GroundPick,
     KickLeft,
@@ -369,9 +386,71 @@ pub(super) struct ControlsView {
     pub human_connected: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
+struct HeadStick {
+    goal: Option<[f64; 2]>,
+    last_step: Option<Instant>,
+}
+
+impl HeadStick {
+    fn center(&mut self) {
+        let home = &duck_control::hx::PHYSICAL_HOME_ENCODER_TARGETS;
+        self.goal = Some([f64::from(home[6]), f64::from(home[7])]);
+        self.last_step = None;
+    }
+
+    fn update(&mut self, axes: [f64; 2], measured: Option<[u16; 2]>, now: Instant) {
+        // Retain the last target while idle or waiting for servo feedback.
+        let Some(measured) = measured.filter(|_| axes != [0.0; 2]) else {
+            self.last_step = None;
+            return;
+        };
+        let interval = self.last_step
+            .map_or(HEAD_STEP_INTERVAL, |last| now.saturating_duration_since(last));
+        let interval = interval.min(INPUT_TTL);
+        let step_ms = HEAD_STEP_INTERVAL.as_millis();
+        let steps = (interval.as_millis() / step_ms) as u32;
+        if steps == 0 {
+            return;
+        }
+        self.last_step = Some(now - (interval - HEAD_STEP_INTERVAL * steps));
+        let goal = self.goal.get_or_insert_with(|| measured.map(f64::from));
+        let [yaw, pitch] = axes;
+        for (axis, deflection) in [pitch, yaw].into_iter().enumerate() {
+            let joint = axis + 6;
+            let (mut lower, mut upper) = duck_control::model::JOINT_LIMITS[joint];
+            if axis == 1 {
+                lower = lower.max(-HEAD_YAW_LIMIT_RAD);
+                upper = upper.min(HEAD_YAW_LIMIT_RAD);
+            }
+            let mut min = duck_control::hx::encode_position(joint, upper).expect("HX joint limit");
+            let mut max = duck_control::hx::encode_position(joint, lower).expect("HX joint limit");
+            if axis == 0 {
+                min = min.max(HEAD_PITCH_RAW_LIMITS.0);
+                max = max.min(HEAD_PITCH_RAW_LIMITS.1);
+            }
+            goal[axis] = (goal[axis] + deflection * f64::from(steps) * HEAD_STEP_COUNTS)
+                .clamp(f64::from(min), f64::from(max));
+        }
+    }
+
+    fn raw_position(&self) -> Option<[u16; 2]> {
+        self.goal.map(|goal| goal.map(|position| position.round() as u16))
+    }
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ControlClient {
+    App,
+    Web,
+    #[default]
+    Unknown,
+}
+
 pub(super) struct ControlState {
     pub owner: Option<u64>,
+    pub owner_client: ControlClient,
     pub input: Input,
     pub last_input: Option<Instant>,
     pub mode: MotionMode,
@@ -392,6 +471,7 @@ pub(super) struct ControlState {
     pub maze_active: bool,
     pub head_tracking_started: bool,
     pub head_position: Option<u16>,
+    head_stick: HeadStick,
     // A sent start needs cleanup even when its response is lost.
     pub head_tracking_dirty: bool,
     pub head_tracking_closing: bool,
@@ -421,6 +501,7 @@ impl Default for ControlState {
     fn default() -> Self {
         Self {
             owner: None,
+            owner_client: ControlClient::Unknown,
             input: Input::default(),
             last_input: None,
             mode: MotionMode::Drive,
@@ -441,6 +522,7 @@ impl Default for ControlState {
             maze_active: false,
             head_tracking_started: false,
             head_position: None,
+            head_stick: HeadStick::default(),
             head_tracking_dirty: false,
             head_tracking_closing: false,
             coordinated_tracking_started: false,
@@ -512,6 +594,7 @@ impl ControlState {
     }
     pub fn cancel(&mut self) {
         self.input = Input::default();
+        self.head_stick = HeadStick::default();
         self.start = Hold::default();
         self.select = Hold::default();
         self.armed = false;
@@ -545,6 +628,9 @@ impl ControlState {
         if self.mode.poses_head() && !mode.poses_head() {
             calls.push(proto::Call::RobotHead(proto::HeadParams::default()));
         }
+        if self.mode != mode {
+            self.head_stick = HeadStick::default();
+        }
         self.mode = mode;
         calls
     }
@@ -554,6 +640,44 @@ impl ControlState {
             && self
                 .last_input
                 .is_some_and(|at| now.saturating_duration_since(at) <= INPUT_TTL)
+    }
+    fn head_stick_input(&self, status: &BrowserStatus, now: Instant) -> Option<[f64; 2]> {
+        let other_head_axes = match self.mode {
+            MotionMode::Head => [self.input.left_x, self.input.left_y],
+            MotionMode::HeadDrive => [self.input.right_x, self.input.right_y],
+            _ => [0.0; 2],
+        };
+        if self.fresh(now) && self.human_held && self.armed
+            && status.motion_enabled == Some(true) && status.motion_homed == Some(true)
+            && status.limp != Some(true) && status.fallen != Some(true)
+            && status.rest_phase == Some(proto::RestPhase::Idle)
+            && matches!(status.policy.as_deref(), Some("walk" | "stand"))
+            && self.mode != MotionMode::BodyPose && !self.maze_active
+            && !self.head_tracking_started && !self.coordinated_tracking_started
+            && let Some(axes) = self.input.head_stick
+            && (axes != [0.0; 2] || other_head_axes.iter().all(|axis| axis.abs() < 0.05))
+        {
+            Some(axes)
+        } else {
+            None
+        }
+    }
+    pub fn center_head(&mut self, status: &BrowserStatus, now: Instant) -> bool {
+        if self.head_stick_input(status, now) == Some([0.0; 2])
+            && fresh_head_position(status, now).is_some()
+        {
+            self.head_stick.center();
+            true
+        } else {
+            false
+        }
+    }
+    pub fn update_head_stick(&mut self, status: &BrowserStatus, now: Instant) {
+        if let Some(axes) = self.head_stick_input(status, now) {
+            self.head_stick.update(axes, fresh_head_position(status, now), now);
+        } else {
+            self.head_stick = HeadStick::default();
+        }
     }
     pub fn tick(&mut self, now: Instant, connected: bool) -> (Vec<proto::Call>, Vec<Action>) {
         let mut calls = std::mem::take(&mut self.pending_calls);
@@ -650,6 +774,129 @@ impl ControlState {
         (calls, actions)
     }
 }
+
+fn fresh_head_position(status: &BrowserStatus, now: Instant) -> Option<[u16; 2]> {
+    status.head_positions.filter(|_| status.head_positions_at
+        .is_some_and(|at| now.saturating_duration_since(at) <= HEAD_FEEDBACK_TTL))
+}
+
+#[cfg(test)]
+mod head_stick_tests {
+    use super::*;
+
+    #[test]
+    fn increments_from_feedback_at_five_millisecond_intervals() {
+        let mut stick = HeadStick::default();
+        let at = Instant::now();
+        stick.update([0.0, 1.0], Some([1820, 2048]), at);
+        assert_eq!(stick.raw_position(), Some([1830, 2048]));
+        stick.update([0.0, 0.25], Some([1830, 2050]), at + Duration::from_millis(20));
+        assert_eq!(stick.raw_position(), Some([1840, 2048]));
+        stick.update([0.0, 0.0], Some([1820, 2060]), at + Duration::from_millis(40));
+        assert_eq!(stick.raw_position(), Some([1840, 2048]));
+        stick.update([-0.04, 0.0], Some([1820, 2090]), at + Duration::from_millis(100));
+        assert_eq!(stick.raw_position(), Some([1840, 2048]));
+        stick.update([-0.04, 0.0], Some([1820, 2090]), at + Duration::from_millis(105));
+        assert_eq!(stick.raw_position(), Some([1840, 2047]));
+        assert!(!Input { head_stick: Some([0.4, 0.8]), ..Input::default() }.valid());
+    }
+
+    #[test]
+    fn pitch_and_yaw_cap_at_each_limit_and_can_move_back() {
+        let at = Instant::now();
+        for (axes, measured, limit, reversed) in [
+            ([0.0, 1.0], [2298, 2048], [2300, 2048], [2280, 2048]),
+            ([0.0, -1.0], [1102, 2048], [1100, 2048], [1120, 2048]),
+            ([1.0, 0.0], [1820, 3070], [1820, 3072], [1820, 3052]),
+            ([-1.0, 0.0], [1820, 1026], [1820, 1024], [1820, 1044]),
+        ] {
+            let mut stick = HeadStick::default();
+            stick.update(axes, Some(measured), at);
+            stick.update(axes, Some(measured), at + Duration::from_millis(20));
+            assert_eq!(stick.raw_position(), Some(limit));
+            stick.update(axes.map(|axis| -0.5 * axis), Some(limit), at + Duration::from_millis(40));
+            assert_eq!(stick.raw_position(), Some(reversed));
+        }
+    }
+
+    #[test]
+    fn released_head_stick_keeps_its_target_when_servo_feedback_is_delayed() {
+        let at = Instant::now();
+        let mut control = ControlState {
+            owner: Some(1),
+            active: true,
+            armed: true,
+            human_held: true,
+            last_input: Some(at),
+            ..ControlState::default()
+        };
+        let mut status = BrowserStatus {
+            motion_enabled: Some(true),
+            motion_homed: Some(true),
+            rest_phase: Some(proto::RestPhase::Idle),
+            policy: Some("walk".into()),
+            head_positions: Some([1820, 2200]),
+            head_positions_at: Some(at),
+            ..BrowserStatus::default()
+        };
+        control.input.head_stick = Some([1.0, 0.0]);
+        control.update_head_stick(&status, at);
+
+        let later = at + HEAD_FEEDBACK_TTL + CONTROL_PERIOD;
+        control.input.head_stick = Some([0.0; 2]);
+        control.last_input = Some(later);
+        control.update_head_stick(&status, later);
+        assert!(control_frame(&control, later).iter().any(|call| matches!(
+            call, proto::Call::RobotHead(head) if head.raw_position == Some([1820, 2210])
+        )));
+
+        control.input.head_stick = Some([1.0, 0.0]);
+        control.update_head_stick(&status, later + CONTROL_PERIOD);
+        assert_eq!(control.head_stick.raw_position(), Some([1820, 2210]));
+
+        let resumed = later + CONTROL_PERIOD * 2;
+        status.head_positions_at = Some(resumed);
+        control.update_head_stick(&status, resumed);
+        assert_eq!(control.head_stick.raw_position(), Some([1820, 2220]));
+
+        control.lose_human_control();
+        assert_eq!(control.head_stick.raw_position(), None);
+    }
+
+    #[test]
+    fn center_head_replaces_the_held_target_and_requires_manual_control() {
+        let now = Instant::now();
+        let mut control = ControlState {
+            owner: Some(1),
+            active: true,
+            armed: true,
+            human_held: true,
+            last_input: Some(now),
+            ..ControlState::default()
+        };
+        let status = BrowserStatus {
+            motion_enabled: Some(true),
+            motion_homed: Some(true),
+            rest_phase: Some(proto::RestPhase::Idle),
+            policy: Some("walk".into()),
+            head_positions: Some([2270, 2100]),
+            head_positions_at: Some(now),
+            ..BrowserStatus::default()
+        };
+
+        control.input.head_stick = Some([1.0, 0.0]);
+        control.update_head_stick(&status, now);
+        assert!(!control.center_head(&status, now));
+        control.input.head_stick = Some([0.0; 2]);
+        assert!(control.center_head(&status, now));
+        control.update_head_stick(&status, now);
+        assert!(control_frame(&control, now).iter().any(|call| matches!(
+            call, proto::Call::RobotHead(head) if head.raw_position == Some([1820, 2048])
+        )));
+        control.human_held = false;
+        assert!(!control.center_head(&status, now));
+    }
+}
 fn stepped(current: f64, delta: i8, step: f64, maximum: f64) -> f64 {
     ((current + f64::from(delta) * step).clamp(0.0, maximum) * 100.0).round() / 100.0
 }
@@ -679,18 +926,17 @@ pub(super) fn control_frame(control: &ControlState, now: Instant) -> Vec<proto::
                 vyaw: -yaw * 0.3,
             });
         }
+        let lateral_speed = control.linear_speed.min(MAX_LATERAL);
         proto::Call::RobotMove(proto::MoveParams {
             vx: PadDriveParams::scale(
                 forward,
-                drive
-                    .vx_min
-                    .max(-control.linear_speed.min(MAX_LINEAR_BACKWARD)),
+                drive.vx_min.max(-control.linear_speed),
                 drive.vx_max.min(control.linear_speed),
             ),
             vy: PadDriveParams::scale(
                 -sideways,
-                drive.vy_min.max(-control.linear_speed),
-                drive.vy_max.min(control.linear_speed),
+                drive.vy_min.max(-lateral_speed),
+                drive.vy_max.min(lateral_speed),
             ),
             vyaw: PadDriveParams::scale(
                 -yaw,
@@ -719,6 +965,7 @@ pub(super) fn control_frame(control: &ControlState, now: Instant) -> Vec<proto::
                 head_pitch: -input.left_y * MAX_HEAD,
                 head_yaw: -input.left_x * MAX_HEAD,
                 head_roll: input.right_x * MAX_HEAD,
+                ..Default::default()
             }),
         ],
         MotionMode::BodyPose => vec![
@@ -737,6 +984,18 @@ pub(super) fn control_frame(control: &ControlState, now: Instant) -> Vec<proto::
             look(),
         ],
     };
+    if input.head_stick.is_some() && let Some(raw_position) = control.head_stick.raw_position() {
+        if let Some(proto::Call::RobotHead(head)) = calls.iter_mut()
+            .find(|call| matches!(call, proto::Call::RobotHead(_)))
+        {
+            head.raw_position = Some(raw_position);
+        } else {
+            calls.push(proto::Call::RobotHead(proto::HeadParams {
+                raw_position: Some(raw_position),
+                ..Default::default()
+            }));
+        }
+    }
     calls.push(proto::Call::RobotMouth(proto::MouthParams {
         open: input.left_trigger.max(input.right_trigger),
     }));

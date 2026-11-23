@@ -43,8 +43,8 @@ def _wait_rest(path, deadline):
         time.sleep(_remaining(deadline, POLL_INTERVAL))
 
 
-def ensure_rest(path):
-    deadline = time.monotonic() + REST_TIMEOUT
+def ensure_rest(path, timeout=REST_TIMEOUT):
+    deadline = time.monotonic() + timeout
     phase, enabled = rest_status(path, deadline)
     if phase == "rested":
         return

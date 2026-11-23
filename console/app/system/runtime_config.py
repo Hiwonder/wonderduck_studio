@@ -117,7 +117,7 @@ def robot_root(value=None):
 
 
 def software_version(root=None, identity_path=Path("/run/robotd/identity.json")):
-    """Report the installed release or the running build's identity."""
+    """Report the installed release or the version of the running local build."""
     def read_object(path):
         try:
             with path.open("r", encoding="utf-8") as stream:
@@ -134,10 +134,10 @@ def software_version(root=None, identity_path=Path("/run/robotd/identity.json"))
                and isinstance(source, str) and REVISION.fullmatch(source) else None)
     identity = read_object(Path(identity_path))
     running = identity.get("revision")
+    local_version = identity.get("version")
+    if not isinstance(local_version, str) or not RELEASE_VERSION.fullmatch(local_version):
+        local_version = None
     if isinstance(running, str) and REVISION.fullmatch(running):
         if not release or running != source:
-            return "本地构建 · " + running[:8]
-    if release:
-        return release
-    running_version = identity.get("version")
-    return running_version if isinstance(running_version, str) and RELEASE_VERSION.fullmatch(running_version) else None
+            return local_version or "本地构建 · " + running[:8]
+    return release or local_version

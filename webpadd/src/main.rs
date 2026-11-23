@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{RawQuery, State, WebSocketUpgrade};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use clap::Parser;
@@ -36,6 +37,7 @@ mod voice;
 mod frame_prefetch;
 mod color_detection;
 mod object_detection;
+mod person_models;
 mod vision_relay;
 mod vision_record;
 mod settings;
@@ -59,8 +61,8 @@ const STATUS_STREAM_HZ: u32 = 10;
 const OBSTACLE_PERIOD: Duration = Duration::from_millis(200);
 const LEASE_PERIOD: Duration = Duration::from_millis(100);
 const MIN_LINEAR_SPEED: f64 = 0.0;
-const MAX_LINEAR: f64 = 0.4;
-const MAX_LINEAR_BACKWARD: f64 = 0.4;
+const MAX_LINEAR: f64 = 0.30;
+const MAX_LATERAL: f64 = 0.25;
 const MAX_ANGULAR: f64 = 1.0;
 const MAX_HEAD: f64 = 2.5;
 const BODY_MAX_Z_UP: f64 = 0.010;
@@ -121,7 +123,7 @@ struct AppState {
     next_session: Arc<AtomicU64>,
     views: watch::Receiver<ControlsView>,
     feedback: broadcast::Sender<ServerMessage>,
-    objects: object_detection::Detector,
+    objects: object_detection::Detectors,
     colors: Arc<color_detection::ColorRuntime>,
     settings: Arc<Mutex<settings::Store>>,
     color_presets: Arc<Mutex<settings::ColorStore>>,
@@ -130,6 +132,8 @@ struct AppState {
     tracking_phases: Arc<Mutex<settings::TrackingPhaseStore>>,
     person_coordinated_settings: Arc<Mutex<settings::CoordinatedStore>>,
     person_tracking_phases: Arc<Mutex<settings::TrackingPhaseStore>>,
+    pickup_after_settings: Arc<Mutex<settings::CoordinatedStore>>,
+    pickup_after_phases: Arc<Mutex<settings::TrackingPhaseStore>>,
     mouth_settings: Arc<Mutex<settings::MouthStore>>,
     mouth_sound_directory: PathBuf,
 }
@@ -143,6 +147,10 @@ struct BrowserStatus {
     head_feedback: Option<(u16, u16)>,
     #[serde(skip)]
     head_feedback_sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_positions: Option<[u16; 2]>,
+    #[serde(skip)]
+    head_positions_at: Option<Instant>,
     skills: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     connection_error: Option<String>,
@@ -181,6 +189,8 @@ struct BrowserStatus {
     power_status_sequence: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tracking_phase: Option<proto::CoordinatedTrackingPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pickup_stage: Option<proto::PickupStage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_unavailable: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,6 +253,8 @@ enum ServerMessage {
         person_coordinated_defaults: settings::CoordinatedTrackingSettings,
         person_tracking_phases: settings::TrackingPhaseSettings,
         person_tracking_phase_defaults: settings::TrackingPhaseSettings,
+        pickup_after_settings: settings::CoordinatedTrackingSettings,
+        pickup_after_phases: settings::TrackingPhaseSettings,
         color_presets: std::collections::BTreeMap<String, settings::ColorPreset>,
         mouth_sound: String,
         mouth_sound_default: String,
@@ -422,6 +434,16 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let (pickup_after_settings, pickup_after_phases) = match settings::CoordinatedStore::load_pickup_after(&args.config)
+        .and_then(|settings| settings::TrackingPhaseStore::load_pickup_after(&args.config)
+            .map(|phases| (settings, phases)))
+    {
+        Ok(stores) => stores,
+        Err(error) => {
+            tracing::error!(%error, "cannot load pickup after-action settings");
+            return ExitCode::FAILURE;
+        }
+    };
     let mouth_settings = match settings::MouthStore::load(&args.config) {
         Ok(settings) => settings,
         Err(error) => {
@@ -438,7 +460,7 @@ async fn main() -> ExitCode {
     let (view_tx, views) = watch::channel(control.view(Instant::now()));
     let (feedback, _) = broadcast::channel(32);
     let (connected_tx, connected_rx) = watch::channel(false);
-    let objects = object_detection::Detector::new(
+    let objects = object_detection::Detectors::new(
         std::env::var_os("WONDERDUCK_PERSON_VISION_RECORD").map(PathBuf::from));
     control.person_vision_record = objects.recorder();
     let colors = Arc::new(color_detection::ColorRuntime::new(
@@ -469,6 +491,8 @@ async fn main() -> ExitCode {
         tracking_phases: Arc::new(Mutex::new(tracking_phases)),
         person_coordinated_settings: Arc::new(Mutex::new(person_coordinated_settings)),
         person_tracking_phases: Arc::new(Mutex::new(person_tracking_phases)),
+        pickup_after_settings: Arc::new(Mutex::new(pickup_after_settings)),
+        pickup_after_phases: Arc::new(Mutex::new(pickup_after_phases)),
         mouth_settings: Arc::new(Mutex::new(mouth_settings)),
         mouth_sound_directory: PathBuf::from(proto::SOUND_CLIPS_DIR),
     };
@@ -534,6 +558,7 @@ fn router(state: AppState, media_port: u16) -> Router {
         )
         .route("/control", get(control_upgrade))
         .route("/objects", get(object_detection::upgrade))
+        .route("/object-models", get(object_detection::available_models))
         .route("/colors", get(color_detection::upgrade))
         .route("/camera-metadata", get(camera_metadata))
         .route("/console.css", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], include_str!("../web/console.css")) }))
@@ -597,11 +622,24 @@ fn router(state: AppState, media_port: u16) -> Router {
 async fn control_upgrade(
     upgrade: WebSocketUpgrade,
     State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| control_session(socket, state))
+    let client = query.as_deref().unwrap_or_default().split('&').find_map(|part| match part {
+        "client=app" => Some(ControlClient::App),
+        "client=web" => Some(ControlClient::Web),
+        _ => None,
+    }).unwrap_or_else(|| {
+        if headers.get("sec-fetch-mode").is_some_and(|mode| mode == "websocket") {
+            ControlClient::Web
+        } else {
+            ControlClient::Unknown
+        }
+    });
+    upgrade.on_upgrade(move |socket| control_session(socket, state, client))
 }
 
-async fn control_session(mut socket: WebSocket, state: AppState) {
+async fn control_session(mut socket: WebSocket, state: AppState, client: ControlClient) {
     let session = state.next_session.fetch_add(1, Ordering::Relaxed);
     let vision_token = match vision_relay::new_token() {
         Ok(token) => token,
@@ -629,23 +667,29 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
     let tracking_phases = state.tracking_phases.lock().await.value.clone();
     let person_coordinated_settings = state.person_coordinated_settings.lock().await.value.clone();
     let person_tracking_phases = state.person_tracking_phases.lock().await.value.clone();
+    let pickup_after_settings = state.pickup_after_settings.lock().await.value.clone();
+    let pickup_after_phases = state.pickup_after_phases.lock().await.value.clone();
     let color_presets = state.color_presets.lock().await.value.clone();
     let mouth_sound = state.mouth_settings.lock().await.value.clone();
     let controls = {
         let mut control = state.control.lock().await;
         if control.owner.is_some() {
+            let owner = control.owner_client;
             drop(control);
             drop(settings_guard);
-            let _ = send_message(
-                &mut socket,
-                &ServerMessage::Error {
-                    message: "已有其他网页正在控制，请关闭其他控制页面后重试".to_owned(),
-                },
-            )
-            .await;
+            let message = match owner {
+                ControlClient::App => "手机 App 已连接，请断开 App 后再使用网页控制。",
+                ControlClient::Web => "其他网页已连接，请关闭该控制页面后重试。",
+                ControlClient::Unknown => "控制连接已被占用，请先断开手机 App 或关闭其他控制网页。",
+            };
+            let response = serde_json::json!({
+                "type": "error", "code": "control_busy", "owner": owner, "message": message,
+            });
+            let _ = send_frame(&mut socket, Message::Text(response.to_string().into())).await;
             return;
         }
         control.owner = Some(session);
+        control.owner_client = client;
         control.vision_token = Some(vision_token.clone());
         control.vision_binding = None;
         control.vision_latest = None;
@@ -677,6 +721,7 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
         tracking_phases, tracking_phase_defaults: settings::TrackingPhaseSettings::default(), color_presets,
         person_coordinated_settings, person_coordinated_defaults: settings::CoordinatedTrackingSettings::person_defaults(),
         person_tracking_phases, person_tracking_phase_defaults: settings::TrackingPhaseSettings::person_defaults(),
+        pickup_after_settings, pickup_after_phases,
         mouth_sound, mouth_sound_default: String::new(), mouth_sound_clips,
     })
         .await
@@ -817,13 +862,13 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
                         left_x,
                         left_y,
                         right_x,
-                        right_y, left_trigger, right_trigger, buttons, active,
+                        right_y, head_stick, left_trigger, right_trigger, buttons, active,
                     } => {
                         let input = Input {
                             left_x,
                             left_y,
                             right_x,
-                            right_y, left_trigger, right_trigger,
+                            right_y, head_stick, left_trigger, right_trigger,
                             buttons: buttons.into_iter().fold(0, |bits, button| bits | button.bit()),
                         };
                         if !input.valid() {
@@ -995,8 +1040,8 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
                         let reply = dispatch_low_voltage(session, params, &state).await;
                         if send_message(&mut socket, &reply).await.is_err() { break; }
                     }
-                    BrowserMessage::MotionTracking { action, initial_pitch, target, reference_area, deadzone, gains } => {
-                        let params = proto::MotionTrackingParams { action, initial_pitch, target, reference_area, deadzone, gains };
+                    BrowserMessage::MotionTracking { action, initial_pitch, target, line_speed, reference_area, deadzone, gains } => {
+                        let params = proto::MotionTrackingParams { action, initial_pitch, target, line_speed, reference_area, deadzone, gains };
                         let reply = dispatch_motion_tracking(session, params, &state).await;
                         if send_message(&mut socket, &reply).await.is_err() { break; }
                     }
@@ -1027,14 +1072,14 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
                         head_deadzone, head_gains, body_gains, final_body_gains, approach_linear_limit,
                         final_linear_limit, final_lateral_limit, final_point, final_tolerance, stop_area_px, stop_area_deadzone_px,
                         stop_distance_mm, stop_distance_deadzone_mm,
-                        arrival_delay_s, arrival_skill, mouth_before, mouth_after,
+                        arrival_delay_s, arrival_skill, mouth_before, mouth_after, pickup_after,
                     } => {
                         let params = proto::CoordinatedTrackingParams {
                             action, initial_pitch, target, camera,
                             head_deadzone, head_gains, body_gains, final_body_gains, approach_linear_limit,
                             final_linear_limit, final_lateral_limit, final_point, final_tolerance, stop_area_px, stop_area_deadzone_px,
                             stop_distance_mm, stop_distance_deadzone_mm,
-                            arrival_delay_s, arrival_skill, mouth_before, mouth_after,
+                            arrival_delay_s, arrival_skill, mouth_before, mouth_after, pickup_after,
                         };
                         let reply = dispatch_coordinated_tracking(session, params, &state).await;
                         if send_message(&mut socket, &reply).await.is_err() { break; }
@@ -1117,6 +1162,7 @@ async fn control_loop(
             let mut control = state.control.lock().await;
             control.roller = state.status.borrow().uses_roller();
             let now = Instant::now();
+            control.update_head_stick(&state.status.borrow(), now);
             let (mut calls, actions) = control.tick(now, *connected.borrow());
             if !control.human_held || control.maze_active {
                 calls.clear();

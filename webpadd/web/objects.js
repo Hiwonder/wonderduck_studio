@@ -4,8 +4,14 @@
   const video = document.querySelector('#camera-video');
   const status = document.querySelector('#object-status');
   const areaValue = document.querySelector('#object-area-value');
+  const modelPicker = document.querySelector('#person-model');
+  const modelSwitch = modelPicker.labels[0];
   const context = canvas.getContext('2d');
+  const modelStorageKey = 'wonderduck-person-detection-model';
+  let preferredModel = null;
+  try { preferredModel = localStorage.getItem(modelStorageKey); } catch {}
   let socket = null;
+  let pendingStart = null;
   function bindTracking() {
     if (socket?.readyState === WebSocket.OPEN && window.__visionControlToken) {
       socket.send(JSON.stringify({type: 'bind_tracking', token: window.__visionControlToken}));
@@ -34,6 +40,8 @@
   }
 
   function stop(message = '') {
+    pendingStart?.abort();
+    pendingStart = null;
     setRecognitionActive(false);
     const previous = socket;
     socket = null;
@@ -42,7 +50,6 @@
     window.dispatchEvent(new Event('object-detection-reset'));
     clear();
     status.textContent = message;
-    status.classList.toggle('vision-notice', !!message);
     if (message) window.dispatchEvent(new CustomEvent('vision-recognition-failed', {detail: {source: 'object', message}}));
   }
 
@@ -94,16 +101,44 @@
     expiry = setTimeout(clear, 2000);
   }
 
-  function start() {
-    if (socket || document.body.dataset.consolePage !== 'person') return;
+  async function start() {
+    if (socket || pendingStart || document.body.dataset.consolePage !== 'person') return;
+    const request = new AbortController();
+    pendingStart = request;
+    modelPicker.disabled = true;
+    status.textContent = '';
+    let installed;
+    try {
+      const response = await fetch('/object-models', {signal: request.signal, cache: 'no-store'});
+      if (!response.ok) throw new Error();
+      installed = await response.json();
+      if (!Array.isArray(installed)) throw new Error();
+    } catch {
+      if (pendingStart === request) stop('无法读取行人检测模型列表');
+      return;
+    }
+    if (pendingStart !== request) return;
+    pendingStart = null;
+    const available = [...modelPicker.options].filter(option => installed.includes(option.value));
+    for (const option of modelPicker.options) option.disabled = !available.includes(option);
+    const savedModel = modelSwitch.hidden ? null : available.find(option => option.value === preferredModel);
+    const model = savedModel || available[0];
+    if (!model) {
+      stop('没有可用的行人检测模型');
+      return;
+    }
+    modelPicker.value = model.value;
+    modelPicker.disabled = modelSwitch.hidden || available.length < 2;
+    connect(model.value);
+  }
+
+  function connect(model) {
     window.dispatchEvent(new Event('object-detection-reset'));
     lastCaptured = -1;
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const connection = new WebSocket(`${scheme}//${location.host}/objects`);
+    const connection = new WebSocket(`${scheme}//${location.host}/objects?model=${encodeURIComponent(model)}`);
     socket = connection;
     connection.onopen = () => { if (socket === connection) { setRecognitionActive(true); bindTracking(); } };
-    status.classList.remove('vision-notice');
-    status.textContent = '';
     connection.onmessage = (event) => {
       if (socket !== connection) return;
       try {
@@ -129,18 +164,24 @@
     connection.onclose = () => { if (socket === connection) stop('物体检测已断开'); };
   }
 
+  modelPicker.addEventListener('change', () => {
+    if (modelPicker.disabled) return;
+    preferredModel = modelPicker.value;
+    try { localStorage.setItem(modelStorageKey, preferredModel); } catch {}
+    window.dispatchEvent(new Event('person-model-change'));
+    stop();
+    start();
+  });
+
   window.addEventListener('vision-source-change', event => {
-    if (event.detail === 'color' && socket) stop();
+    if (event.detail === 'color' && (socket || pendingStart)) stop();
   });
   window.addEventListener('vision-recognition-start', event => {
     if (event.detail === 'object') start();
   });
-  window.addEventListener('vision-recognition-stop', () => { if (socket) stop(); });
-  window.addEventListener('camera-preview-paused', event => {
-    if (event.detail) context.clearRect(0, 0, canvas.width, canvas.height);
-  });
+  window.addEventListener('vision-recognition-stop', () => { if (socket || pendingStart) stop(); });
   window.addEventListener('console-page-changed', () => {
-    if (document.body.dataset.consolePage !== 'person' && socket) stop();
+    if (document.body.dataset.consolePage !== 'person' && (socket || pendingStart)) stop();
   });
   window.addEventListener('pagehide', () => stop());
 })();

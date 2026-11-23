@@ -4,7 +4,7 @@ import { modelConfigUrl } from './model-resource.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createIcons, Bot, Power, PowerOff, Menu, PanelLeftClose, Crosshair, Play, SlidersHorizontal, LayoutGrid, RotateCcw, Undo2,
   Lock, LockOpen, Plus, Minus, ListPlus, RefreshCw, Download, Trash2, ArrowUp, ArrowDown, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-  FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, Languages } from 'lucide';
+  FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, HandHelping, Footprints, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, Languages } from 'lucide';
 import { SAMPLE_MAX_AGE_MS, SERVO_STATUS_MAX_AGE_MS, INDEPENDENT_IMU_MAX_AGE_MS, auxImuStatus, deviceFresh, imuFresh, imuTraceContinues, sampleFresh, servoStatus, tofStatus } from './state-status.js';
 import './style.css';
 import './simple-controls.css';
@@ -72,7 +72,7 @@ const fmt = (n, digits = 1) => Number.isFinite(n) ? n.toFixed(digits) : '--';
 const iconsRefresh = () => {
   createIcons({ icons: { Bot, Power, PowerOff, Menu, PanelLeftClose, Crosshair, Play,
     SlidersHorizontal, LayoutGrid, RotateCcw, Undo2, Lock, LockOpen, Plus, Minus, ListPlus, RefreshCw, Download, Trash2, ArrowUp, ArrowDown, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-    FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, Languages }, attrs: { 'stroke-width': 1.8 } });
+    FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, HandHelping, Footprints, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, Languages }, attrs: { 'stroke-width': 1.8 } });
   // Lucide retains this attribute on rendered SVGs and would otherwise replace them again.
   document.querySelectorAll('svg[data-lucide]').forEach(icon => icon.removeAttribute('data-lucide'));
 };
@@ -104,15 +104,15 @@ const requestHeaders = () => ({ 'Content-Type': 'application/json', 'X-Console-T
   'X-Head-Subscription-Revision': String(headSubscriptionRevision),
   ...(workspace === 'calibration' ? { 'X-Calibration-Source': calibrationControls.source() } : {}) });
 let cameraPreview;
-function updateCameraPreview() {
-  const available = workspace === 'status';
+function updateCameraPreview(page = workspace) {
+  const available = page === 'status';
   $('camera-enabled').closest('label').hidden = !available;
   const enabled = available && $('camera-enabled').checked;
   $('camera-preview').hidden = !enabled;
   if (!cameraPreview) return;
   if (enabled && info) cameraPreview.start(); else cameraPreview.stop();
 }
-$('camera-enabled').addEventListener('change', updateCameraPreview);
+$('camera-enabled').addEventListener('change', () => updateCameraPreview());
 
 async function request(path, body, timeoutMs = null) {
   const headers = requestHeaders();
@@ -306,10 +306,10 @@ const modelControls = createModelControls({ request, requestHeaders, refreshSess
   supportsOnline: () => !!info?.supports_model_update_resume && !!info?.supports_online_models
     && !!info?.supports_online_model_rest && !!info?.supports_model_version_gate });
 document.body.dataset.workspace = workspace;
-const controlPages = new Set(['control', 'target', 'person', 'maze', 'system']);
+const restrictedPages = new Set(['target', 'pickup', 'line', 'person', 'maze']);
+const controlPages = new Set(['control', ...restrictedPages, 'system']);
 const maintenancePages = new Set(['action', 'debug', 'calibration']);
 const restBeforeWorkspace = new Set(['status', 'action', 'debug', 'calibration']);
-const restrictedPages = new Set(['maze', 'person', 'target']);
 const resumePages = new Set(['status', 'action', 'debug', ...restrictedPages]);
 // Active calibration owns a separate session. Only re-enter calibration here
 // when it was opened as a read-only observation after an unconfirmed release.
@@ -393,7 +393,8 @@ actionAlignment.observe(actionHeading);
 
 function leaveControlWorkspace() {
   const frame = $('control-workspace');
-  if (!frame.contentWindow || !frame.src || frame.src === 'about:blank') return Promise.resolve();
+  if (!controlFrameActive || !frame.contentWindow || !frame.src || frame.src === 'about:blank') return Promise.resolve();
+  controlFrameActive = false;
   const origin = new URL(frame.src).origin;
   const requestId = ++leaveRequestId;
   return new Promise((resolve, reject) => {
@@ -490,6 +491,90 @@ async function networkAnnouncementSetting(event) {
     reply({ enabled: result.enabled });
   } catch (error) {
     reply({ error: error.message });
+  }
+}
+
+let softwareUpdateBusy = false;
+const updateStages = {
+  prepare: '正在验证发布签名与设备版本',
+  download: '正在下载运行包',
+  verify: '正在校验运行包',
+  checkpoint: '正在保存更新前的软件',
+  fetch: '正在获取发布源码',
+  install: '正在安装软件',
+  restart: '正在重启并检查服务',
+  rollback: '正在恢复更新前的软件',
+  done: '软件更新完成',
+};
+const updateDialog = $('software-update-progress');
+updateDialog.addEventListener('cancel', event => {
+  if ($('software-update-close').disabled) event.preventDefault();
+});
+
+function showUpdateStatus(job) {
+  const progress = $('software-update-download');
+  progress.hidden = job.phase !== 'download' || !Number.isFinite(job.progress);
+  if (!progress.hidden) progress.value = job.progress;
+  const stage = $('software-update-stage');
+  const error = $('software-update-error');
+  error.hidden = job.phase !== 'failed';
+  if (job.phase === 'failed') {
+    stage.textContent = job.rollback === 'done' ? '更新失败，已恢复更新前的软件'
+      : job.rollback === 'failed' ? '更新失败，自动恢复未完成'
+      : job.rollback === 'unneeded' ? '更新失败，设备仍运行原版本' : '无法确认更新结果';
+    error.textContent = [job.error, job.rollback_error].filter(Boolean).join(' / ');
+  } else {
+    stage.textContent = updateStages[job.phase] || '正在准备软件更新';
+  }
+}
+
+async function checkSoftwareUpdate() {
+  if (workspace !== 'system' || switchingWorkspace || softwareUpdateBusy || !info?.supports_software_update) return;
+  const language = getLanguage();
+  softwareUpdateBusy = true;
+  notifyFrames('studio-software-update-busy', { busy: true });
+  try {
+    toast('正在检查软件更新', false, { routine: true });
+    const { version } = await request('software-update', { action: 'check', language }, 50000);
+    if (!version) {
+      toast('当前已是最新版本');
+      return;
+    }
+    if (workspace !== 'system' || switchingWorkspace) return;
+    if (!await confirmAction('软件更新', '发现新版本 ' + version + '，是否更新？')) return;
+    if (workspace !== 'system' || switchingWorkspace) return;
+    showUpdateStatus({ phase: 'queued' });
+    $('software-update-close').disabled = true;
+    updateDialog.showModal();
+    const { job_id: jobId } = await request('software-update', { action: 'install', language, version }, 150000);
+    const deadline = performance.now() + 900000;
+    let inactive = 0;
+    while (performance.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      let status;
+      try { status = await request('software-update', undefined, 4000); }
+      catch (_) { continue; }
+      const job = status.job?.job_id === jobId ? status.job : null;
+      if (job) {
+        showUpdateStatus(job);
+        if (job.phase === 'failed') return;
+        if (job.phase === 'done' && status.current === version) {
+          await new Promise(resolve => setTimeout(resolve, 1200));
+          location.reload();
+          return;
+        }
+      }
+      inactive = status.active ? 0 : inactive + 1;
+      if (inactive >= 3) throw new Error('更新未完成，请检查设备日志');
+    }
+    throw new Error('等待更新完成超时，请检查设备');
+  } catch (error) {
+    if (updateDialog.open) showUpdateStatus({ phase: 'failed', error: error.message, rollback: 'unknown' });
+    else toast('软件更新失败：' + error.message, true);
+  } finally {
+    $('software-update-close').disabled = false;
+    softwareUpdateBusy = false;
+    notifyFrames('studio-software-update-busy', { busy: false });
   }
 }
 
@@ -693,6 +778,8 @@ window.addEventListener('message', event => {
       controlAction(event);
     } else if (event.data?.type === 'studio-network-announcement-request') {
       networkAnnouncementSetting(event);
+    } else if (event.data?.type === 'studio-software-update-request') {
+      checkSoftwareUpdate();
     }
   }
 });
@@ -713,16 +800,24 @@ function loadWorkspaceFrame(frame, url) {
 
 function loadControlFrame() {
   const frame = $('control-workspace');
+  if (controlFrameLoad) return controlFrameLoad;
   if (frame.getAttribute('src') && frame.getAttribute('src') !== 'about:blank') return Promise.resolve();
   const url = new URL(location.href);
   url.port = location.protocol === 'https:' ? '9444' : '8081';
   url.pathname = '/';
   url.search = `?studio=1&theme=${document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'}&debug=${Number(sidebarDebugMode.checked)}&lang=${getLanguage()}`;
   url.hash = '';
-  return loadWorkspaceFrame(frame, url.href);
+  controlFrameLoad = loadWorkspaceFrame(frame, url.href).catch(error => {
+    frame.classList.add('frame-clearing');
+    frame.src = 'about:blank';
+    throw error;
+  }).finally(() => { controlFrameLoad = null; });
+  return controlFrameLoad;
 }
 
 let controlWorkspaceRequestId = 0;
+let controlFrameActive = false;
+let controlFrameLoad = null;
 function activateControlWorkspace(page, enabled = true) {
   const frame = $('control-workspace');
   const origin = new URL(frame.src).origin;
@@ -741,6 +836,7 @@ function activateControlWorkspace(page, enabled = true) {
       if (error) reject(error); else resolve();
     }
     window.addEventListener('message', receive);
+    controlFrameActive = enabled;
     frame.contentWindow.postMessage({ type: 'studio-workspace', page, requestId, enabled }, origin);
   });
 }
@@ -751,17 +847,30 @@ function clearDebugFrame() {
   if (frame.getAttribute('src') !== 'about:blank') frame.src = 'about:blank';
 }
 
+let debugPreviewLoad = null;
 function previewDebugFrame() {
   const frame = $('debug-frame');
-  loadWorkspaceFrame(frame, '/debug.html?preview=1').then(() => {
-    if (workspace === 'debug' && workspaceRetryRequired && !document.body.dataset.studioReady
+  if (debugPreviewLoad) return debugPreviewLoad;
+  if (frame.getAttribute('src') === '/debug.html?preview=1' && !frame.classList.contains('frame-clearing')) return;
+  debugPreviewLoad = loadWorkspaceFrame(frame, '/debug.html?preview=1').then(() => {
+    if (document.body.dataset.workspace === 'debug' && !document.body.dataset.studioReady
         && frame.getAttribute('src') === '/debug.html?preview=1') {
       frame.classList.remove('frame-clearing');
       notifyFrames('studio-language', { language: getLanguage() });
       notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
       notifyFrames('studio-workspace', { page: 'debug' });
     }
-  }).catch(error => console.debug('舵机调试预览不可用', error.message));
+  }).catch(error => console.debug('舵机调试预览不可用', error.message))
+    .finally(() => { debugPreviewLoad = null; });
+  return debugPreviewLoad;
+}
+
+async function showControlPreview(page) {
+  const frame = $('control-workspace');
+  await loadControlFrame();
+  if (document.body.dataset.workspace !== page || controlFrameActive) return;
+  notifyFrames('studio-workspace-preview', { page });
+  frame.classList.remove('frame-clearing');
 }
 
 let workspaceNoticeTimer = null;
@@ -778,7 +887,10 @@ function previewWorkspace(page, message, ready = false, dismissible = false) {
     if (active) choice.setAttribute('aria-current', 'page'); else choice.removeAttribute('aria-current');
   }
   const control = $('control-workspace');
-  if (controlPages.has(page) && !ready) control.classList.add('frame-clearing');
+  if (controlPages.has(page) && !ready) {
+    const hasFrame = control.src && control.src !== 'about:blank';
+    control.classList.toggle('frame-clearing', !hasFrame);
+  }
   control.hidden = !controlPages.has(page);
   control.inert = !ready;
   $('monitor').hidden = controlPages.has(page) || page === 'network' || page === 'models';
@@ -790,6 +902,7 @@ function previewWorkspace(page, message, ready = false, dismissible = false) {
     panel.hidden = panel.dataset.workspacePanel !== page;
     panel.inert = !ready;
   }
+  updateCameraPreview(page);
   const notice = $('workspace-notice');
   clearTimeout(workspaceNoticeTimer);
   notice.hidden = !message;
@@ -803,6 +916,11 @@ function queueWorkspace(page) {
   delete document.body.dataset.studioReady;
   setArmed(false);
   previewWorkspace(page, '正在准备页面，设备操作暂不可用');
+  if (info?.studio && controlPages.has(page) && !controlFrameActive) {
+    showControlPreview(page).catch(error => console.debug('操控预览不可用', error.message));
+  } else if (info?.studio && page === 'debug') {
+    previewDebugFrame();
+  }
   if (workspaceQueueTimer) return;
   const retry = () => {
     workspaceQueueTimer = null;
@@ -833,12 +951,18 @@ async function selectWorkspace(next) {
   let restFallback = false;
   let statusWarning = '';
   let releaseUnconfirmed = false;
+  let initialPreview;
   if (info?.studio) {
     delete document.body.dataset.studioReady;
     controlGeneration++;
     setArmed(false);
     if (previous === 'debug' && previous !== next) clearDebugFrame();
     previewWorkspace(next, '正在准备页面，设备操作暂不可用');
+    if (controlPages.has(next) && !controlFrameActive) {
+      initialPreview = showControlPreview(next).then(() => null, error => error);
+    } else if (next === 'debug' && previous !== 'debug') {
+      initialPreview = previewDebugFrame();
+    }
   }
   try {
     if (previous === 'control' && previous !== next && controlActionActive) {
@@ -850,10 +974,12 @@ async function selectWorkspace(next) {
     if (info?.studio) {
       if (previous === 'action' && previous !== next && wasReady) await releaseControl();
       if (previous !== next && controlPages.has(previous)) {
-        try { await leaveControlWorkspace(); } catch (error) { console.warn('退出操控页面时继续交接', error); }
+        const leaving = leaveControlWorkspace();
+        const visible = document.body.dataset.workspace;
+        if (controlPages.has(visible)) initialPreview = showControlPreview(visible).then(() => null, error => error);
+        try { await leaving; } catch (error) { console.warn('退出操控页面时继续交接', error); }
       }
       if (previous === 'debug' && previous !== next) clearDebugFrame();
-      if (previous !== next) cameraPreview?.stop();
       if (restBefore) toast('正在准备进入页面，请稍候', false, { routine: true });
       const result = await request('workspace', { workspace: next, ...(restBefore ? { rest_before: true } : {}) });
       restFallback = result?.rest_fallback === true;
@@ -881,7 +1007,11 @@ async function selectWorkspace(next) {
     }
     if (queuedWorkspace === next) queuedWorkspace = null;
     const control = $('control-workspace');
-    if (controlPages.has(next)) await loadControlFrame();
+    const previewError = await initialPreview;
+    if (controlPages.has(next)) {
+      if (previewError) throw previewError;
+      await showControlPreview(next);
+    }
     if (next === 'debug' && (previous !== 'debug' || !$('debug-frame').src || $('debug-frame').src === 'about:blank'
         || Boolean($('debug-frame').getAttribute('src')?.includes('preview=1')) !== Boolean(info?.readonly))) {
       await loadWorkspaceFrame($('debug-frame'), info?.readonly ? '/debug.html?preview=1' : '/debug.html');
@@ -906,16 +1036,11 @@ async function selectWorkspace(next) {
     if (restFallback) toast('休息未完成，已关闭策略并卸力');
     else if (restBefore && !statusWarning) toast('页面已就绪', false, { routine: true });
     workspaceRetryRequired = false;
-    control.hidden = !controlPages.has(workspace);
-    $('monitor').hidden = controlPages.has(workspace) || workspace === 'network' || workspace === 'models';
-    $('network-workspace').hidden = workspace !== 'network';
     networkControls.setActive(workspace === 'network');
-    $('models-workspace').hidden = workspace !== 'models';
     modelControls.setActive(workspace === 'models');
     if (controlPages.has(workspace)) {
-      notifyFrames('studio-device-versions', { versions: info?.device_versions || null });
+      notifyFrames('studio-device-versions', { versions: info?.device_versions || null, softwareUpdate: info?.supports_software_update, busy: softwareUpdateBusy });
     }
-    for (const panel of document.querySelectorAll('[data-workspace-panel]')) panel.hidden = panel.dataset.workspacePanel !== workspace;
     if (controlPages.has(previous) && !controlPages.has(workspace)) {
       control.classList.add('frame-clearing');
       control.src = 'about:blank';
@@ -930,7 +1055,6 @@ async function selectWorkspace(next) {
       notifyFrames('studio-language', { language: getLanguage() });
       notifyFrames('studio-workspace', { page: workspace });
     }
-    updateCameraPreview();
     calibrationCharts.setActive(workspace === 'calibration');
     calibrationView.setActive(workspace === 'calibration');
     updateReferenceView();
@@ -944,7 +1068,11 @@ async function selectWorkspace(next) {
   } catch (error) {
     console.warn('页面切换失败', error);
     const message = `${friendlyErrorMessage(error.message)} 设备操作暂不可用，请重新点击当前页面重试。`;
-    if (next === 'debug' || previous === 'debug') clearDebugFrame();
+    if ((next === 'debug' || previous === 'debug')
+        && $('debug-frame').getAttribute('src') !== '/debug.html?preview=1') clearDebugFrame();
+    if (controlFrameActive && controlPages.has(next)) {
+      await leaveControlWorkspace().catch(error => console.debug('退出操控页面', error.message));
+    }
     workspace = next;
     highlightSelectedJoints();
     statusReleaseUnconfirmed = false;
@@ -959,7 +1087,7 @@ async function selectWorkspace(next) {
         await loadControlFrame();
         await activateControlWorkspace(workspace, false);
         $('control-workspace').classList.remove('frame-clearing');
-        notifyFrames('studio-device-versions', { versions: info?.device_versions || null });
+        notifyFrames('studio-device-versions', { versions: info?.device_versions || null, softwareUpdate: info?.supports_software_update, busy: softwareUpdateBusy });
       } catch (previewError) {
         console.debug('操控页面预览不可用', previewError.message);
       }
@@ -967,7 +1095,6 @@ async function selectWorkspace(next) {
     if (workspace === 'debug') previewDebugFrame();
     networkControls.setActive(false);
     modelControls.setActive(false);
-    cameraPreview?.stop();
     calibrationCharts.setActive(false);
     calibrationView.setActive(workspace === 'calibration');
     updateReferenceView();
@@ -985,10 +1112,11 @@ async function selectWorkspace(next) {
 }
 
 $('control-workspace').addEventListener('load', () => {
-  if (!controlPages.has(workspace)) return;
+  if (switchingWorkspace || !document.body.dataset.studioReady || !controlPages.has(workspace)) return;
   notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme });
   syncDebugMode();
-  notifyFrames('studio-device-versions', { versions: info?.device_versions || null });
+  notifyFrames('studio-workspace', { page: workspace });
+  notifyFrames('studio-device-versions', { versions: info?.device_versions || null, softwareUpdate: info?.supports_software_update, busy: softwareUpdateBusy });
 });
 $('debug-frame').addEventListener('load', () => notifyFrames('studio-theme', { theme: document.documentElement.dataset.theme }));
 for (const button of document.querySelectorAll('button[data-workspace]')) {
@@ -1580,6 +1708,9 @@ function applyMode() {
   updateSidebarRestart();
   $('demo-badge').hidden = !info.demo;
   for (const element of document.querySelectorAll('.studio-only')) element.hidden = !info.studio;
+  for (const page of ['pickup', 'line']) {
+    document.querySelector(`[data-workspace="${page}"]`).hidden = !info.studio || !info.workspaces?.includes(page);
+  }
 }
 
 async function init() {

@@ -13,11 +13,20 @@
           else input.setCustomValidity(window.WonderduckLanguage?.translate(message) || message);
         }
       });
-      const isVisionPage = () => ['target', 'person'].includes(document.body.dataset.consolePage);
-      const isMotionPage = () => ['control', 'target', 'person', 'maze'].includes(document.body.dataset.consolePage);
+      const isVisionPage = () => document.body.hasAttribute('data-vision-page');
+      const isMotionPage = () => isVisionPage() || ['control', 'maze'].includes(document.body.dataset.consolePage);
+      const targetHeadOnly = () => document.body.dataset.consolePage === 'target';
+      const lineFollowing = () => document.body.dataset.consolePage === 'line';
+      const pickupPage = () => document.body.dataset.consolePage === 'pickup';
       const state = { left_x: 0, left_y: 0, right_x: 0, right_y: 0,
         left_trigger: 0, right_trigger: 0, buttons: [], active: !document.hidden };
+      const headStickPosition = [document.querySelector('#head-stick-pitch'), document.querySelector('#head-stick-yaw')];
+      const headCenterButton = document.querySelector('[data-action="center_head"]');
+      const headStickAxes = [0, 0];
+      const headStickKnob = [0, 0];
       let studioLeaveRequest = null;
+      let controlLeaseReady = false;
+      const controlBusy = document.querySelector('#control-busy');
       const embeddedStudio = document.documentElement.dataset.studioEmbedded === 'true' && window.parent !== window;
       let studioActive = !embeddedStudio;
       let workspaceActivated = !embeddedStudio;
@@ -26,7 +35,7 @@
       let restPhase = null, motionEnabled = null, motionHomed = null, powerSequence = 0;
       let powerPending = null, powerAcknowledged = false, powerRequestSequence = 0;
       const skillLabels = { sit_toggle: "坐下 / 站起", ground_pick: "地面拾取", roulade: "翻滚", headstand: "倒立", kick_left: "左踢", kick_right: "右踢" };
-      let linearSpeed = 0.4;
+      let linearSpeed = 0.30;
       let turnSpeed = 1;
       const modeCopy = {
         drive: {
@@ -58,7 +67,7 @@
         init: "初始化机器人", prepare_drive: "初始化并启用行走策略", toggle_policy: "启用 / 停止策略", drive_mode: "移动控制",
         head_mode: "头部控制", body_pose_mode: "躯干姿态", ground_pick: "地面拾取",
         sit_toggle: "坐下 / 站起", kick_left: "左踢", kick_right: "右踢", roulade: "翻滚",
-        headstand: "倒立", home: "回HOME", rest: "休息卸力", shutdown: "关机", sit_on_loss: "失联后坐下", stop: "停止当前动作", relax: "关闭所有关节扭矩",
+        headstand: "倒立", home: "回HOME", center_head: "头部回中", rest: "休息卸力", shutdown: "关机", sit_on_loss: "失联后坐下", stop: "停止当前动作", relax: "关闭所有关节扭矩",
       };
       const knobs = new Map();
       const stickLocks = new Map([...document.querySelectorAll('[data-stick-lock]')]
@@ -151,6 +160,7 @@
       const audioVolume = document.querySelector('#audio-volume');
       const audioVolumeValue = document.querySelector('#audio-volume-value');
       const trackingStart = document.querySelector('#tracking-start');
+      const pickupSequenceStart = document.querySelector('#pickup-sequence-start');
       const headPosition = document.querySelector('#head-position');
       const headPositionSetting = document.querySelector('#head-position-setting');
       const followStopArea = document.querySelector('#follow-stop-area');
@@ -160,9 +170,6 @@
       const personDefaults = {headPosition: 2100, area: 320000, areaDeadzone: 80000,
         distance: 900, distanceDeadzone: 100};
       const targetHeadDefault = 2200;
-      // Keep the staged target controller and its saved parameters for later re-enablement.
-      const TARGET_BODY_TRACKING_ENABLED = false;
-      const targetHeadOnly = () => document.body.dataset.consolePage === 'target' && !TARGET_BODY_TRACKING_ENABLED;
       const savedFollowStopArea = Number(localStorage.getItem('person-follow-stop-area'));
       let followStopAreaValue = Number.isSafeInteger(savedFollowStopArea) && savedFollowStopArea > 0
         ? savedFollowStopArea : personDefaults.area;
@@ -182,11 +189,14 @@
         && parsedDistanceDeadzone >= 0 && parsedDistanceDeadzone <= 4294967295 ? parsedDistanceDeadzone : personDefaults.distanceDeadzone;
       followDistanceDeadzone.value = String(followDistanceDeadzoneValue);
       let headPositionState = 'idle', headPositionWanted = false;
-      let headPositionScope = document.body.dataset.consolePage === 'person' ? 'person' : 'target';
+      const currentHeadPositionScope = () => targetHeadOnly() ? 'home'
+        : document.body.dataset.consolePage === 'person' ? 'person'
+          : pickupPage() ? trackingScope : 'target';
+      let headPositionScope = 'target';
       let targetHeadHome = null, headPositionTarget = null;
       const headPositionKey = scope => `${scope}-follow-head-position`;
       const applyHeadPositionScope = scope => {
-        let value = scope === 'target' && !TARGET_BODY_TRACKING_ENABLED
+        let value = scope === 'home'
           ? (targetHeadHome === null ? '' : String(targetHeadHome))
           : localStorage.getItem(headPositionKey(scope))
             ?? String(scope === 'person' ? personDefaults.headPosition : targetHeadDefault);
@@ -210,8 +220,7 @@
       const phaseInputs = [...document.querySelectorAll(phaseInputSelector)];
       const arrivalSkillInput = document.querySelector('#coordinated-arrival-skill');
       const arrivalDelayInput = document.querySelector('#coordinated-arrival-delay');
-      const trackingArea = document.querySelector("#tracking-area");
-      const trackingAreaValue = document.querySelector("#tracking-area-value");
+      const lineSpeedInput = document.querySelector('#line-speed');
       const colorPresetSelect = document.querySelector('#color-presets');
       const colorPresetName = document.querySelector('#color-preset-name');
       const colorPresetSave = document.querySelector('#color-preset-save');
@@ -222,7 +231,7 @@
       const mazeStatus = document.querySelector("#maze-status");
       const resetSettings = document.querySelector('#reset-settings');
       const settingsStatus = document.querySelector('#settings-status');
-      let settingsSaving = false, colorReference = null, colorChosen = false, referenceAreaConfigured = false, objectLabelPreference = null;
+      let settingsSaving = false, colorReference = null, colorChosen = false, objectLabelPreference = null;
       let settingsLoaded = false, settingsDirty = false, applyingSettings = false, settingsFailed = false;
       let settingsTimer = null, settingsMessageTimer = null, settingsDefaults = null, pendingSettingsJson = null, savedSettingsJson = null;
       let settingsRequest = 0, settingsPendingId = null, robotConnected = false;
@@ -240,8 +249,10 @@
         phaseDirty: false, phaseSaving: false, phaseFailed: false,
         phaseTimer: null, phasePendingId: null, phasePendingJson: null, phaseSavedJson: null,
       });
-      const trackingProfiles = {target: makeTrackingProfile(), person: makeTrackingProfile()};
+      const trackingProfiles = {target: makeTrackingProfile(), pickup_after: makeTrackingProfile(), person: makeTrackingProfile()};
       let trackingScope = 'target';
+      let pickupRobotStage = null, pickupRunScope = null;
+      const pickupStageButtons = [...document.querySelectorAll('[data-pickup-stage]')];
       const trackingProfile = () => trackingProfiles[trackingScope];
       const trackingBusy = () => Object.values(trackingProfiles).some(profile =>
         profile.coordinatedSaving || profile.phaseSaving);
@@ -262,8 +273,7 @@
       const visionDirect = {color: false, object: false};
       let coordinatedRobotPhase = null;
       let visionSource = 'color', awaitingTarget = false;
-      let referenceArea = 0.01, trackingWatchdog = null;
-      let referenceAreaPending = false;
+      let referenceArea = null, lineSpeed = 0.15, trackingWatchdog = null;
       const trackingDeadzone = [0.1, 0.05];
       const trackingGains = [[0.5, 0.04, 0.01], [0.5, 0.04, 0.01]];
       const headTrackingDeadzone = [0.1, 0.05];
@@ -280,8 +290,9 @@
         after: {enabled: false, open: 0, duration_s: 0.5},
       };
       const updateTrackingGuide = () => {
-        trackingGuide.hidden = !isVisionPage() || (!targetHeadOnly() && !coordinatedSettingsReady);
-        trackingGoal.hidden = targetHeadOnly();
+        const showGoal = ['pickup', 'person'].includes(document.body.dataset.consolePage);
+        trackingGuide.hidden = !isVisionPage() || (showGoal && !coordinatedSettingsReady);
+        trackingGoal.hidden = !showGoal;
         trackingGoal.style.left = `${(coordinatedFinalPoint[0] - coordinatedFinalTolerance[0]) / 320 * 100}%`;
         trackingGoal.style.top = `${(coordinatedFinalPoint[1] - coordinatedFinalTolerance[1]) / 180 * 100}%`;
         trackingGoal.style.width = `${coordinatedFinalTolerance[0] / 160 * 100}%`;
@@ -301,18 +312,21 @@
       let savedAudioVolume = null, confirmedVolume = null, desiredVolume = null;
       let volumeBusy = false, volumeTimer = null, volumeRevision = 0;
       const clamp = (value) => Math.max(-1, Math.min(1, value));
-      const sticksBlocked = () => socket?.readyState !== WebSocket.OPEN || maze || mazePending || awaitingTarget
+      const sticksBlocked = () => !controlLeaseReady || !driveControlReady || socket?.readyState !== WebSocket.OPEN || maze || mazePending || awaitingTarget
         || tracking || trackingPending || headTracking || headTrackingPending || coordinated || coordinatedPending;
       const updateSticksAvailability = () => {
         const disabled = sticksBlocked();
         document.querySelectorAll('.pad').forEach(pad => pad.setAttribute('aria-disabled', String(disabled)));
         stickLocks.forEach(input => { input.disabled = disabled; });
+        headCenterButton.disabled = headCenterUnavailable();
       };
       const zero = () => {
         cancelPickMouth();
         visionModeRequested = false;
         stickLocks.forEach(input => { input.checked = false; });
         state.left_x = state.left_y = state.right_x = state.right_y = 0;
+        headStickAxes.fill(0);
+        headStickKnob.fill(0);
         state.left_trigger = state.right_trigger = 0;
         state.buttons = [];
         triggerRanges.forEach((range) => { range.value = "0"; });
@@ -335,6 +349,7 @@
       const autoPreparing = () => driveEntryPending && restPhase === 'idle' && isMotionPage();
       const motionUnavailable = () => powerPending !== null || autoPreparing() || restPhase !== 'idle'
         || motionEnabled !== true || motionHomed !== true;
+      const headCenterUnavailable = () => motionUnavailable() || sticksBlocked() || mode === 'body_pose';
       const remindMotion = () => {
         if (motionBlockedDialog.open || shutdownConfirm.open) return;
         const text = restPhase === 'resting' || powerPending === 'rest'
@@ -361,6 +376,7 @@
         motionPower.querySelector('use').setAttribute('href', icon);
         motionPower.disabled = !connected || powerPending !== null || autoPreparing() || restPhase === 'resting'
           || motionEnabled === null || motionHomed === null;
+        headCenterButton.disabled = headCenterUnavailable();
       };
       const updatePowerState = status => {
         const wasAvailable = !motionUnavailable();
@@ -555,6 +571,27 @@
         if (phaseReady) applyPhaseSettings(profile.phases);
         applyingSettings = previous;
       };
+      const selectPickupStage = scope => {
+        applyTrackingProfile(scope);
+        headPositionScope = scope;
+        applyHeadPositionScope(scope);
+        pickupStageButtons.forEach(button => {
+          button.setAttribute('aria-pressed', String(button.dataset.pickupStage === scope));
+        });
+        updateSettingsState();
+      };
+      pickupStageButtons.forEach(button => button.addEventListener('click', () => {
+        const previousPosition = headPositionTarget;
+        selectPickupStage(button.dataset.pickupStage);
+        if (!awaitingTarget && !coordinated && !coordinatedPending) {
+          headPositionWanted = true;
+          if (headPositionState === 'active' && headPositionTarget !== null && headPositionTarget !== previousPosition) {
+            sendHeadPosition('update');
+          }
+          reconcileHeadPosition();
+        }
+        updateTrackingButton();
+      }));
       const applySettings = (saved, forceColor = false) => {
         if (!saved) return;
         applyingSettings = true;
@@ -565,18 +602,17 @@
           mazeSettings[input.dataset.maze] = saved.maze[input.dataset.maze];
           setValidity(input, '');
         }
-        referenceAreaConfigured = saved.tracking.reference_area !== null;
-        referenceArea = referenceAreaConfigured ? saved.tracking.reference_area : 0.01;
-        trackingArea.value = String(referenceArea * 100);
-        trackingAreaValue.textContent = `${(referenceArea * 100).toFixed(2)}%`;
+        referenceArea = saved.tracking.reference_area;
+        lineSpeed = saved.tracking.line_speed ?? 0.15;
+        lineSpeedInput.value = String(lineSpeed);
+        trackingDeadzone.splice(0, 2, ...saved.tracking.deadzone);
+        trackingGains.splice(0, 2, ...saved.tracking.gains.map(axis => [...axis]));
         for (const input of document.querySelectorAll('[data-tracking-deadzone]')) {
           const axis = Number(input.dataset.trackingDeadzone);
-          trackingDeadzone[axis] = saved.tracking.deadzone[axis];
           input.value = String(trackingDeadzone[axis] * 100);
         }
         for (const input of document.querySelectorAll('[data-pid-axis]')) {
           const axis = Number(input.dataset.pidAxis), term = Number(input.dataset.pidTerm);
-          trackingGains[axis][term] = saved.tracking.gains[axis][term];
           input.value = String(trackingGains[axis][term]);
           input.nextElementSibling.value = String(trackingGains[axis][term]);
           setValidity(input.nextElementSibling, '');
@@ -615,8 +651,9 @@
       const collectSettings = () => ({
           linear_speed: linearSpeed, turn_speed: turnSpeed, maze: {...mazeSettings},
           tracking: {
-            reference_area: referenceAreaConfigured ? referenceArea : null,
-            deadzone: [...document.querySelectorAll('[data-tracking-deadzone]')].map(input => input.valueAsNumber / 100),
+            reference_area: referenceArea,
+            line_speed: lineSpeed,
+            deadzone: [...trackingDeadzone],
             gains: trackingGains.map(axis => [...axis]),
           },
           color_threshold: Number(document.querySelector('#color-threshold').value),
@@ -747,12 +784,12 @@
       };
       const changedParameter = event => {
         const field = event.target;
-        if (!field.matches('input, select') || field.matches(`[data-stick-lock], [data-trigger-range], [data-head-pid-axis], [data-head-pid-range-axis], [data-head-tracking-deadzone], ${coordinatedInputSelector}, ${phaseInputSelector}, #follow-stop-area, #follow-area-deadzone, #follow-stop-distance, #follow-distance-deadzone, #color-presets, #color-preset-name, #audio-volume, #network-announcement-enabled`)) return;
+        if (!field.matches('input, select') || field.matches(`[data-stick-lock], [data-trigger-range], [data-head-pid-axis], [data-head-pid-range-axis], [data-head-tracking-deadzone], ${coordinatedInputSelector}, ${phaseInputSelector}, #follow-stop-area, #follow-area-deadzone, #follow-stop-distance, #follow-distance-deadzone, #color-presets, #color-preset-name, #audio-volume, #network-announcement-enabled, #person-model`)) return;
         queueSettings();
       };
       document.addEventListener('input', changedParameter);
       document.addEventListener('change', event => {
-        if (event.target.matches('#network-announcement-enabled')) return;
+        if (event.target.matches('#network-announcement-enabled, #person-model')) return;
         changedParameter(event);
         if (event.target.matches('[data-head-pid-axis], [data-head-pid-range-axis], [data-head-tracking-deadzone]')) flushHeadSettings();
         else if (event.target.matches(coordinatedInputSelector)) flushCoordinatedSettings();
@@ -770,8 +807,7 @@
         applyHeadSettings(headSettingsDefaults);
         applyCoordinatedSettings(trackingScope === 'person' ? personCoordinatedDefaults : coordinatedDefaults);
         applyPhaseSettings(trackingScope === 'person' ? personPhaseDefaults : phaseDefaults);
-        const defaultHeadPosition = headPositionScope === 'person' ? personDefaults.headPosition
-          : TARGET_BODY_TRACKING_ENABLED ? targetHeadDefault : targetHeadHome;
+        const defaultHeadPosition = headPositionScope === 'person' ? personDefaults.headPosition : targetHeadDefault;
         headPosition.value = defaultHeadPosition === null ? '' : String(defaultHeadPosition);
         headPositionTarget = defaultHeadPosition;
         headPositionWanted = false;
@@ -781,11 +817,12 @@
         followDistanceDeadzone.value = String(followDistanceDeadzoneValue = personDefaults.distanceDeadzone);
         const followDefaults = {
           'person-follow-head-position': personDefaults.headPosition,
+          'target-follow-head-position': targetHeadDefault,
+          'pickup_after-follow-head-position': targetHeadDefault,
           'person-follow-stop-area': followStopAreaValue,
           'person-follow-area-deadzone': followAreaDeadzoneValue, 'person-follow-stop-distance': followStopDistanceValue,
           'person-follow-distance-deadzone': followDistanceDeadzoneValue,
         };
-        if (TARGET_BODY_TRACKING_ENABLED) followDefaults['target-follow-head-position'] = targetHeadDefault;
         for (const [key, value] of Object.entries(followDefaults)) localStorage.setItem(key, String(value));
         applySpeed(settingsDefaults.linear_speed);
         queueSettings(); queueHeadSettings();
@@ -868,14 +905,21 @@
         updateSticksAvailability();
         const busy = awaitingTarget || tracking || trackingPending || headTracking || headTrackingPending || coordinated || coordinatedPending;
         const configured = visionSource === 'color' ? Boolean(colorReference && colorChosen) : true;
+        const pickupProfileReady = scope => trackingProfiles[scope].coordinatedReady && trackingProfiles[scope].phaseReady;
         const parametersReady = targetHeadOnly()
-          ? settingsLoaded && !!headSettingsDefaults && targetHeadHome !== null : coordinatedLeaseReady;
-        trackingStart.disabled = !configured || !visionDirect[visionSource] || busy || maze || mazePending || socket?.readyState !== WebSocket.OPEN
-          || !parametersReady || (document.body.dataset.consolePage === 'person'
+          ? settingsLoaded && !!headSettingsDefaults && targetHeadHome !== null
+          : lineFollowing() ? settingsLoaded && lineSpeedInput.validity.valid
+            : coordinatedLeaseReady;
+        const startBlocked = !configured || !visionDirect[visionSource] || busy || maze || mazePending || socket?.readyState !== WebSocket.OPEN;
+        trackingStart.disabled = startBlocked || !parametersReady || (document.body.dataset.consolePage === 'person'
             && (!followStopArea.validity.valid || !followAreaDeadzone.validity.valid
               || !followStopDistance.validity.valid || !followDistanceDeadzone.validity.valid));
+        const firstArrivalSkill = trackingProfiles.target.coordinated?.arrival_skill;
+        pickupSequenceStart.disabled = startBlocked || !pickupProfileReady('target')
+          || !pickupProfileReady('pickup_after') || !firstArrivalSkill;
+        pickupSequenceStart.title = firstArrivalSkill ? '' : '请先设置动作前的到位动作';
         trackingStart.title = !parametersReady
-          ? (targetHeadOnly() ? '头部追踪参数不可用' : document.body.dataset.consolePage === 'person'
+          ? (targetHeadOnly() ? '头部追踪参数不可用' : lineFollowing() || document.body.dataset.consolePage === 'person'
             ? '身体追踪参数不可用' : '联合追踪参数不可用') : '';
         trackingStop.disabled = !(awaitingTarget || tracking || headTracking || coordinated
           || (trackingPending && !trackingCancelled) || (headTrackingPending && !headTrackingCancelled)
@@ -891,21 +935,35 @@
         const headOnlyPhase = coordinatedRobotPhase === 'approach' ? '头部追踪'
           : coordinatedRobotPhase === 'waiting_target' ? '头部追踪 · 等待目标' : phases[coordinatedRobotPhase];
         const phase = awaitingTarget ? '等待识别画面'
-          : tracking ? (trackingPoint ? '身体追踪' : '身体追踪 · 寻找目标')
+          : tracking ? (trackingPoint ? '自主巡线' : '等待识别巡线')
           : headTracking ? (headTrackingPoint ? '头部追踪' : '头部追踪 · 寻找目标')
           : coordinated || (coordinatedPending && !coordinatedCancelled)
             ? ((targetHeadOnly() ? headOnlyPhase : phases[coordinatedRobotPhase])
               || (!coordinatedFrameReady ? '等待识别画面' : '等待机器人状态'))
           : (trackingPending && !trackingCancelled) || (headTrackingPending && !headTrackingCancelled) ? '正在启动' : '';
-        coordinatedStatus.textContent = phase ? `追踪阶段：${phase}` : '';
-        trackingArea.disabled = !tracking;
+        const pickupLabel = pickupPage() && (awaitingTarget || coordinatedPending || coordinated)
+          ? (pickupRunScope === 'pickup_after' || pickupRobotStage === 'after' ? '动作后' : '动作前') : '';
+        coordinatedStatus.textContent = [pickupLabel, phase ? `追踪阶段：${phase}` : ''].filter(Boolean).join(' · ');
       };
       const sendTracking = (action, target = null) => {
         const initial_pitch = action === 'start' && isVisionPage() ? headPositionTarget : null;
-        if (studioActive && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'motion_tracking', action, initial_pitch, target, reference_area: referenceArea, deadzone: trackingDeadzone, gains: trackingGains }));
+        if (studioActive && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
+          type: 'motion_tracking', action, initial_pitch, target, line_speed: lineSpeed,
+          reference_area: referenceArea ?? 0.01, deadzone: trackingDeadzone, gains: trackingGains,
+        }));
       };
       const sendHeadTracking = (action, target = null) => {
         if (studioActive && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'head_tracking', action, target, deadzone: headTrackingDeadzone, gains: headTrackingGains }));
+      };
+      const pickupParameters = scope => {
+        const profile = trackingProfiles[scope];
+        const pitch = scope === headPositionScope ? headPositionTarget
+          : Number(localStorage.getItem(headPositionKey(scope)) ?? targetHeadDefault);
+        return {
+          ...(scope === trackingScope ? collectCoordinatedSettings() : profile.coordinated),
+          ...(scope === trackingScope ? collectPhaseSettings() : profile.phases),
+          initial_pitch: Number.isInteger(pitch) && pitch >= 1024 && pitch <= 2250 ? pitch : null,
+        };
       };
       const sendCoordinated = (action, target = null, newPitch = null) => {
         const trackingCamera = coordinatedFrameReady ? camera : null;
@@ -914,8 +972,12 @@
         const personFollow = document.body.dataset.consolePage === 'person';
         const headOnly = targetHeadOnly();
         const startPitch = headOnly ? targetHeadHome : headPositionTarget;
-        if (action === 'start' && headOnly && startPitch === null) return;
         if (action === 'start') coordinatedStartPitch = startPitch ?? 1500;
+        const pickup = pickupPage() && action !== 'stop' ? pickupParameters(pickupRunScope ?? 'target') : null;
+        const pickupAfter = pickup && pickupRunScope === null ? {
+          action: 'start', target: null, camera: null, stop_area_px: null, stop_area_deadzone_px: 0,
+          stop_distance_mm: null, stop_distance_deadzone_mm: 0, ...pickupParameters('pickup_after'),
+        } : null;
         if (studioActive && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
           type: 'coordinated_tracking', action,
           initial_pitch: action === 'start' ? startPitch : (personFollow && action === 'update' ? newPitch : null),
@@ -937,6 +999,7 @@
           arrival_delay_s: personFollow || headOnly ? 0 : coordinatedArrivalDelay,
           mouth_before: {...coordinatedMouth.before, enabled: !personFollow && !headOnly && coordinatedMouth.before.enabled},
           mouth_after: {...coordinatedMouth.after, enabled: !personFollow && !headOnly && coordinatedMouth.after.enabled},
+          ...(pickup ? {...pickup, initial_pitch: action === 'start' ? pickup.initial_pitch : null, pickup_after: pickupAfter} : {}),
         }));
       };
       const updateCoordinated = () => { if (coordinated) sendCoordinated('update', coordinatedTarget); };
@@ -968,11 +1031,9 @@
           || document.body.dataset.consolePage === 'person';
       });
       bindPidTabs('[data-body-stage-tab]', '[data-body-stage-pane]', 'bodyStageTab', 'bodyStagePane');
-      trackingArea.addEventListener('input', () => {
-        referenceAreaConfigured = true;
-        referenceAreaPending = false;
-        referenceArea = Number(trackingArea.value) / 100;
-        trackingAreaValue.textContent = `${(referenceArea * 100).toFixed(2)}%`;
+      lineSpeedInput.addEventListener('input', () => {
+        if (lineSpeedInput.validity.valid) lineSpeed = lineSpeedInput.valueAsNumber;
+        updateTrackingButton();
       });
       const bindPidInputs = (range, input, gains, axis, term, head, queue = head ? queueHeadSettings : null,
         error = head ? '头部 PID 需要有限数值' : '身体 PID 范围为 0～10', onUpdate = null) => {
@@ -1130,6 +1191,7 @@
         coordinatedArrivalSkill = arrivalSkillInput.value;
         updateCoordinated();
         queueCoordinatedSettings();
+        updateTrackingButton();
       });
       document.querySelectorAll('[data-coordinated-mouth]').forEach(input => {
         const stage = input.dataset.coordinatedMouth, field = input.dataset.mouthField;
@@ -1201,9 +1263,15 @@
         tracking = false;
         if (trackingPending && socket?.readyState === WebSocket.OPEN) trackingCancelled = true;
         else trackingPending = trackingCancelled = trackingStopSent = false;
-        referenceAreaPending = false;
         clearTimeout(trackingWatchdog);
         updateMazeButton();
+      };
+      const armLineWatchdog = () => {
+        clearTimeout(trackingWatchdog);
+        trackingWatchdog = setTimeout(() => {
+          stopTracking();
+          setNotice('画面中断，自主巡线已停止', true);
+        }, 600);
       };
       const stopHeadTracking = (send = true) => {
         if (send && (headTracking || (headTrackingPending && !headTrackingStopSent))) {
@@ -1227,6 +1295,8 @@
         coordinatedTarget = null;
         coordinatedFrameReady = false;
         coordinatedRobotPhase = null;
+        pickupRobotStage = null;
+        pickupRunScope = null;
         clearTimeout(coordinatedWatchdog);
         updateMazeButton();
       };
@@ -1294,12 +1364,16 @@
       const sendHeadPosition = action => {
         if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
           type: 'head_position', action,
-          position: action === 'stop' ? (awaitingTarget && targetReady ? headPositionTarget : null) : headPositionTarget,
+          position: action === 'stop' ? null : headPositionTarget,
         }));
       };
       const reconcileHeadPosition = () => {
         const visible = isVisionPage();
-        headPositionSetting.hidden = !visible || targetHeadOnly();
+        const headOnly = targetHeadOnly();
+        headPositionSetting.hidden = !visible;
+        headPosition.readOnly = headOnly;
+        document.querySelector('#head-position-home').hidden = !headOnly;
+        document.querySelector('#head-position-range').hidden = headOnly;
         // The server owns the head-home handoff until studio_leave completes.
         if (studioLeaveRequest !== null) return;
         const waitingForTarget = awaitingTarget && !targetReady && headPositionState !== 'idle';
@@ -1413,36 +1487,61 @@
           return;
         }
         awaitingTarget = false;
-        coordinatedPending = true;
-        coordinatedRobotPhase = null;
-        coordinatedCancelled = coordinatedStopSent = false;
-        armCoordinatedWatchdog();
-        sendCoordinated('start');
+        if (pickupPage() && pickupRunScope === null && !trackingProfiles.target.coordinated?.arrival_skill) {
+          setNotice('请先设置动作前的到位动作', true);
+          updateMazeButton();
+          return;
+        }
+        if (lineFollowing()) {
+          trackingPending = true;
+          trackingCancelled = trackingStopSent = false;
+          sendTracking('start', trackingPoint);
+        } else {
+          if (pickupPage()) selectPickupStage(pickupRunScope ?? 'target');
+          coordinatedPending = true;
+          coordinatedRobotPhase = null;
+          coordinatedCancelled = coordinatedStopSent = false;
+          armCoordinatedWatchdog();
+          sendCoordinated('start');
+        }
         updateMazeButton();
       };
-      trackingStart.addEventListener('click', () => {
-        if (trackingStart.disabled) return;
+      const beginTracking = scope => {
+        if (!studioActive) return;
+        pickupRunScope = scope;
         keys.clear();
         zero();
+        if (lineFollowing()) {
+          targetReady = false;
+          trackingPoint = null;
+        }
         awaitingTarget = true;
         headPositionWanted = false;
         reconcileHeadPosition();
         updateMazeButton();
-        window.dispatchEvent(new CustomEvent('vision-recognition-start', {detail: visionSource}));
+        if (visionSource === 'object') window.dispatchEvent(new CustomEvent('vision-recognition-start', {detail: visionSource}));
         startSelectedTracking();
+      };
+      trackingStart.addEventListener('click', () => {
+        if (!trackingStart.disabled) beginTracking(pickupPage() ? trackingScope : null);
+      });
+      pickupSequenceStart.addEventListener('click', () => {
+        if (!pickupSequenceStart.disabled && pickupPage()) beginTracking(null);
       });
       trackingStop.addEventListener('click', () => stopAllTracking());
       const updateCoordinatedFields = () => {
-        const targetTracking = document.body.dataset.consolePage === 'target';
         const personFollow = document.body.dataset.consolePage === 'person';
         const headOnly = targetHeadOnly();
-        document.querySelectorAll('.coordinated-goal').forEach(field => { field.hidden = headOnly; });
+        const stagedTarget = pickupPage();
+        document.querySelector('#pickup-stages').hidden = !stagedTarget;
+        const showCoordinated = personFollow || stagedTarget;
+        document.querySelectorAll('.coordinated-goal').forEach(field => { field.hidden = !showCoordinated; });
         document.querySelector('#follow-stop-area-setting').hidden = !personFollow;
         document.querySelector('#follow-area-deadzone-setting').hidden = !personFollow;
         document.querySelector('#follow-stop-distance-setting').hidden = !personFollow;
         document.querySelector('#follow-distance-deadzone-setting').hidden = !personFollow;
         document.querySelectorAll('.coordinated-arrival, .coordinated-mouth').forEach(field => {
-          field.hidden = !targetTracking || headOnly;
+          field.hidden = !stagedTarget;
         });
         const headTab = document.querySelector('[data-coordinated-tab="head"]');
         const bodyTab = document.querySelector('[data-coordinated-tab="body"]');
@@ -1456,9 +1555,10 @@
         document.querySelector('#approach-forward-unit').textContent = personFollow ? 'm/s/相对误差' : 'm/s/rad';
         document.querySelector('#approach-yaw-unit').textContent = personFollow ? 'rad/s/半画宽' : 'rad/s/rad';
         document.querySelector('#body-phase-approach legend').textContent = personFollow ? '身体追踪' : '接近阶段';
-        document.querySelector('.vision-target').hidden = headOnly;
+        document.querySelector('.vision-target').hidden = !showCoordinated;
+        document.querySelector('#body-pid').hidden = !lineFollowing();
         document.querySelector('#head-pid').hidden = !headOnly;
-        document.querySelector('#coordinated-pid').hidden = headOnly;
+        document.querySelector('#coordinated-pid').hidden = !showCoordinated;
       };
       updateCoordinatedFields();
       updateTrackingGuide();
@@ -1467,7 +1567,6 @@
         const previouslyReady = coordinatedFrameReady;
         updateTrackingMarker(ready && Number.isSafeInteger(captured) && captured > 0 && area > 0 ? point : null);
         targetReady = ready;
-        trackingPoint = point && area > 0 ? [point[0], area] : null;
         headTrackingPoint = point || null;
         if (!targetReady) {
           if (!awaitingTarget) {
@@ -1482,17 +1581,6 @@
           return;
         }
         updateTrackingButton();
-        if (tracking) {
-          if (referenceAreaPending && trackingPoint) {
-            referenceArea = trackingPoint[1];
-            referenceAreaPending = false;
-            trackingArea.value = String(referenceArea * 100);
-            trackingAreaValue.textContent = `${(referenceArea * 100).toFixed(2)}%`;
-          }
-          clearTimeout(trackingWatchdog);
-          trackingWatchdog = setTimeout(() => { stopTracking(); setNotice('画面中断，身体追踪已停止', true); }, 600);
-          sendTracking('update', trackingPoint);
-        }
         if (headTracking || (headTrackingPending && !headTrackingCancelled)) {
           armHeadTrackingWatchdog();
           if (headTracking) sendHeadTracking('update', headTrackingPoint);
@@ -1530,15 +1618,23 @@
         if (coordinated) sendCoordinated('update');
         updateTrackingButton();
       });
-      window.addEventListener('vision-source-change', (event) => {
-        if (visionSource === event.detail) return;
-        visionSource = event.detail;
+      const resetVisionTracking = () => {
         targetReady = false;
         trackingPoint = null;
         headTrackingPoint = null;
         updateTrackingMarker(null);
         coordinatedLastCaptured = null;
         stopAllTracking();
+      };
+      window.addEventListener('vision-source-change', (event) => {
+        if (visionSource === event.detail) return;
+        visionSource = event.detail;
+        resetVisionTracking();
+      });
+      window.addEventListener('person-model-change', () => {
+        if (visionSource !== 'object') return;
+        visionDirect.object = false;
+        resetVisionTracking();
       });
       const selectVisionSource = selected => {
         if (selected === visionSource) return;
@@ -1561,6 +1657,7 @@
         if (!Object.hasOwn(visionDirect, source)) return;
         visionDirect[source] = bound;
         if (source === visionSource && !bound) {
+          if (lineFollowing()) stopTracking();
           coordinatedFrameReady = false;
           coordinatedTarget = null;
           if (coordinated) sendCoordinated('update');
@@ -1569,7 +1666,24 @@
         if (bound && source === visionSource) startSelectedTracking();
       });
       window.addEventListener('color-target', (event) => {
-        if (visionSource === 'color') updateTrackingTarget(event.detail);
+        if (visionSource !== 'color') return;
+        if (!lineFollowing()) {
+          updateTrackingTarget(event.detail);
+          return;
+        }
+        const {ready, line} = event.detail;
+        targetReady = ready && Boolean(line);
+        trackingPoint = targetReady && line.center !== null ? [2 * line.center - 1, line.aspect] : null;
+        if (!targetReady) {
+          if (!awaitingTarget) stopTracking();
+          return;
+        }
+        if (tracking) {
+          armLineWatchdog();
+          sendTracking('update', trackingPoint);
+        }
+        updateTrackingButton();
+        startSelectedTracking();
       });
       window.addEventListener('object-target', (event) => {
         if (visionSource === 'object') updateTrackingTarget(event.detail);
@@ -1641,7 +1755,7 @@
         turnInput.disabled = !connected;
         turnRange.disabled = !connected;
         triggerRanges.forEach((range) => { range.disabled = !connected; });
-        stickLocks.forEach(input => { input.disabled = !connected; });
+        updateSticksAvailability();
         obstacleEnabled.disabled = !connected || !confirmedObstacle || obstaclePending;
         obstacleDistance.disabled = !connected || !confirmedObstacle || obstaclePending;
         obstacleDelay.disabled = !connected || !confirmedObstacle || obstaclePending;
@@ -1649,7 +1763,7 @@
           stopAllTracking(false); stopMaze(false);
           headPositionState = 'idle';
           targetHeadHome = null;
-          if (headPositionScope === 'target' && !TARGET_BODY_TRACKING_ENABLED) applyHeadPositionScope('target');
+          if (headPositionScope === 'home') applyHeadPositionScope('home');
           robotConnected = false;
           renderControlStatus({});
           setStatusValue(motorStatus, '--');
@@ -1683,6 +1797,11 @@
       };
       const renderControlStatus = status => {
         const connected = status.robotd_connected === true;
+        headStickPosition.forEach((output, index) => {
+          const count = status.head_positions?.[index];
+          const value = connected && Number.isInteger(count) ? String(count) : '--';
+          if (output.textContent !== value) output.textContent = value;
+        });
         const number = (value, digits, unit) => connected && Number.isFinite(value) ? `${value.toFixed(digits)}${unit}` : '--';
         const health = !connected || typeof status.healthy !== 'boolean' ? '等待数据'
           : status.healthy ? '正常' : status.health_degraded ? '降级' : '异常';
@@ -1719,7 +1838,11 @@
       const updateStatus = (status) => {
         const connected = status.robotd_connected === true;
         const nextTrackingPhase = connected ? status.tracking_phase || null : null;
-        if (nextTrackingPhase !== coordinatedRobotPhase) {
+        const nextPickupStage = connected && pickupPage() && coordinated && pickupRunScope === null
+          ? status.pickup_stage || null : null;
+        if (nextPickupStage !== pickupRobotStage || nextTrackingPhase !== coordinatedRobotPhase) {
+          if (nextPickupStage === 'after' && pickupRobotStage !== 'after') selectPickupStage('pickup_after');
+          pickupRobotStage = nextPickupStage;
           coordinatedRobotPhase = nextTrackingPhase;
           updateTrackingButton();
         }
@@ -1779,7 +1902,7 @@
         updateSettingsState();
       };
       const sendInput = () => {
-        if (!studioActive || !socket || socket.readyState !== WebSocket.OPEN || maze || mazePending) return;
+        if (!studioActive || !controlLeaseReady || !socket || socket.readyState !== WebSocket.OPEN || maze || mazePending) return;
         state.buttons = [];
         const visionInput = isVisionPage()
           && state.active && !sticksBlocked()
@@ -1793,7 +1916,9 @@
           }
           if (!state.buttons.includes('right')) state.buttons.push('right');
         }
-        socket.send(JSON.stringify({ type: "input", seq: ++sequence, ...state }));
+        const head_stick = document.body.dataset.consolePage === 'control' && mode !== 'body_pose'
+          ? headStickAxes : undefined;
+        socket.send(JSON.stringify({ type: "input", seq: ++sequence, ...state, head_stick }));
       };
       function prepareDriveOnEntry() {
         if (restPhase && restPhase !== 'idle' && powerSequence > driveEntryStatusSequence) { driveEntryPending = false; return; }
@@ -1853,7 +1978,7 @@
         if (shutdownConfirm.returnValue === 'confirm') sendAction('shutdown');
       });
       const blockedMotionTarget = target => target instanceof Element && target.closest(
-        '.pad, .skill-actions [data-action], [data-trigger-range], #tracking-start, #maze, #control-action-run, #head-position');
+        '.pad, .skill-actions [data-action], [data-trigger-range], #tracking-start, #pickup-sequence-start, #maze, #control-action-run, #head-position');
       for (const type of ['pointerdown', 'click']) document.addEventListener(type, event => {
         if (!motionUnavailable() || !blockedMotionTarget(event.target)) return;
         event.preventDefault(); event.stopImmediatePropagation(); remindMotion();
@@ -1863,7 +1988,7 @@
         event.preventDefault(); event.stopImmediatePropagation(); remindMotion();
       }, true);
       const applySpeed = (rawValue, send = true) => {
-        const value = Math.max(0, Math.min(0.40, Number(rawValue)));
+        const value = Math.max(0, Math.min(Number(speedInput.max), Number(rawValue)));
         if (!Number.isFinite(value)) return;
         linearSpeed = value;
         const formatted = value.toFixed(2);
@@ -1913,9 +2038,13 @@
         }
       };
       const updateControls = (controls) => {
+        const wasReady = driveControlReady;
         driveControlReady = controls.human_connected === true && controls.armed === true;
         const owner = controls.human_owner;
-        if (!controls.human_connected || (humanOwner === 'web' && owner !== 'web')) zero();
+        if ((wasReady && !driveControlReady) || (humanOwner === 'web' && owner !== 'web')) {
+          keys.clear();
+          zero();
+        }
         humanOwner = owner;
         setText(document.querySelector("#human-owner"), !controls.human_connected
           ? "连接失效" : owner === "gamepad"
@@ -1970,14 +2099,14 @@
           button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
         });
         axisLockPad.classList.toggle("axis-lock-mode", displayMode() === "drive");
+        updateSticksAvailability();
         updateAxisLockIndicator();
         if (visionSwitch) { visionModeRequested = false; sendInput(); }
         if (announce) setNotice(`已切换到${copy.label}。`);
       };
       const updateKnobs = () => {
         knobs.forEach((knob, side) => {
-          const x = state[`${side}_x`];
-          const y = state[`${side}_y`];
+          const [x, y] = side === 'head' ? headStickKnob : [state[`${side}_x`], state[`${side}_y`]];
           knob.style.left = `${50 + x * 38}%`;
           knob.style.top = `${50 - y * 38}%`;
         });
@@ -1986,8 +2115,7 @@
       const connect = () => {
         clearTimeout(reconnectTimer);
         const scheme = location.protocol === "https:" ? "wss" : "ws";
-        socket = new WebSocket(`${scheme}://${location.host}/control`);
-        socket.onopen = () => { zero(); setConnected(true, ""); };
+        socket = new WebSocket(`${scheme}://${location.host}/control?client=web`);
         socket.onmessage = (event) => {
           let message;
           try { message = JSON.parse(event.data); } catch { return; }
@@ -1997,12 +2125,17 @@
               accepted: message.accepted, reason: message.reason }, new URL(document.referrer).origin);
             studioLeaveRequest = null;
           } else if (message.type === "lease") {
+            controlLeaseReady = true;
+            controlBusy.hidden = true;
+            setText(controlBusy, '');
+            zero();
+            setConnected(true, "");
             window.__visionControlToken = message.vision_token || null;
             window.dispatchEvent(new Event('vision-control-token'));
             targetHeadHome = Number.isInteger(message.head_home_pitch_raw)
               && message.head_home_pitch_raw >= 1024 && message.head_home_pitch_raw <= 2250
               ? message.head_home_pitch_raw : null;
-            if (headPositionScope === 'target' && !TARGET_BODY_TRACKING_ENABLED) applyHeadPositionScope('target');
+            if (headPositionScope === 'home') applyHeadPositionScope('home');
             const draft = settingsDirty ? collectSettings() : null;
             const headDraft = headSettingsDirty ? collectHeadSettings() : null;
             const hadTrackingDraft = trackingUnsaved();
@@ -2017,6 +2150,7 @@
               ? message.person_tracking_phase_defaults : phaseDefaults;
             const receivedProfiles = {
               target: [message.coordinated_settings, message.tracking_phases],
+              pickup_after: [message.pickup_after_settings, message.pickup_after_phases],
               person: [message.person_coordinated_settings || message.coordinated_settings,
                 message.person_tracking_phases || message.tracking_phases],
             };
@@ -2148,7 +2282,8 @@
               trackingCancelled = trackingStopSent = false;
               tracking = message.accepted && targetReady && !cancelled;
               if (tracking) {
-                trackingWatchdog = setTimeout(() => { stopTracking(); setNotice('画面中断，身体追踪已停止', true); }, 600);
+                armLineWatchdog();
+                sendTracking('update', trackingPoint);
               } else if (message.accepted && !stopSent) {
                 sendTracking('stop');
               }
@@ -2163,7 +2298,7 @@
             if (studioLeaveRequest !== null || (message.action === 'stop' && headPositionState !== 'stopping')) return;
             if (message.action === 'start') {
               headPositionState = message.accepted ? 'active' : 'idle';
-              if (message.accepted && (headPositionWanted || awaitingTarget)) sendHeadPosition('update');
+              if (message.accepted && headPositionWanted) sendHeadPosition('update');
               if (!message.accepted) {
                 headPositionWanted = false;
                 setNotice(`头部定位不可用：${message.reason || '机器人拒绝请求'}`, true);
@@ -2268,6 +2403,11 @@
             const text = message.accepted ? `已执行：${action}。` : `未执行：${action}。${reason}`;
             setNotice(text, !message.accepted);
           } else if (message.type === "error") {
+            if (message.code === "control_busy") {
+              setText(controlBusy, message.message);
+              controlBusy.hidden = false;
+              return;
+            }
             if (visionModeRequested) { keys.clear(); zero(); }
             setNotice(`控制不可用：${message.message}`, true);
             obstaclePending = false;
@@ -2278,6 +2418,7 @@
           }
         };
         socket.onclose = () => {
+          controlLeaseReady = false;
           window.__visionControlToken = null;
           window.dispatchEvent(new Event('vision-control-token'));
           driveEntryInFlight = false;
@@ -2336,31 +2477,52 @@
       }));
       document.querySelectorAll(".pad").forEach((pad) => {
         const side = pad.dataset.stick;
+        const lock = stickLocks.get(side);
+        const blocked = () => sticksBlocked() || (side === 'head'
+          && (mode === 'body_pose' || document.body.dataset.consolePage !== 'control'));
         knobs.set(side, pad.querySelector(".knob"));
         const setFromPointer = (event) => {
           const rect = pad.getBoundingClientRect();
-          state[`${side}_x`] = clamp(((event.clientX - rect.left) / rect.width) * 2 - 1);
-          state[`${side}_y`] = clamp(1 - ((event.clientY - rect.top) / rect.height) * 2);
+          const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          const y = 1 - ((event.clientY - rect.top) / rect.height) * 2;
+          if (side === 'head') {
+            const radius = Math.max(1, Math.hypot(x, y));
+            headStickKnob[0] = x / radius;
+            headStickKnob[1] = y / radius;
+            headStickAxes.fill(0);
+            const deadzone = 0.1;
+            const axis = Math.abs(x) >= Math.abs(y) ? 0 : 1;
+            const deflection = headStickKnob[axis];
+            if (Math.abs(deflection) > deadzone) {
+              headStickAxes[axis] = Math.sign(deflection) * (Math.abs(deflection) - deadzone) / (1 - deadzone);
+            }
+          } else {
+            state[`${side}_x`] = clamp(x);
+            state[`${side}_y`] = clamp(y);
+          }
           updateKnobs();
           sendInput();
         };
         pad.addEventListener("pointerdown", (event) => {
-          if (!state.active || sticksBlocked() || pad.dataset.pointer) return;
+          if (!state.active || blocked() || pad.dataset.pointer) return;
           pad.dataset.pointer = event.pointerId;
           pad.setPointerCapture(event.pointerId);
           pad.classList.add("is-active");
           setFromPointer(event);
         });
         pad.addEventListener("pointermove", (event) => {
-          if (state.active && !sticksBlocked() && pad.hasPointerCapture(event.pointerId)) setFromPointer(event);
+          if (state.active && !blocked() && pad.hasPointerCapture(event.pointerId)) setFromPointer(event);
         });
         const release = (event) => {
           if (pad.dataset.pointer !== String(event.pointerId)) return;
           delete pad.dataset.pointer;
           if (pad.hasPointerCapture(event.pointerId)) pad.releasePointerCapture(event.pointerId);
           pad.classList.remove("is-active");
-          if (event.type !== 'pointerup' || !isVisionPage() || !stickLocks.get(side).checked) {
-            stickLocks.get(side).checked = false;
+          if (side === 'head') {
+            headStickAxes.fill(0);
+            headStickKnob.fill(0);
+          } else if (event.type !== 'pointerup' || !isVisionPage() || !lock.checked) {
+            lock.checked = false;
             state[`${side}_x`] = state[`${side}_y`] = 0;
           }
           updateKnobs();
@@ -2374,6 +2536,7 @@
       actionButtons.forEach(button => {
         button.addEventListener('click', () => {
           const action = button.dataset.action;
+          if (action === 'center_head' && (!state.active || headCenterUnavailable())) return;
           if (action === 'ground_pick' && state.active && studioActive
               && !maze && !mazePending && socket?.readyState === WebSocket.OPEN) {
             schedulePickMouth(action);
@@ -2461,10 +2624,11 @@
       });
       window.addEventListener('console-page-changed', () => {
         if (document.body.dataset.consolePage !== 'control') cancelPickMouth(true);
+        resetVisionTracking();
         driveEntryPending = isMotionPage();
         if (driveEntryPending) driveEntryStatusSequence = powerSequence;
         renderMotionPower();
-        if (document.body.dataset.consolePage !== 'target') {
+        if (!document.body.hasAttribute('data-color-vision')) {
           colorChosen = false;
           colorPresetSelect.value = '';
           colorPresetName.value = '';
@@ -2472,20 +2636,21 @@
         }
         if (isVisionPage()) {
           const scope = document.body.dataset.consolePage === 'person' ? 'person' : 'target';
-          if (scope !== headPositionScope) {
-            headPositionScope = scope;
-            applyHeadPositionScope(scope);
-            if (headPositionState === 'active' && headPositionTarget !== null) sendHeadPosition('update');
-          }
+          if (pickupPage()) selectPickupStage('target');
           if (scope !== trackingScope) {
             applyTrackingProfile(scope);
             updateSettingsState();
           }
-          const source = document.body.dataset.consolePage === 'target' ? 'color' : 'object';
+          if (currentHeadPositionScope() !== headPositionScope) {
+            headPositionScope = currentHeadPositionScope();
+            applyHeadPositionScope(headPositionScope);
+            if (headPositionState === 'active' && headPositionTarget !== null) sendHeadPosition('update');
+          }
+          const source = scope === 'person' ? 'object' : 'color';
           selectVisionSource(source);
-          if (source === 'object') window.dispatchEvent(new CustomEvent('vision-recognition-start', {detail: source}));
-        } else {
-          stopAllTracking();
+          if (studioActive && source === 'object') {
+            window.dispatchEvent(new CustomEvent('vision-recognition-start', {detail: source}));
+          }
         }
         if (document.body.dataset.consolePage !== 'maze') stopMaze();
         headPositionWanted = true;

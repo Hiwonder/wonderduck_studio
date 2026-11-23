@@ -16,8 +16,9 @@ from app.robot.workspace_rest import ensure_rest
 
 
 MAINTENANCE_WORKSPACES = frozenset(("action", "debug", "calibration"))
-WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "control", "target", "person", "maze", "system", "network", "models"))
-MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "maze", "person", "target"))
+AUTOMATIC_WORKSPACES = frozenset(("target", "pickup", "line", "person", "maze"))
+WORKSPACES = MAINTENANCE_WORKSPACES | AUTOMATIC_WORKSPACES | frozenset(("status", "control", "system", "network", "models"))
+MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | AUTOMATIC_WORKSPACES | frozenset(("status",))
 REST_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status",))
 OBSERVATION_WORKSPACES = REST_WORKSPACES
 SETTINGS_WORKSPACES = frozenset(("system", "network"))

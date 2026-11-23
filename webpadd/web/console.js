@@ -3,7 +3,8 @@
   const body = document.body;
   const expanded = matchMedia('(min-width: 1100px) and (min-height: 740px)');
   const notify = () => window.dispatchEvent(new CustomEvent('console-view-change'));
-  const isVisionPage = page => page === 'target' || page === 'person';
+  const colorPages = new Set(['target', 'pickup', 'line']);
+  const isVisionPage = page => colorPages.has(page) || page === 'person';
   fetch('/licenses/source-info').then(response => response.ok ? response.json() : null).then(data => {
     if (!/^[0-9a-f]{40}$/.test(data?.revision || '')) return;
     document.querySelectorAll('[data-studio-source]').forEach(link => {
@@ -121,7 +122,7 @@
     if (isVisionPage(body.dataset.consolePage) || (expanded.matches && body.dataset.consolePage === 'control')) {
       document.querySelector('.camera-column').append(sticks);
       sticks.hidden = body.dataset.consolePage === 'person'
-        || (body.dataset.consolePage === 'target' && document.documentElement.dataset.debugMode === 'off');
+        || (colorPages.has(body.dataset.consolePage) && document.documentElement.dataset.debugMode === 'off');
     } else {
       sticksHome.before(sticks);
       sticks.hidden = !expanded.matches && body.dataset.operatorTab !== 'sticks';
@@ -139,12 +140,17 @@
       panel.hidden = !(panelAttribute === 'data-operator-panel' && expanded.matches)
         && panel.getAttribute(panelAttribute) !== panelValue;
     }
+    if (panelAttribute === 'data-console-panel') {
+      body.toggleAttribute('data-vision-page', isVisionPage(value));
+      body.toggleAttribute('data-color-vision', colorPages.has(value));
+    }
     if (panelAttribute === 'data-console-panel' && isVisionPage(value)) {
-      const title = value === 'target' ? '目标追踪' : '行人跟随';
+      const button = document.querySelector(`button[data-page="${value}"]`);
+      const title = button.querySelector('span').textContent;
       document.querySelector('#vision-heading').textContent = title;
       document.querySelector('#console-page-vision').setAttribute('aria-label', `${title}参数`);
       document.querySelector('#console-page-vision .section-icon use')
-        .setAttribute('href', value === 'target' ? '#icon-eye' : '#icon-user-round-search');
+        .setAttribute('href', button.querySelector('use').getAttribute('href'));
     }
   }
   function resetCompactView() {
@@ -191,6 +197,12 @@
   }
   placeSticks();
   let studioOrigin = null, latestFeedback = null;
+  const softwareUpdate = document.querySelector('#check-software-update');
+  softwareUpdate.addEventListener('click', () => {
+    if (!studioOrigin || body.dataset.consolePage !== 'system') return;
+    softwareUpdate.disabled = true;
+    window.parent.postMessage({ type: 'studio-software-update-request' }, studioOrigin);
+  });
   const pendingErrors = [];
   const feedbackNodes = ['notice', 'settings-status', 'connection', 'coordinated-status', 'maze-status', 'camera-status']
     .map(id => document.getElementById(id));
@@ -276,7 +288,15 @@
     if (window.parent === window || event.source !== window.parent || !document.referrer) return;
     const parent = new URL(document.referrer);
     if (parent.protocol !== location.protocol || parent.hostname !== location.hostname || event.origin !== parent.origin) return;
-    if (event.data?.type === 'studio-workspace' && ['control', 'target', 'person', 'maze', 'system'].includes(event.data.page)) {
+    if (event.data?.type === 'studio-workspace-preview' || event.data?.type === 'studio-workspace') {
+      const page = event.data.page;
+      const button = typeof page === 'string' && document.querySelector(`button[data-page="${CSS.escape(page)}"]`);
+      if (!button) return;
+      if (event.data.type === 'studio-workspace-preview') {
+        window.dispatchEvent(new Event('studio-preview'));
+        button.click();
+        return;
+      }
       if (document.documentElement.dataset.studioEmbedded === 'true') {
         const firstHandshake = studioOrigin === null;
         studioOrigin = event.origin;
@@ -292,10 +312,9 @@
       }
       const enabled = event.data.enabled !== false;
       if (!enabled) window.dispatchEvent(new Event('studio-preview'));
-      const button = document.querySelector(`button[data-page="${event.data.page}"]`);
-      button?.click();
+      button.click();
       if (enabled) window.dispatchEvent(new Event('studio-enter'));
-      if (button && Number.isSafeInteger(event.data.requestId)) {
+      if (Number.isSafeInteger(event.data.requestId)) {
         window.parent.postMessage({ type: 'studio-workspace-ready', page: event.data.page,
           requestId: event.data.requestId }, event.origin);
       }
@@ -303,7 +322,7 @@
       window.dispatchEvent(new CustomEvent('studio-leave', { detail: event.data.requestId }));
     } else if (event.data?.type === 'studio-debug-mode' && typeof event.data.enabled === 'boolean') {
       if (!event.data.enabled && document.documentElement.dataset.debugMode !== 'off'
-          && body.dataset.consolePage === 'target') notify();
+          && colorPages.has(body.dataset.consolePage)) notify();
       document.documentElement.dataset.debugMode = event.data.enabled ? 'on' : 'off';
       placeSticks();
     } else if (event.data?.type === 'studio-theme' && ['light', 'dark'].includes(event.data.theme)) {
@@ -313,7 +332,11 @@
       document.getElementById('device-hardware-version').textContent = versions?.hardware_version || '未配置';
       document.getElementById('device-image-version').textContent = versions?.image_version || '未配置';
       document.getElementById('device-software-version').textContent = versions?.software_version || '未读取';
+      softwareUpdate.hidden = event.data.softwareUpdate !== true;
+      softwareUpdate.disabled = event.data.busy === true;
       document.getElementById('device-imu-firmware-version').textContent = versions?.imu_firmware_version || '未读取';
+    } else if (event.data?.type === 'studio-software-update-busy') {
+      softwareUpdate.disabled = event.data.busy === true;
     } else if (event.data?.type === 'studio-network-announcement-result'
         && event.data.requestId === announcementRequestId) {
       clearTimeout(announcementTimer);
@@ -353,8 +376,10 @@
         let value = panel.getAttribute(panelAttribute);
         if (panelAttribute === 'data-console-panel' && value === 'vision') {
           const source = field.closest('[data-vision-fields]')?.dataset.visionFields;
-          value = source ? (source === 'object' ? 'person' : 'target')
-            : isVisionPage(body.dataset.consolePage) ? body.dataset.consolePage : 'target';
+          const current = body.dataset.consolePage;
+          value = source === 'object' ? 'person'
+            : source === 'color' && !colorPages.has(current) ? 'target'
+            : isVisionPage(current) ? current : 'target';
         }
         document.querySelector(`button[${attribute}="${value}"]`).click();
       }

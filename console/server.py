@@ -12,6 +12,7 @@ from pathlib import Path
 import queue
 import shutil
 import signal
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,10 +26,11 @@ from app.models.update_control import UpdateControl
 from app.robot.controller import Controller, DemoHardware
 from app.robot.protocol import REGISTERS
 from app.robot.robotd_state import query_robotd
+from app.robot.studio import WORKSPACES
 from app.sensors.camera import Camera
 from app.sensors.qmi_imu import AuxiliaryImu
 from app.sensors.tof import TofReader
-from app.system import network, resources, service_control
+from app.system import network, resources, service_control, software_update
 from app.system.runtime_config import ModelPaletteStore, NetworkAnnouncementStore, robot_root, software_version
 from app.system.secure_transport import SecureTransport
 
@@ -167,6 +169,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
+        if path == "/api/software-update":
+            if (not getattr(self.server, "studio", False) or self.controller.demo
+                    or not software_update.available(self.server.robot_root)):
+                self.send_json({"error": "当前服务不提供软件更新"}, 404)
+                return
+            try:
+                self.send_json(software_update.status(self.server.robot_root))
+            except (OSError, subprocess.SubprocessError) as error:
+                self.send_json({"error": str(error)}, 503)
+            return
         if path == "/api/info":
             native_readonly = getattr(self.controller, "readonly", False)
             readonly = native_readonly
@@ -192,6 +204,9 @@ class Handler(BaseHTTPRequestHandler):
                                 demo=self.controller.demo, hz=self.controller.hz,
                                 imu_source=self.controller.imu_source, readonly=readonly, device_versions=versions,
                                 studio=getattr(self.server, "studio", False),
+                                workspaces=sorted(WORKSPACES) if getattr(self.server, "studio", False) else None,
+                                supports_software_update=(getattr(self.server, "studio", False) and not self.controller.demo
+                                    and software_update.available(self.server.robot_root)),
                                 supports_service_restart=(getattr(self.server, "studio", False)
                                     and not self.controller.demo),
                                 supports_shutdown=(getattr(self.server, "studio", False)
@@ -417,6 +432,18 @@ class Handler(BaseHTTPRequestHandler):
                     raise PermissionError("当前服务不提供重启操作")
                 self.send_json(service_control.restart_robotd())
                 return
+            if path == "/api/software-update":
+                if (not getattr(self.server, "studio", False) or self.controller.demo
+                        or not software_update.available(self.server.robot_root)):
+                    raise PermissionError("当前服务不提供软件更新")
+                if self.headers.get("X-Studio-Workspace") != "system":
+                    raise PermissionError("请先打开系统设置")
+                with self.controller.lock:
+                    if self.controller.client_workspaces.get(self.client, (None,))[0] != "system":
+                        raise PermissionError("请先打开系统设置")
+                self.send_json(software_update.handle(self.server.robot_root, self.controller.path, command,
+                                                      self.server.server_address[1]))
+                return
             if path == "/api/control-actions":
                 if not getattr(self.server, "studio", False) or not hasattr(self.controller, "start_library_action"):
                     raise PermissionError("当前服务不提供动作库播放")
@@ -563,8 +590,19 @@ def create_controller(args):
             return Hardware(args.serial, args.source, args.layout, args.full_servo_range,
                             args.imu_source, home_policy=args.home_policy)
 
+        def create_action_hardware():
+            hardware = create_hardware()
+            for device_id in (35, 36):
+                if device_id not in hardware.ids:
+                    try:
+                        hardware.execute(dict(action="scan_servo", id=device_id))
+                    except (OSError, RuntimeError, ValueError) as error:
+                        logging.warning("Action editor could not probe servo %d: %s", device_id, error)
+            return hardware
+
         def factory(workspace):
-            return Controller(create_hardware(), args.hz, demo=args.demo, hardware_factory=create_hardware,
+            hardware_factory = create_action_hardware if workspace == "action" else create_hardware
+            return Controller(hardware_factory(), args.hz, demo=args.demo, hardware_factory=hardware_factory,
                               port=args.serial, full_servo_range=args.full_servo_range, maintenance=True,
                               imu_only=workspace == "calibration")
 
