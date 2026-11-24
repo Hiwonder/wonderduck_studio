@@ -546,8 +546,9 @@
         coordinatedSettingsReady = profile.coordinatedReady;
         phaseReady = profile.phaseReady;
         coordinatedLeaseReady = coordinatedSettingsReady && phaseReady;
-        coordinatedInputs.forEach(input => { input.disabled = !coordinatedSettingsReady; });
-        phaseInputs.forEach(input => { input.disabled = !phaseReady; });
+        const editable = scope === 'person' || TARGET_BODY_TRACKING_ENABLED;
+        coordinatedInputs.forEach(input => { input.disabled = !editable || !coordinatedSettingsReady; });
+        phaseInputs.forEach(input => { input.disabled = !editable || !phaseReady; });
         const previous = applyingSettings;
         applyingSettings = true;
         if (coordinatedSettingsReady) applyCoordinatedSettings(profile.coordinated);
@@ -1299,7 +1300,11 @@
       };
       const reconcileHeadPosition = () => {
         const visible = isVisionPage();
-        headPositionSetting.hidden = !visible || targetHeadOnly();
+        const headOnly = targetHeadOnly();
+        headPositionSetting.hidden = !visible;
+        headPosition.readOnly = headOnly;
+        document.querySelector('#head-position-home').hidden = !headOnly;
+        document.querySelector('#head-position-range').hidden = headOnly;
         // The server owns the head-home handoff until studio_leave completes.
         if (studioLeaveRequest !== null) return;
         const waitingForTarget = awaitingTarget && !targetReady && headPositionState !== 'idle';
@@ -1436,14 +1441,16 @@
         const targetTracking = document.body.dataset.consolePage === 'target';
         const personFollow = document.body.dataset.consolePage === 'person';
         const headOnly = targetHeadOnly();
-        document.querySelectorAll('.coordinated-goal').forEach(field => { field.hidden = headOnly; });
+        document.querySelectorAll('.coordinated-goal').forEach(field => { field.hidden = !isVisionPage(); });
         document.querySelector('#follow-stop-area-setting').hidden = !personFollow;
         document.querySelector('#follow-area-deadzone-setting').hidden = !personFollow;
         document.querySelector('#follow-stop-distance-setting').hidden = !personFollow;
         document.querySelector('#follow-distance-deadzone-setting').hidden = !personFollow;
         document.querySelectorAll('.coordinated-arrival, .coordinated-mouth').forEach(field => {
-          field.hidden = !targetTracking || headOnly;
+          field.hidden = !targetTracking;
         });
+        document.querySelector('#inactive-arrival-heading').hidden = !headOnly;
+        document.querySelector('#inactive-coordinated-heading').hidden = !headOnly;
         const headTab = document.querySelector('[data-coordinated-tab="head"]');
         const bodyTab = document.querySelector('[data-coordinated-tab="body"]');
         if (personFollow && headTab.getAttribute('aria-selected') === 'true') bodyTab.click();
@@ -1456,9 +1463,9 @@
         document.querySelector('#approach-forward-unit').textContent = personFollow ? 'm/s/相对误差' : 'm/s/rad';
         document.querySelector('#approach-yaw-unit').textContent = personFollow ? 'rad/s/半画宽' : 'rad/s/rad';
         document.querySelector('#body-phase-approach legend').textContent = personFollow ? '身体追踪' : '接近阶段';
-        document.querySelector('.vision-target').hidden = headOnly;
+        document.querySelector('.vision-target').hidden = !isVisionPage();
         document.querySelector('#head-pid').hidden = !headOnly;
-        document.querySelector('#coordinated-pid').hidden = headOnly;
+        document.querySelector('#coordinated-pid').hidden = !isVisionPage();
       };
       updateCoordinatedFields();
       updateTrackingGuide();

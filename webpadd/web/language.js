@@ -196,6 +196,8 @@ const ENGLISH = new Map(Object.entries({
   '转动测距': 'Turn and measure', '转向 P': 'Turning P', '转向 PID': 'Turning PID',
   '转头步进 (°/周期)': 'Head step (°/cycle)', '转弯预转 (ms)': 'Initial turn (ms)',
   '追踪参数': 'Tracking settings', '追踪死区': 'Tracking deadband', '采样时间 (ms)': 'Sample time (ms)',
+  '联合追踪到位参数（未启用）': 'Combined tracking arrival settings (inactive)',
+  '联合追踪控制参数（未启用）': 'Combined tracking control settings (inactive)',
   '预转': 'Initial turn',
   '提高速度': 'Increase speed', '降低速度': 'Decrease speed', '模型跟随 IMU 姿态': 'Model follows IMU orientation',
   'IMU 三轴姿态角实时曲线': 'Live IMU orientation', 'WonderDuck 设备控制台': 'WonderDuck device console',
