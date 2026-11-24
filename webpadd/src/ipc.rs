@@ -132,12 +132,40 @@ pub(super) async fn robotd_worker(
                 }
                 continue;
             }
-            let (held, tracking_held) = {
+            let (refresh, maze) = {
                 let state = control.lock().await;
-                (state.human_held, state.coordinated_tracking_started && state.fresh(Instant::now()))
+                (state.human_held && !state.owner_closing,
+                    state.maze.filter(|_| state.human_held && !state.owner_closing)
+                        .zip(state.owner).map(|(params, session)| (params, session, state.human_generation)))
             };
-            let refresh = held || tracking_held;
             let (reader, writer) = connection.as_mut().expect("connected above");
+            if let Some((mut params, session, generation)) = maze {
+                params.action = proto::MotionTrackingAction::Update;
+                let result = timeout(Duration::from_millis(400),
+                    send_request::<proto::IntentResult>(reader, writer, next_id, &proto::Call::RobotMaze(params))).await;
+                next_id += 1;
+                match result {
+                    Ok(Ok(result)) if result.accepted => {}
+                    Ok(Ok(result)) => {
+                        let mut state = control.lock().await;
+                        if state.owner == Some(session) && state.human_generation == generation {
+                            state.maze = None;
+                            let _ = feedback.send((session, ServerMessage::MazeResult {
+                                action: proto::MotionTrackingAction::Update, accepted: false, reason: result.reason,
+                            }));
+                        }
+                    }
+                    result => {
+                        tracing::warn!(?result, "lost robotd while refreshing maze");
+                        connection = None;
+                        connected.send_replace(false);
+                        let mut state = control.lock().await;
+                        state.lose_human_control();
+                        state.human_owner = None;
+                    }
+                }
+                continue;
+            }
             let result = human_request(
                 reader,
                 writer,
@@ -165,7 +193,6 @@ pub(super) async fn robotd_worker(
                             || result.owner != Some(proto::HumanControlSource::Web))
                     {
                         state.lose_human_control();
-                        if tracking_held { state.coordinated_tracking_started = false; }
                     }
                 }
                 Err(error) => {
@@ -195,31 +222,40 @@ pub(super) async fn robotd_worker(
         }
         let (held, generation) = {
             let state = control.lock().await;
-            (state.human_held, state.human_generation)
+            (state.human_held && !state.owner_closing, state.human_generation)
         };
         let (reader, writer) = connection.as_mut().expect("connected above");
         let failed = match command {
             RobotCommand::VisionUpdate { session, binding, generation } => {
-                let params = {
+                let call = {
                     let mut state = control.lock().await;
                     crate::vision_relay::take_update(&mut state, session, binding, generation)
                 };
-                if let Some(params) = params {
+                if let Some(call) = call {
+                    let line = matches!(call, proto::Call::RobotMotionTracking(_));
                     let result = timeout(Duration::from_millis(400),
                         request_action(reader, writer, &mut next_id,
-                            vec![proto::Call::RobotCoordinatedTracking(params)], false)).await;
+                            vec![call], false)).await;
                     match result {
                         Ok(Ok(result)) if result.accepted => false,
                         Ok(Ok(result)) => {
                             let mut state = control.lock().await;
-                            if state.owner == Some(session) && state.coordinated_tracking_generation == generation {
-                                state.coordinated_tracking_started = false;
+                            if state.owner == Some(session) && state.vision_generation == generation {
                                 state.vision_pending = None;
-                                if let Some(recorder) = &state.person_vision_record { recorder.set_following(false); }
-                                if let Some(recorder) = &state.target_vision_record { recorder.set_following(false); }
-                                let _ = feedback.send((session, ServerMessage::CoordinatedTrackingResult {
-                                    action: proto::MotionTrackingAction::Update, accepted: false, reason: result.reason,
-                                }));
+                                let message = if line {
+                                    state.motion_tracking = None;
+                                    ServerMessage::MotionTrackingResult {
+                                        action: proto::MotionTrackingAction::Update, accepted: false, reason: result.reason,
+                                    }
+                                } else {
+                                    state.coordinated_tracking_started = false;
+                                    if let Some(recorder) = &state.person_vision_record { recorder.set_following(false); }
+                                    if let Some(recorder) = &state.target_vision_record { recorder.set_following(false); }
+                                    ServerMessage::CoordinatedTrackingResult {
+                                        action: proto::MotionTrackingAction::Update, accepted: false, reason: result.reason,
+                                    }
+                                };
+                                let _ = feedback.send((session, message));
                             }
                             false
                         }

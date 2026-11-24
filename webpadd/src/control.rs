@@ -506,9 +506,7 @@ pub(super) struct ControlState {
     pub peers: HashMap<u64, ControlPeer>,
     pub owner_closing: bool,
     pub owner_idle_since: Option<Instant>,
-    pub motion_tracking_active: bool,
-    pub autonomous_updated: Option<Instant>,
-    pub autonomous_deactivated: bool,
+    pub motion_tracking: Option<proto::MotionTrackingParams>,
     pub stops_pending: usize,
     pub input: Input,
     pub last_input: Option<Instant>,
@@ -527,12 +525,12 @@ pub(super) struct ControlState {
     pub human_blocked: bool,
     pub human_acquiring: bool,
     pub human_actions: usize,
-    pub maze_active: bool,
+    pub maze: Option<proto::MazeParams>,
     pub head_tracking_started: bool,
     pub head_position: Option<u16>,
     head_stick: HeadStick,
     pub coordinated_tracking_started: bool,
-    pub coordinated_tracking_generation: u64,
+    pub vision_generation: u64,
     pub vision_pending: Option<(u64, u64, u64)>,
     pub coordinated_params: Option<proto::CoordinatedTrackingParams>,
     pub person_vision_record: Option<crate::vision_record::Recorder>,
@@ -555,9 +553,7 @@ impl Default for ControlState {
             peers: HashMap::new(),
             owner_closing: false,
             owner_idle_since: None,
-            motion_tracking_active: false,
-            autonomous_updated: None,
-            autonomous_deactivated: false,
+            motion_tracking: None,
             stops_pending: 0,
             input: Input::default(),
             last_input: None,
@@ -576,12 +572,12 @@ impl Default for ControlState {
             human_blocked: true,
             human_acquiring: false,
             human_actions: 0,
-            maze_active: false,
+            maze: None,
             head_tracking_started: false,
             head_position: None,
             head_stick: HeadStick::default(),
             coordinated_tracking_started: false,
-            coordinated_tracking_generation: 0,
+            vision_generation: 0,
             vision_pending: None,
             coordinated_params: None,
             person_vision_record: None,
@@ -607,9 +603,6 @@ impl ControlState {
     /// Preserve short press/release edges between 50 Hz output ticks.
     pub fn receive(&mut self, input: Input, active: bool, now: Instant) {
         self.active = active;
-        if !active && self.autonomous_active() {
-            self.autonomous_deactivated = true;
-        }
         if active && input.neutral() {
             self.owner_idle_since.get_or_insert(now);
         } else {
@@ -706,7 +699,7 @@ impl ControlState {
     }
 
     pub fn autonomous_active(&self) -> bool {
-        self.maze_active || self.motion_tracking_active || self.head_tracking_started
+        self.maze.is_some() || self.motion_tracking.is_some() || self.head_tracking_started
             || self.coordinated_tracking_started
     }
 
@@ -715,27 +708,6 @@ impl ControlState {
             && self.human_actions == 0 && !self.autonomous_active()
             && (!self.fresh(now) || self.owner_idle_since.is_some_and(|since|
                 now.saturating_duration_since(since) >= CONTROL_IDLE_RELEASE))
-    }
-
-    pub fn autonomous_stop_reason(&self, now: Instant) -> Option<&'static str> {
-        if !self.human_held || self.owner_closing || self.human_actions != 0
-            || !self.autonomous_active()
-        {
-            return None;
-        }
-        if self.autonomous_deactivated || !self.active {
-            return Some("client inactive");
-        }
-        if self.maze_active {
-            return self.autonomous_updated
-                .is_none_or(|at| now.saturating_duration_since(at) >= proto::AUTONOMOUS_SESSION_TIMEOUT)
-                .then_some("maze update timed out");
-        }
-        (!self.tracking_input_fresh(now)).then_some("tracking heartbeat timed out")
-    }
-
-    pub fn tracking_input_fresh(&self, now: Instant) -> bool {
-        !self.autonomous_deactivated && self.input_fresh(now, proto::AUTONOMOUS_SESSION_TIMEOUT)
     }
 
     pub fn cancel(&mut self) {
@@ -758,14 +730,12 @@ impl ControlState {
         self.human_generation = self.human_generation.wrapping_add(1);
         self.coordinated_tracking_started = false;
         self.coordinated_params = None;
-        self.motion_tracking_active = false;
+        self.motion_tracking = None;
         self.vision_pending = None;
         if let Some(recorder) = &self.person_vision_record { recorder.set_following(false); }
         if let Some(recorder) = &self.target_vision_record { recorder.set_following(false); }
         self.human_held = false;
-        self.maze_active = false;
-        self.autonomous_updated = None;
-        self.autonomous_deactivated = false;
+        self.maze = None;
         self.head_position = None;
         self.human_blocked = true;
         self.cancel();
@@ -828,7 +798,7 @@ impl ControlState {
             && status.limp != Some(true) && status.fallen != Some(true)
             && status.rest_phase == Some(proto::RestPhase::Idle)
             && matches!(status.policy.as_deref(), Some("walk" | "stand"))
-            && self.mode != MotionMode::BodyPose && !self.maze_active
+            && self.mode != MotionMode::BodyPose && self.maze.is_none()
             && !self.head_tracking_started && !self.coordinated_tracking_started
             && let Some(axes) = self.input.head_stick
             && (axes != [0.0; 2] || other_head_axes.iter().all(|axis| axis.abs() < 0.05))
@@ -962,44 +932,26 @@ mod ownership_tests {
     use super::*;
 
     #[test]
-    fn tracking_tolerates_input_jitter_and_stops_when_the_client_deactivates() {
+    fn inactive_manual_input_keeps_autonomous_ownership_until_disconnect() {
         let now = Instant::now();
         let mut control = ControlState {
             owner: Some(1),
             human_held: true,
             connected: true,
+            armed: true,
             coordinated_tracking_started: true,
             last_input: Some(now),
             ..Default::default()
         };
-        let delayed = now + Duration::from_millis(220);
-        assert!(!control.fresh(delayed));
-        assert!(control.tracking_input_fresh(delayed));
-        assert!(control.autonomous_stop_reason(delayed).is_none());
-        assert!(!control.release_due(delayed));
-        assert_eq!(control.autonomous_stop_reason(now + Duration::from_millis(1001)),
-            Some("tracking heartbeat timed out"));
-
-        control.receive(Input::default(), false, delayed);
-        control.receive(Input::default(), true, delayed);
-        assert_eq!(control.autonomous_stop_reason(delayed), Some("client inactive"));
-        assert!(!control.tracking_input_fresh(delayed));
-    }
-
-    #[test]
-    fn maze_uses_its_own_update_deadline() {
-        let now = Instant::now();
-        let control = ControlState {
-            owner: Some(1),
-            human_held: true,
-            connected: true,
-            maze_active: true,
-            autonomous_updated: Some(now),
-            ..Default::default()
-        };
-        assert!(control.autonomous_stop_reason(now + Duration::from_millis(650)).is_none());
-        assert_eq!(control.autonomous_stop_reason(now + proto::AUTONOMOUS_SESSION_TIMEOUT),
-            Some("maze update timed out"));
+        control.receive(Input::default(), false, now);
+        let later = now + Duration::from_secs(10);
+        assert!(!control.fresh(later));
+        assert!(!control.armed);
+        assert!(control.autonomous_active());
+        assert!(!control.release_due(later));
+        control.lose_human_control();
+        assert!(!control.autonomous_active());
+        assert!(!control.human_held);
     }
 
     #[test]

@@ -266,7 +266,7 @@ export function createWorkspaceController({
       if (operation?.restoring) operation.abort.abort();
     } else if (queued) {
       scheduleQueue();
-    } else if (studio && resumeSupported()) {
+    } else if (studio && resumeSupported() && !(phase === 'ready' && controlPages.has(current))) {
       restore();
     } else {
       onSettled(current);

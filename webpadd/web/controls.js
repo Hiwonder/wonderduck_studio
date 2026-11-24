@@ -1038,7 +1038,10 @@ import { bindMotionInput } from './motion-input.js';
       });
       bindPidTabs('[data-body-stage-tab]', '[data-body-stage-pane]', 'bodyStageTab', 'bodyStagePane');
       lineSpeedInput.addEventListener('input', () => {
-        if (lineSpeedInput.validity.valid) pages.line.speed = lineSpeedInput.valueAsNumber;
+        if (lineSpeedInput.validity.valid) {
+          pages.line.speed = lineSpeedInput.valueAsNumber;
+          if (lineRun.active) sendTracking('update');
+        }
         updateTrackingButton();
       });
       const bindPidInputs = (range, input, gains, axis, term, head, queue = head ? queueHeadSettings : null,
@@ -1074,7 +1077,8 @@ import { bindMotionInput } from './motion-input.js';
       };
       document.querySelectorAll('[data-pid-axis]').forEach(range => {
         bindPidInputs(range, range.nextElementSibling, pages.line.gains,
-          Number(range.dataset.pidAxis), Number(range.dataset.pidTerm), false);
+          Number(range.dataset.pidAxis), Number(range.dataset.pidTerm), false,
+          null, undefined, () => { if (lineRun.active) sendTracking('update'); });
       });
       document.querySelectorAll('[data-head-pid-axis]').forEach(input => {
         bindPidInputs(input.previousElementSibling, input, pages.target.gains,
@@ -1237,7 +1241,10 @@ import { bindMotionInput } from './motion-input.js';
       });
       document.querySelectorAll('[data-tracking-deadzone]').forEach((input) => input.addEventListener('input', () => {
         const value = Number(input.value);
-        if (input.value !== '' && Number.isFinite(value) && value >= 0) pages.line.deadzone[Number(input.dataset.trackingDeadzone)] = value / 100;
+        if (input.value !== '' && Number.isFinite(value) && value >= 0) {
+          pages.line.deadzone[Number(input.dataset.trackingDeadzone)] = value / 100;
+          if (lineRun.active) sendTracking('update');
+        }
       }));
       document.querySelectorAll('[data-head-tracking-deadzone]').forEach(input => {
         const axis = Number(input.dataset.headTrackingDeadzone);
@@ -1267,7 +1274,6 @@ import { bindMotionInput } from './motion-input.js';
         lineRun.clearTimer();
         pages.line.point = null;
         vision.targetReady = false;
-        if (lineRun.active) sendTracking('update');
         updateMazeButton();
       };
       const armLineWatchdog = () => {
@@ -1464,7 +1470,7 @@ import { bindMotionInput } from './motion-input.js';
         updateTrackingButton();
       });
       const startSelectedTracking = () => {
-        if (!studioActive || !session.open || !vision.awaitingTarget || !vision.targetReady || !visionDirect[visionSource]
+        if (!studioActive || !state.active || !session.open || !vision.awaitingTarget || !vision.targetReady || !visionDirect[visionSource]
           || lineRun.pending || coordinatedOwner !== null
           || (targetHeadOnly() && targetHeadHome === null)) return;
         if (headPositionState !== 'idle') {
@@ -1656,10 +1662,7 @@ import { bindMotionInput } from './motion-input.js';
         }
         vision.targetReady = true;
         pages.line.point = [2 * line.center - 1, line.aspect];
-        if (lineRun.active) {
-          armLineWatchdog();
-          sendTracking('update', pages.line.point);
-        }
+        if (lineRun.active) armLineWatchdog();
         updateTrackingButton();
         startSelectedTracking();
       });
@@ -2276,7 +2279,6 @@ import { bindMotionInput } from './motion-input.js';
             const mustStop = lineRun.accept(message.accepted, studioActive && state.active && lineFollowing());
             if (lineRun.active) {
               armLineWatchdog();
-              sendTracking('update', pages.line.point);
             } else if (mustStop) sendTracking('stop');
           } else if (message.action === 'update' && !message.accepted && lineRun.active) {
             stopTracking(false);
@@ -2337,16 +2339,13 @@ import { bindMotionInput } from './motion-input.js';
           if (message.action === 'start' && mazeRun.pending) {
             const cancelled = mazeRun.cancelled;
             const mustStop = mazeRun.accept(message.accepted, selectedPage === pages.maze);
-            if (mazeRun.active) {
-              sendMaze('update');
-              mazeRun.timer = setInterval(() => sendMaze('update'), 200);
-            } else if (mustStop) {
+            if (mustStop) {
               sendMaze('stop');
-            } else if (!cancelled && selectedPage === pages.maze) {
+            } else if (!mazeRun.active && !cancelled && selectedPage === pages.maze) {
               setNotice(`避障行走不可用：${message.reason || '机器人拒绝请求'}`, true);
             }
           } else if (message.action === 'update' && !message.accepted && mazeRun.active) {
-            stopMaze();
+            stopMaze(false);
             setNotice(`避障行走已停止：${message.reason || '机器人拒绝请求'}`, true);
           } else if (message.action === 'stop' && !message.accepted) {
             setNotice(`避障行走停止失败：${message.reason || '机器人拒绝请求'}`, true);
@@ -2504,7 +2503,7 @@ import { bindMotionInput } from './motion-input.js';
       obstacleDelay.addEventListener("input", () => { obstacleDelayValue.textContent = `${obstacleDelay.value} ms`; });
       obstacleDistance.addEventListener("change", sendObstacle);
       obstacleDelay.addEventListener("change", sendObstacle);
-      const suspend = (reconcile = true) => { state.active = false; keys.clear(); zero(); if (reconcile) reconcileHeadPosition(); };
+      const suspendManualInput = () => { state.active = false; keys.clear(); zero(); };
       function completeStudioLeave(accepted, reason) {
         const requestId = studioLeaveRequest;
         studioLeaveRequest = null;
@@ -2521,7 +2520,7 @@ import { bindMotionInput } from './motion-input.js';
         colorPresetSelect.value = '';
         colorPresetName.value = '';
         updateColorPresetControls();
-        suspend(false);
+        suspendManualInput();
         stopAllTracking(false);
         stopMaze(false);
         window.dispatchEvent(new Event('vision-recognition-stop'));
@@ -2545,12 +2544,8 @@ import { bindMotionInput } from './motion-input.js';
         }
       });
       window.addEventListener('console-view-change', () => {
-        const active = state.active;
-        state.active = false;
         keys.clear();
         zero();
-        state.active = active;
-        sendInput();
       });
       window.addEventListener('console-page-changed', () => {
         if (document.body.dataset.consolePage !== 'control') cancelPickMouth(true);
@@ -2593,13 +2588,14 @@ import { bindMotionInput } from './motion-input.js';
       const resume = (explicitWorkspace = false) => {
         if (studioActive && !document.hidden && (explicitWorkspace || document.hasFocus())) {
           if (!state.active || explicitWorkspace) {
-            zero(); state.active = true; sendInput();
+            state.active = true;
+            zero();
           }
           reconcileHeadPosition();
         }
       };
       window.addEventListener('studio-preview', () => {
-        suspend();
+        suspendManualInput();
         studioActive = false;
         renderMotionPower();
       });
@@ -2610,9 +2606,9 @@ import { bindMotionInput } from './motion-input.js';
         resume(true);
         if (isVisionPage() && visionSource === 'object') window.dispatchEvent(new CustomEvent('vision-recognition-start', {detail: visionSource}));
       });
-      window.addEventListener("blur", suspend);
+      window.addEventListener("blur", suspendManualInput);
       window.addEventListener("focus", () => resume());
-      document.addEventListener("visibilitychange", () => { if (document.hidden) suspend(); else resume(); });
+      document.addEventListener("visibilitychange", () => { if (document.hidden) suspendManualInput(); else resume(); });
       const flushTrackingProfiles = () => {
         for (const scope of Object.keys(trackingProfiles)) {
           flushCoordinatedSettings(true, scope);
@@ -2625,7 +2621,7 @@ import { bindMotionInput } from './motion-input.js';
         flushTrackingProfiles();
         stopAllTracking();
         stopMaze();
-        suspend();
+        suspendManualInput();
         session.close();
       });
       window.addEventListener('pageshow', event => {
