@@ -7,7 +7,7 @@ from pathlib import Path
 from app.paths import CONSOLE_ROOT
 
 IDS = (20, 21, 22, 23, 24, 30, 31, 32, 33, 34, 10, 11, 12, 13, 14)
-UNOQ_OPTIONAL_SERVO_IDS = (35, 36)
+ACCESSORY_SERVO_IDS = (35, 36)
 NAMES = (
     "left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
     "neck_pitch", "head_pitch", "head_yaw", "head_roll", "mouth",
@@ -311,7 +311,7 @@ def pose_targets(action, ids=IDS, home_policy=None):
         integer(target, 0, 4095, "Home 编码器位置")
     for name, target in HOME_ENCODER_TARGETS.items():
         targets[configured_ids[NAMES.index(name)]] = integer(target, 0, 4095, "Home 编码器位置")
-    targets.update((device_id, 2048) for device_id in UNOQ_OPTIONAL_SERVO_IDS if device_id in ids)
+    targets.update((device_id, 2048) for device_id in ACCESSORY_SERVO_IDS if device_id in ids)
     return targets
 
 

@@ -25,7 +25,7 @@ from app.models.model_management import ModelManager, ModelUncertainError
 from app.models.online_update import OnlineModelUpdater, device_versions
 from app.models.update_control import UpdateControl
 from app.robot.controller import Controller, DemoHardware
-from app.robot.protocol import REGISTERS, UNOQ_OPTIONAL_SERVO_IDS
+from app.robot.protocol import REGISTERS, ACCESSORY_SERVO_IDS
 from app.robot.robotd_state import query_robotd
 from app.robot.studio import WORKSPACES
 from app.sensors.camera import Camera
@@ -624,7 +624,7 @@ class Handler(BaseHTTPRequestHandler):
         return result, 200
 
 
-def create_controller(args, *, tof_enabled=True, unoq_bus=False):
+def create_controller(args, *, tof_enabled=True):
     if args.studio:
         from app.robot.hardware import Hardware
         from app.robot.studio import StudioController
@@ -637,7 +637,7 @@ def create_controller(args, *, tof_enabled=True, unoq_bus=False):
 
         def create_hardware_with_accessory_servos():
             hardware = create_hardware()
-            for device_id in UNOQ_OPTIONAL_SERVO_IDS:
+            for device_id in ACCESSORY_SERVO_IDS:
                 if device_id not in hardware.ids:
                     try:
                         hardware.execute(dict(action="scan_servo", id=device_id))
@@ -646,7 +646,7 @@ def create_controller(args, *, tof_enabled=True, unoq_bus=False):
             return hardware
 
         def factory(workspace):
-            probe_accessories = workspace == "action" or (unoq_bus and workspace == "debug")
+            probe_accessories = workspace in ("action", "debug")
             hardware_factory = create_hardware_with_accessory_servos if probe_accessories else create_hardware
             return Controller(hardware_factory(), args.hz, demo=args.demo, hardware_factory=hardware_factory,
                               port=args.serial, full_servo_range=args.full_servo_range, maintenance=True,
@@ -703,8 +703,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     tof_enabled = sensor_enabled("WONDERDUCK_UNOQ_TOF_ENABLED")
     head_imu_enabled = sensor_enabled("WONDERDUCK_UNOQ_HEAD_IMU_ENABLED")
-    unoq_bus = bool(os.environ.get("WONDERDUCK_UNOQ_ROUTER")) and args.serial == os.environ.get("WONDERDUCK_SERVO_PORT")
-    controller = create_controller(args, tof_enabled=tof_enabled, unoq_bus=unoq_bus)
+    controller = create_controller(args, tof_enabled=tof_enabled)
     camera = None if args.studio else Camera()
     tof = TofReader(demo=args.demo) if tof_enabled and not args.studio else None
     auxiliary_imu = create_auxiliary_imu(args) if head_imu_enabled else None

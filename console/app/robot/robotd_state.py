@@ -10,7 +10,7 @@ import threading
 import time
 
 from app.robot.protocol import (
-    JOINTS, REGISTERS, UNOQ_OPTIONAL_SERVO_IDS, discovered_joint, joint_id, raw_to_degrees, servo_faults,
+    JOINTS, REGISTERS, ACCESSORY_SERVO_IDS, discovered_joint, joint_id, raw_to_degrees, servo_faults,
 )
 
 
@@ -78,7 +78,7 @@ def optional_servo_observations(rows, now):
     if not isinstance(rows, list):
         return []
     for row in rows:
-        if not isinstance(row, dict) or row.get("id") not in UNOQ_OPTIONAL_SERVO_IDS:
+        if not isinstance(row, dict) or row.get("id") not in ACCESSORY_SERVO_IDS:
             continue
         raw = row.get("raw")
         if row.get("valid") is not True or type(raw) is not int or not 0 <= raw <= 4095:
