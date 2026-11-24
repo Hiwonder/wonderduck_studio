@@ -536,9 +536,9 @@ class AuxiliaryImu:
         previous = self.subscription_versions.get(client)
         return previous is None or revision is not None and revision >= previous[0]
 
-    def current_workspace_request(self, client, revision, workspace):
+    def current_workspace_request(self, client, revision, workspace, *, check_subscription=True):
         with self.lock:
-            if not self._current_subscription_locked(client, revision):
+            if check_subscription and not self._current_subscription_locked(client, revision):
                 return False
             previous = self.workspace_requests.get(client)
             return (previous is None or revision is None or revision > previous[0]
@@ -548,7 +548,8 @@ class AuxiliaryImu:
         if client and revision is not None:
             with self.lock:
                 now = time.monotonic()
-                self.subscription_versions[client] = (revision, now)
+                if self._current_subscription_locked(client, revision):
+                    self.subscription_versions[client] = (revision, now)
                 self.workspace_requests[client] = (revision, workspace, now)
 
     def _stop_unobserved_worker_locked(self):

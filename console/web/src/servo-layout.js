@@ -37,7 +37,7 @@ export function createServoLayout({ viewport, canvas, scaleInput, layoutLockButt
 
   function persist() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ layout: layout(), scale, manual, ...getState() }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ layout: layout(positions.keys()), scale, manual, ...getState() }));
     } catch (error) { toast(`无法保存舵机布局：${error.message}`, true); }
   }
 
@@ -92,7 +92,6 @@ export function createServoLayout({ viewport, canvas, scaleInput, layoutLockButt
     items = new Map(entries);
     selected = new Set([...selected].filter(id => items.has(id) && !items.get(id).hidden));
     onSelect([...selected]);
-    for (const id of [...positions.keys()]) if (!items.has(id)) positions.delete(id);
     if (!manual) arrange();
     else { placeMissing([...items.keys()].filter(id => !positions.has(id))); render(); }
     initialized = true;
@@ -107,8 +106,8 @@ export function createServoLayout({ viewport, canvas, scaleInput, layoutLockButt
     persist();
   }
 
-  function layout() {
-    return [...items.keys()].map(id => {
+  function layout(ids = items.keys()) {
+    return [...ids].map(id => {
       const position = positions.get(id);
       return [id, Math.round(position.x), Math.round(position.y)];
     });
@@ -121,7 +120,8 @@ export function createServoLayout({ viewport, canvas, scaleInput, layoutLockButt
       const ordered = known.map(([id]) => items.get(id));
       const others = [...items.values()].filter(element => !ordered.includes(element));
       canvas.append(...ordered, ...others);
-      positions = new Map(known.map(([id, x, y]) => [id, { x, y }]));
+      for (const id of items.keys()) positions.delete(id);
+      for (const [id, x, y] of known) positions.set(id, { x, y });
       placeMissing([...items.keys()].filter(id => !positions.has(id)));
       manual = true;
     } else if (!manual) arrange();
@@ -312,7 +312,6 @@ export function createServoLayout({ viewport, canvas, scaleInput, layoutLockButt
   restoreButton.addEventListener('click', () => {
     if (!previous) return;
     positions = previous.positions; manual = previous.manual; previous = null;
-    for (const id of [...positions.keys()]) if (!items.has(id)) positions.delete(id);
     placeMissing([...items.keys()].filter(id => !positions.has(id)));
     restoreButton.disabled = true;
     render(); persist();

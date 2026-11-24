@@ -11,6 +11,8 @@ pub(super) async fn policy_status_worker(socket: PathBuf, status_tx: watch::Send
             status.rest_phase = None;
             status.motion_enabled = None;
             status.motion_homed = None;
+            status.active_skill = None;
+            status.last_skill_timeout = None;
         });
         tokio::time::sleep(CONNECT_RETRY).await;
     }
@@ -31,6 +33,8 @@ async fn run_policy_status_stream(socket: &Path, status_tx: &watch::Sender<Brows
             status.rest_phase = policies.rest_phase;
             status.motion_enabled = policies.motion_enabled;
             status.motion_homed = policies.homed;
+            status.active_skill = policies.active_skill;
+            status.last_skill_timeout = policies.last_skill_timeout;
             status.power_status_sequence = status.power_status_sequence.wrapping_add(1);
         });
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -51,7 +55,10 @@ pub(super) async fn status_stream_worker(socket: PathBuf, status_tx: watch::Send
             status.loop_missed = None;
             status.bus_read_timeouts = None;
             status.tracking_phase = None;
+            status.pickup_stage = None;
             status.head_feedback = None;
+            status.head_positions = None;
+            status.head_positions_at = None;
         });
         tokio::time::sleep(CONNECT_RETRY).await;
     }
@@ -233,8 +240,13 @@ pub(super) fn update_status_from_state(status: &mut BrowserStatus, state: &proto
     status.head_feedback = state.joints.get(6).zip(state.targets.get(6)).and_then(|(&measured, &target)| {
         Some((duck_control::hx::encode_position(6, measured).ok()?, duck_control::hx::encode_position(6, target).ok()?))
     });
+    let head_position = |joint| state.servo_status.get(joint).map(|servo: &proto::ServoStatus| servo.raw)
+        .or_else(|| duck_control::hx::encode_position(joint, *state.joints.get(joint)?).ok());
+    status.head_positions = head_position(6).zip(head_position(7)).map(|(pitch, yaw)| [pitch, yaw]);
+    status.head_positions_at = status.head_positions.map(|_| Instant::now());
     status.policy = Some(state.policy.clone());
     status.tracking_phase = state.tracking_phase;
+    status.pickup_stage = state.pickup_stage;
     status.loop_hz = Some(state.control_loop.hz);
     status.loop_missed = Some(state.control_loop.missed);
     status.imu_gyro = state.imu.map(|imu| imu.gyro);

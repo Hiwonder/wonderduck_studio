@@ -8,10 +8,12 @@ import gzip
 import json
 import logging
 import mimetypes
+import os
 from pathlib import Path
 import queue
 import shutil
 import signal
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,18 +25,23 @@ from app.models.model_management import ModelManager, ModelUncertainError
 from app.models.online_update import OnlineModelUpdater, device_versions
 from app.models.update_control import UpdateControl
 from app.robot.controller import Controller, DemoHardware
-from app.robot.protocol import REGISTERS
+from app.robot.protocol import REGISTERS, UNOQ_OPTIONAL_SERVO_IDS
 from app.robot.robotd_state import query_robotd
+from app.robot.studio import WORKSPACES
 from app.sensors.camera import Camera
 from app.sensors.qmi_imu import AuxiliaryImu
 from app.sensors.tof import TofReader
-from app.system import network, resources, service_control
+from app.system import network, resources, service_control, software_update
 from app.system.runtime_config import ModelPaletteStore, NetworkAnnouncementStore, robot_root, software_version
 from app.system.secure_transport import SecureTransport
 
 
 STATE_DIAGNOSTIC_LOCK = threading.Lock()
 STATE_DIAGNOSTIC_LAST = 0.0
+
+
+def sensor_enabled(name):
+    return os.environ.get(name, "true").strip().lower() not in ("0", "false", "no", "off")
 
 
 class RequestBody:
@@ -167,7 +174,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
+        if path == "/api/software-update":
+            if not getattr(self.server, "studio", False) or self.controller.demo:
+                self.send_json({"error": "当前服务不提供软件更新"}, 404)
+                return
+            try:
+                self.send_json(software_update.status(self.server.robot_root))
+            except (OSError, subprocess.SubprocessError) as error:
+                self.send_json({"error": str(error)}, 503)
+            return
         if path == "/api/info":
+            tof_enabled = getattr(self.server, "tof_enabled", True)
+            head_imu_enabled = getattr(self.server, "head_imu_enabled", True)
+            workspaces = WORKSPACES if tof_enabled else WORKSPACES - {"maze"}
             native_readonly = getattr(self.controller, "readonly", False)
             readonly = native_readonly
             if getattr(self.server, "studio", False) and hasattr(self.controller, "readonly_for"):
@@ -192,6 +211,10 @@ class Handler(BaseHTTPRequestHandler):
                                 demo=self.controller.demo, hz=self.controller.hz,
                                 imu_source=self.controller.imu_source, readonly=readonly, device_versions=versions,
                                 studio=getattr(self.server, "studio", False),
+                                workspaces=sorted(workspaces) if getattr(self.server, "studio", False) else None,
+                                tof_enabled=tof_enabled, head_imu_enabled=head_imu_enabled,
+                                supports_software_update=(getattr(self.server, "studio", False) and not self.controller.demo
+                                    and software_update.available(self.server.robot_root)),
                                 supports_service_restart=(getattr(self.server, "studio", False)
                                     and not self.controller.demo),
                                 supports_shutdown=(getattr(self.server, "studio", False)
@@ -217,7 +240,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.controller.set_status_visible(self.client, workspace in ("status", "action", "debug", "calibration"))
             state = self.controller.snapshot(self.client)
             control_done = time.monotonic()
-            if getattr(self.server, "tof", None) is not None:
+            if not getattr(self.server, "tof_enabled", True):
+                state.pop("tof", None)
+            elif getattr(self.server, "tof", None) is not None:
                 state["tof"] = self.server.tof.snapshot()
             auxiliary = getattr(self.server, "auxiliary_imu", None)
             if auxiliary is not None:
@@ -243,6 +268,8 @@ class Handler(BaseHTTPRequestHandler):
             # Each device may have succeeded, failed, or been polled at a different
             # instant. Never substitute the aggregate control-frame timestamp.
             state["servos"] = [dict(item) for item in state.get("servos", [])]
+            if "optional_servos" in state:
+                state["optional_servos"] = [dict(item) for item in state["optional_servos"]]
             if "control_servos" in state:
                 state["control_servos"] = [dict(item) for item in state["control_servos"]]
             state["imu"] = dict(state.get("imu") or {})
@@ -251,7 +278,7 @@ class Handler(BaseHTTPRequestHandler):
                 sampled = raw_sample.pop("sampled_monotonic", None)
                 raw_sample["age_us"] = round((now - sampled) * 1_000_000) if sampled is not None else None
                 state["imu"]["raw_sample"] = raw_sample
-            for item in [*state["servos"], *state.get("control_servos", []), state["imu"]]:
+            for item in [*state["servos"], *state.get("control_servos", []), *state.get("optional_servos", []), state["imu"]]:
                 for source, target in (("sampled_monotonic", "age_ms"),
                                        ("observed_monotonic", "observation_age_ms")):
                     sampled = item.pop(source, None)
@@ -260,7 +287,7 @@ class Handler(BaseHTTPRequestHandler):
                         item.setdefault("t_ns", round(sampled * 1e9))
             self.send_json(state)
             state_done = time.monotonic()
-            if (state_done - state_started > .5 and
+            if (auxiliary is not None and state_done - state_started > .5 and
                     (workspace == "status" or workspace == "calibration" and
                      self.headers.get("X-Calibration-Source") == "head")):
                 global STATE_DIAGNOSTIC_LAST
@@ -417,6 +444,18 @@ class Handler(BaseHTTPRequestHandler):
                     raise PermissionError("当前服务不提供重启操作")
                 self.send_json(service_control.restart_robotd())
                 return
+            if path == "/api/software-update":
+                if (not getattr(self.server, "studio", False) or self.controller.demo
+                        or not software_update.available(self.server.robot_root)):
+                    raise PermissionError("当前服务不提供软件更新")
+                if self.headers.get("X-Studio-Workspace") != "system":
+                    raise PermissionError("请先打开系统设置")
+                with self.controller.lock:
+                    if self.controller.client_workspaces.get(self.client, (None,))[0] != "system":
+                        raise PermissionError("请先打开系统设置")
+                self.send_json(software_update.handle(self.server.robot_root, self.controller.path, command,
+                                                      self.server.server_address[1]))
+                return
             if path == "/api/control-actions":
                 if not getattr(self.server, "studio", False) or not hasattr(self.controller, "start_library_action"):
                     raise PermissionError("当前服务不提供动作库播放")
@@ -437,30 +476,51 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/workspace" and hasattr(self.controller, "switch"):
                 operation = command.get("operation", "switch")
+                auxiliary = getattr(self.server, "auxiliary_imu", None)
+                client = self.client
+                revision = self.head_subscription_revision
                 if operation == "switch":
+                    if command.get("workspace") == "maze" and not getattr(self.server, "tof_enabled", True):
+                        raise PermissionError("TOF 已禁用，避障行走不可用")
                     rest_before = command.get("rest_before", False)
                     if type(rest_before) is not bool:
                         raise ValueError("工作区休息选项无效")
-                    auxiliary = getattr(self.server, "auxiliary_imu", None)
+                    workspace = command.get("workspace")
+
+                    def current_request():
+                        return auxiliary is None or auxiliary.current_workspace_request(
+                            client, revision, workspace, check_subscription=False)
 
                     def remember_workspace(previous):
-                        if auxiliary is not None and (previous is None or previous[0] != command.get("workspace")):
-                            auxiliary.leave_workspace(self.client, self.head_subscription_revision)
-                        if auxiliary is not None:
-                            auxiliary.remember_workspace_request(self.client, self.head_subscription_revision, command.get("workspace"))
+                        if auxiliary is None or not current_request():
+                            return
+                        if previous is None or previous[0] != workspace:
+                            auxiliary.leave_workspace(client, revision)
+                        auxiliary.remember_workspace_request(client, revision, workspace)
 
                     with self.controller.lock:
                         if auxiliary is not None and not auxiliary.current_workspace_request(
-                                self.client, self.head_subscription_revision, command.get("workspace")):
+                                client, revision, workspace):
                             raise ValueError("页面状态已更新，请重新操作")
                         previous = self.controller.client_workspaces.get(self.client)
                         if not rest_before:
-                            result = self.controller.switch(self.client, command.get("workspace"))
+                            result = self.controller.switch(client, workspace)
                             remember_workspace(previous)
                     if rest_before:
-                        result = self.controller.switch_after_rest(self.client, command.get("workspace"))
+                        result = self.controller.switch_after_rest(client, workspace, current_request)
                         with self.controller.lock:
-                            remember_workspace(previous)
+                            if result.get("workspace") == workspace:
+                                remember_workspace(previous)
+                    self.send_json(result)
+                elif operation == "leave":
+                    if not client or revision is None or auxiliary is None:
+                        raise ValueError("工作区会话无效")
+                    with self.controller.lock:
+                        if not auxiliary.current_workspace_request(client, revision, "system"):
+                            raise ValueError("页面状态已更新，请重新操作")
+                        auxiliary.leave_workspace(client, revision)
+                        auxiliary.remember_workspace_request(client, revision, "system")
+                        result = self.controller.leave_workspace(client)
                     self.send_json(result)
                 elif operation == "heartbeat":
                     self.send_json(self.controller.heartbeat(self.client))
@@ -485,10 +545,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(operation())
                 return
             studio = hasattr(self.controller, "authorize")
-            with self.controller.lock if studio else nullcontext():
-                if studio:
-                    self.controller.authorize(self.client, path, self.headers.get("X-Studio-Workspace", ""))
-                result, status = self.execute_post(path, command)
+            if path == "/api/head-imu/calibration" and not getattr(self.server, "head_imu_enabled", True):
+                raise PermissionError("头部 IMU 已禁用")
+            workspace = self.headers.get("X-Studio-Workspace", "") if studio else None
+            maintenance_paths = ("/api/arm", "/api/parameter-batch", "/api/action-playback", "/api/command")
+            if studio and path not in maintenance_paths:
+                with self.controller.lock:
+                    self.controller.authorize(self.client, path, workspace)
+                    result, status = self.execute_post(path, command)
+            else:
+                result, status = self.execute_post(path, command, workspace=workspace)
             self.send_json(result, status)
         except PermissionError as error:
             self.send_post_error(dict(error=str(error)), 403, body)
@@ -503,29 +569,35 @@ class Handler(BaseHTTPRequestHandler):
         except (FutureTimeout, RuntimeError, OSError) as error:
             self.send_post_error(dict(error=str(error) or "操作超时；执行结果未知，请读取确认"), 503, body)
 
-    def execute_post(self, path, command):
+    def execute_post(self, path, command, *, workspace=None):
+        scope = {"workspace": workspace} if workspace is not None else {}
         if path == "/api/arm":
             if type(command.get("on")) is not bool:
                 raise ValueError("开关无效")
-            result = self.controller.arm(self.client, command["on"])
+            result = self.controller.arm(self.client, command["on"], **scope)
         elif path == "/api/parameter-batch":
-            result = self.controller.parameter_task(command, self.client)
+            result = self.controller.parameter_task(command, self.client, **scope)
         elif path == "/api/action-document":
             result = self.server.action_documents.handle(command, self.controller.joints,
                                                           self.controller.full_servo_range)
         elif path == "/api/action-playback":
-            result = self.controller.action_task(command, self.client)
+            result = self.controller.action_task(command, self.client, **scope)
         elif path == "/api/command":
             auxiliary = getattr(self.server, "auxiliary_imu", None)
-            if command.get("action") in ("calibration_start", "calibration_restore") and auxiliary is not None:
+            def validate_calibration():
                 if auxiliary.calibration_snapshot()["active"]:
                     raise ValueError("头部 IMU 正在标定")
-            result = self.controller.submit(command, self.client)
+            if command.get("action") in ("calibration_start", "calibration_restore") and auxiliary is not None:
+                if workspace is not None:
+                    scope["validate"] = validate_calibration
+                else:
+                    validate_calibration()
+            result = self.controller.submit(command, self.client, **scope)
         elif path == "/api/head-imu/calibration":
             auxiliary = getattr(self.server, "auxiliary_imu", None)
             if not getattr(self.server, "studio", False) or auxiliary is None:
                 raise PermissionError("当前服务不提供头部 IMU 标定")
-            if command.get("action") in ("start", "restore") and self.controller.calibration.snapshot()["active"]:
+            if command.get("action") in ("start", "restore") and self.controller.calibration_busy():
                 raise ValueError("躯体 IMU 正在标定")
             result = auxiliary.calibration_command(self.client, command)
         elif path == "/api/camera/prepare":
@@ -552,7 +624,7 @@ class Handler(BaseHTTPRequestHandler):
         return result, 200
 
 
-def create_controller(args):
+def create_controller(args, *, tof_enabled=True, unoq_bus=False):
     if args.studio:
         from app.robot.hardware import Hardware
         from app.robot.studio import StudioController
@@ -563,16 +635,28 @@ def create_controller(args):
             return Hardware(args.serial, args.source, args.layout, args.full_servo_range,
                             args.imu_source, home_policy=args.home_policy)
 
+        def create_hardware_with_accessory_servos():
+            hardware = create_hardware()
+            for device_id in UNOQ_OPTIONAL_SERVO_IDS:
+                if device_id not in hardware.ids:
+                    try:
+                        hardware.execute(dict(action="scan_servo", id=device_id))
+                    except (OSError, RuntimeError, ValueError) as error:
+                        logging.warning("Could not probe accessory servo %d: %s", device_id, error)
+            return hardware
+
         def factory(workspace):
-            return Controller(create_hardware(), args.hz, demo=args.demo, hardware_factory=create_hardware,
+            probe_accessories = workspace == "action" or (unoq_bus and workspace == "debug")
+            hardware_factory = create_hardware_with_accessory_servos if probe_accessories else create_hardware
+            return Controller(hardware_factory(), args.hz, demo=args.demo, hardware_factory=hardware_factory,
                               port=args.serial, full_servo_range=args.full_servo_range, maintenance=True,
                               imu_only=workspace == "calibration")
 
         return StudioController(args.robotd_socket, args.hz, factory, demo=args.demo,
-                                status_hardware_factory=create_hardware)
+                                status_hardware_factory=create_hardware, tof_enabled=tof_enabled)
     if args.robotd_socket:
         from app.robot.robotd_state import RobotdController
-        return RobotdController(args.robotd_socket, args.hz)
+        return RobotdController(args.robotd_socket, args.hz, tof_enabled=tof_enabled)
     if args.demo:
         hardware = DemoHardware(args.full_servo_range, args.imu_source, args.home_policy)
     else:
@@ -617,10 +701,13 @@ def main():
     if args.robotd_socket and not args.studio and (args.demo or args.full_servo_range):
         parser.error("--robotd-socket 不能与 --demo 或 --full-servo-range 同用")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    controller = create_controller(args)
+    tof_enabled = sensor_enabled("WONDERDUCK_UNOQ_TOF_ENABLED")
+    head_imu_enabled = sensor_enabled("WONDERDUCK_UNOQ_HEAD_IMU_ENABLED")
+    unoq_bus = bool(os.environ.get("WONDERDUCK_UNOQ_ROUTER")) and args.serial == os.environ.get("WONDERDUCK_SERVO_PORT")
+    controller = create_controller(args, tof_enabled=tof_enabled, unoq_bus=unoq_bus)
     camera = None if args.studio else Camera()
-    tof = None if args.studio else TofReader(demo=args.demo)
-    auxiliary_imu = create_auxiliary_imu(args)
+    tof = TofReader(demo=args.demo) if tof_enabled and not args.studio else None
+    auxiliary_imu = create_auxiliary_imu(args) if head_imu_enabled else None
     secure_transport = None
     try:
         server = ThreadingHTTPServer((args.listen, args.port), Handler)
@@ -630,7 +717,9 @@ def main():
         server.robot_root = args.robot_root
         server.camera = camera
         server.tof = tof
+        server.tof_enabled = tof_enabled
         server.auxiliary_imu = auxiliary_imu
+        server.head_imu_enabled = head_imu_enabled
         server.static = Path(args.static).resolve()
         server.actions_directory = Path(__file__).resolve().parent / "actions"
         server.action_documents = ActionDocuments(Path(__file__).resolve().parent / "action-groups")

@@ -39,10 +39,9 @@ class ActionPlayback:
         with self.status_lock:
             self.status.update(changes)
 
-    def start(self, document, client, ids, loop, locked_ids=()):
+    def start(self, frames, client, loop):
         if type(loop) is not bool:
             raise ValueError("循环选项无效")
-        frames = action_frames(document, ids, locked_ids)
         with self.lock:
             if self.job is not None:
                 raise RuntimeError("动作正在播放")
@@ -67,7 +66,6 @@ class ActionPlayback:
             return self.job["deadline"] if self.job else None
 
     def step(self, hardware):
-        # Keep cancellation and dispatch ordered: once stop returns no new frame can start.
         with self.lock:
             job = self.job
             if job is None:
@@ -86,20 +84,30 @@ class ActionPlayback:
                 job["index"] = 0
             index = job["index"]
             duration, targets = job["frames"][index]
-            try:
-                unprepared = [device_id for device_id in targets if device_id not in job["prepared"]]
-                if unprepared:
-                    hardware.prepare_action_playback(unprepared)
-                    job["prepared"].update(unprepared)
+            unprepared = [device_id for device_id in targets if device_id not in job["prepared"]]
+        try:
+            if unprepared:
+                hardware.prepare_action_playback(unprepared)
+            with self.lock:
+                if self.job is not job or not self.armed(job["client"]):
+                    return None
+                job["prepared"].update(unprepared)
                 started = self.clock()
-                if targets:
-                    result = hardware.move_action_frame(targets, duration)
-                    if not result.get("sent"):
-                        raise RuntimeError("动作帧未发送完成")
-            except Exception as error:
-                self.job = None
-                self.update_status(state="error", frame=index + 1, error=str(error))
-                return None
+            # The frame is committed to the bus worker. Serial dispatch checks
+            # for emergency release again before sending each group.
+            if targets:
+                result = hardware.move_action_frame(targets, duration)
+                if not result.get("sent"):
+                    raise RuntimeError("动作帧未发送完成")
+        except Exception as error:
+            with self.lock:
+                if self.job is job:
+                    self.job = None
+                    self.update_status(state="error", frame=index + 1, error=str(error))
+            return None
+        with self.lock:
+            if self.job is not job:
+                return targets
             job["dispatched_targets"].update(targets)
             job["dispatch"] += 1
             self.update_status(frame=index + 1, dispatch=job["dispatch"],

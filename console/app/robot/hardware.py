@@ -47,6 +47,7 @@ def parse_live_imu_diagnostics(payload):
 class Hardware(ServoLayout):
     # Only the bus-owner thread accesses this short-lived offset editing session.
     offset_lock = None
+    check_interrupted = staticmethod(lambda: None)
 
     def __init__(self, port, source, layout_path=None, full_servo_range=False, imu_source="id200",
                  i2c_transport_script=None, i2c_device_factory=None, home_policy=None):
@@ -186,6 +187,7 @@ class Hardware(ServoLayout):
     def individual_read(self, ids, address, length):
         blocks, errors, statuses, observed = {}, {}, {}, {}
         for device_id in ids:
+            self.check_interrupted()
             self.select_baud(self.baud_codes.get(device_id, 0))
             values, failures, replies = self.exchange(
                 self.live.make_read(device_id, address, length), (device_id,), length)
@@ -236,6 +238,7 @@ class Hardware(ServoLayout):
         self.restore_offset_lock(force=True)
         failures, locked = [], []
         for device_id in self.ids if ids is None else ids:
+            self.check_interrupted()
             try:
                 self.write_verified(device_id, 55, b'\x01', configuration_phase="确认写保护")
                 locked.append(device_id)
@@ -245,6 +248,7 @@ class Hardware(ServoLayout):
             raise RuntimeError("调试模式写保护确认失败：" + "；".join(failures))
 
         for device_id in locked:
+            self.check_interrupted()
             try:
                 self.write_verified(device_id, 21, bytes((value,)), configuration_phase="位置 P 读回")
             except (OSError, RuntimeError, TimeoutError, ValueError) as error:
@@ -368,7 +372,10 @@ class Hardware(ServoLayout):
             if self.imu_source == "i2c":
                 raise ValueError("当前 IMU 来源不是 ID200")
             self.select_baud(0)
-            sample = self.raw_imu.read_raw()
+            try:
+                sample = self.raw_imu.read_raw()
+            except TimeoutError as error:
+                raise RuntimeError("躯体 IMU 读取超时") from error
             return dict(sample, timestamp_ms=int(time.time() * 1000), frame="sensor")
         if action == "set_imu_source":
             self.set_imu_source(command.get("source"))
@@ -571,6 +578,7 @@ class Hardware(ServoLayout):
     def prepare_action_playback(self, ids):
         positions, torque_off = {}, []
         for device_id in ids:
+            self.check_interrupted()
             self.ensure_position_mode(device_id)
             torque = self.read(device_id, 40, 1)
             if torque not in (b"\x00", b"\x01"):
@@ -581,6 +589,7 @@ class Hardware(ServoLayout):
                 torque_off.append(device_id)
         try:
             for device_id in torque_off:
+                self.check_interrupted()
                 self.write_verified(device_id, 42, positions[device_id].to_bytes(2, "little"))
                 self.write_verified(device_id, 40, b"\x01")
         except (OSError, RuntimeError, TimeoutError, ValueError) as error:
@@ -593,6 +602,7 @@ class Hardware(ServoLayout):
         remaining = [device_id for device_id in targets if device_id not in self.action_motion_reset]
         for reset, selected in ((True, initial), (False, remaining)):
             for code, group in self.baud_groups(selected, maximum=31 if reset else 35):
+                self.check_interrupted()
                 self.select_baud(code)
                 # In position mode register 44 is the movement time, in milliseconds.
                 # Send it with the new goal; changing it on the old goal can retrigger motion.
@@ -609,6 +619,7 @@ class Hardware(ServoLayout):
         starts = {}
         # Finish every preflight read before changing any servo register.
         for device_id in targets:
+            self.check_interrupted()
             self.ensure_position_mode(device_id)
             position = integer(int.from_bytes(self.read(device_id, 56, 2), "little"), 0, 4095, "编码器位置")
             torque = self.read(device_id, 40, 1)
@@ -618,23 +629,27 @@ class Hardware(ServoLayout):
 
         try:
             for device_id, (position, torque_on) in starts.items():
+                self.check_interrupted()
                 if not torque_on:
                     position = integer(int.from_bytes(self.read(device_id, 56, 2), "little"), 0, 4095, "编码器位置")
                     starts[device_id] = (position, torque_on)
             speeds = dict.fromkeys(targets, POSE_SPEED)
             for device_id, (position, torque_on) in starts.items():
+                self.check_interrupted()
                 if not torque_on:
                     self.write_verified(device_id, 42, position.to_bytes(2, "little"))
                     self.write_verified(device_id, 40, b"\x01")
             payloads = {device_id: raw.to_bytes(2, "little") + b"\x00\x00" + speeds[device_id].to_bytes(2, "little")
                         for device_id, raw in targets.items()}
             for code, group in self.baud_groups(targets, maximum=35):
+                self.check_interrupted()
                 self.select_baud(code)
                 params = bytearray((42, 6))
                 for device_id in group:
                     params.extend((device_id, *payloads[device_id]))
                 self.live.write_all(self.fd, packet(254, 0x83, params))
             for device_id, data in payloads.items():
+                self.check_interrupted()
                 if self.read(device_id, 42, 6) != data:
                     raise RuntimeError(f"ID {device_id} 目标寄存器读回不一致")
         except (OSError, RuntimeError, TimeoutError, ValueError) as error:

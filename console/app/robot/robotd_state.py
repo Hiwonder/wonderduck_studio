@@ -9,7 +9,9 @@ import socket
 import threading
 import time
 
-from app.robot.protocol import JOINTS, REGISTERS, joint_id, raw_to_degrees, servo_faults
+from app.robot.protocol import (
+    JOINTS, REGISTERS, UNOQ_OPTIONAL_SERVO_IDS, discovered_joint, joint_id, raw_to_degrees, servo_faults,
+)
 
 
 READ_ONLY_MESSAGE = "robotd 只读模式：控制、配置和硬件读取操作已禁用"
@@ -71,6 +73,30 @@ def device_observation(row, now):
     return sampled, observed, error
 
 
+def optional_servo_observations(rows, now):
+    result = {}
+    if not isinstance(rows, list):
+        return []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("id") not in UNOQ_OPTIONAL_SERVO_IDS:
+            continue
+        raw = row.get("raw")
+        if row.get("valid") is not True or type(raw) is not int or not 0 <= raw <= 4095:
+            continue
+        try:
+            sampled, _, _ = device_observation(row, now)
+        except ValueError:
+            continue
+        item = dict(id=row["id"], online=True, valid=True, raw=raw,
+                    degrees=raw_to_degrees(raw), sampled_monotonic=sampled)
+        for key in ("speed_rad_s", "load_percent", "voltage", "temperature"):
+            value = row.get(key)
+            if type(value) in (int, float) and math.isfinite(value):
+                item[key] = value
+        result[row["id"]] = item
+    return list(result.values())
+
+
 def device_configuration(value):
     if value is None:
         return None
@@ -113,8 +139,9 @@ class RobotdController:
     full_servo_range = False
     imu_source = "robotd"
 
-    def __init__(self, path, hz, include_details=False):
+    def __init__(self, path, hz, include_details=False, *, tof_enabled=True):
         self.path, self.hz = str(path), hz
+        self.tof_enabled = tof_enabled
         self.joints = deepcopy(JOINTS)
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
@@ -161,15 +188,26 @@ class RobotdController:
                 state["device_report_age_ms"] = round((time.monotonic() - devices_received_at) * 1000)
                 if devices_connected:
                     state.update(online=True, error=None)
+        joints = deepcopy(self.joints)
+        if state.get("online") and devices_connected and not state.get("bus_waiting"):
+            now = time.monotonic()
+            for servo in sorted(state.get("optional_servos", ()), key=lambda item: item["id"]):
+                if not 0 <= now - servo["sampled_monotonic"] < 3:
+                    continue
+                joint = discovered_joint(servo["id"])
+                joints.append(joint)
+                state["servos"].append({**joint, **servo})
         sampled = details.pop("sampled_monotonic", None)
         if sampled is not None and time.monotonic() - sampled < 2:
             state.update(details)
             if state.get("tof"):
                 state["tof"]["age_ms"] += round((time.monotonic() - sampled) * 1000)
         else:
-            state.update(robot={}, tof=dict(status="stale", valid=False, distance_mm=None,
-                                             error="robotd 状态未更新", age_ms=None))
-        state.update(joints=deepcopy(self.joints), hz=self.hz, armed=False, demo=False,
+            state["robot"] = {}
+            if self.tof_enabled:
+                state["tof"] = dict(status="stale", valid=False, distance_mm=None,
+                                    error="robotd 状态未更新", age_ms=None)
+        state.update(joints=joints, hz=self.hz, armed=False, demo=False,
                      readonly=True, imu_source=self.imu_source, parameter_batch_active=False,
                      calibration=dict(active=False, waiting=False, message="robotd 只读模式"))
         return state
@@ -341,36 +379,41 @@ class RobotdController:
             bus_error = frame.get("bus_error")
             if bus_error is not None and not isinstance(bus_error, str):
                 raise ValueError("robotd 总线故障信息无效")
-            self.devices = dict(imu=imu, servos=servos, bus_waiting=bus_error)
+            self.devices = dict(imu=imu, servos=servos, bus_waiting=bus_error,
+                                optional_servos=optional_servo_observations(frame.get("optional_servos"), now))
             self.devices_received_at = now / 1e9
 
     def query(self, calls, timeout=1):
         return query_robotd(self.path, calls, timeout=timeout)
 
     def read_details(self):
-        calls = (("robot.health", {}), ("robot.mode", {}), ("robot.obstacleStatus", {}),
+        calls = (("robot.health", {}), ("robot.mode", {}),
                  ("robot.lowVoltageStatus", {}),
                  ("robot.humanControl", {"action": "status", "source": "web"}))
+        if self.tof_enabled:
+            calls += (("robot.obstacleStatus", {}),)
         previous_error = None
         while not self.stop.is_set():
             try:
                 result = self.query(calls)
-                obstacle = result["robot.obstacleStatus"]
-                status = obstacle.get("sensor_status")
-                mapped = {"valid": "ok", "out_of_range": "out_of_range", "unavailable": "not_detected",
-                          "error": "communication_error", "filtering": "starting", "invalid": "invalid_data",
-                          "unknown": "stale"}.get(status)
-                if mapped is None:
-                    raise ValueError(f"robotd TOF 状态无效：{status}")
-                distance = obstacle.get("distance_mm")
-                if mapped == "ok" and (type(distance) is not int or not 20 <= distance <= 2500):
-                    raise ValueError("robotd TOF 距离无效")
+                details = dict(robot=dict(health=result["robot.health"], mode=result["robot.mode"],
+                                          control=result["robot.humanControl"],
+                                          low_voltage=result["robot.lowVoltageStatus"]))
+                if self.tof_enabled:
+                    obstacle = result["robot.obstacleStatus"]
+                    status = obstacle.get("sensor_status")
+                    mapped = {"valid": "ok", "out_of_range": "out_of_range", "unavailable": "not_detected",
+                              "error": "communication_error", "filtering": "starting", "invalid": "invalid_data",
+                              "unknown": "stale"}.get(status)
+                    if mapped is None:
+                        raise ValueError(f"robotd TOF 状态无效：{status}")
+                    distance = obstacle.get("distance_mm")
+                    if mapped == "ok" and (type(distance) is not int or not 20 <= distance <= 2500):
+                        raise ValueError("robotd TOF 距离无效")
+                    details["tof"] = dict(status=mapped, valid=mapped == "ok", distance_mm=distance,
+                                          error=None, age_ms=800)
                 with self.lock:
-                    self.details = dict(robot=dict(health=result["robot.health"], mode=result["robot.mode"],
-                                                   control=result["robot.humanControl"],
-                                                   low_voltage=result["robot.lowVoltageStatus"]),
-                                        tof=dict(status=mapped, valid=mapped == "ok", distance_mm=distance,
-                                                 error=None, age_ms=800), sampled_monotonic=time.monotonic())
+                    self.details = dict(details, sampled_monotonic=time.monotonic())
                 previous_error = None
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
                 if str(error) != previous_error:

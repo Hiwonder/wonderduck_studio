@@ -9,7 +9,7 @@
 <script>(()=>{const options=new URLSearchParams(location.search);if(options.has('studio'))document.documentElement.dataset.studioEmbedded='true';document.documentElement.dataset.debugMode=options.get('debug')==='1'?'on':'off';})();</script>
 <script src="/theme.js"></script><link href="/console.css" rel="stylesheet"/>
 </head>
-<body data-compact-view="control" data-console-page="control" data-media-port="{{MEDIA_PORT}}" data-operator-tab="sticks">
+<body data-compact-view="control" data-console-page="control" data-media-port="{{MEDIA_PORT}}" data-tof-enabled="{{TOF_ENABLED}}" data-operator-tab="sticks">
 <svg aria-hidden="true" class="svg-sprite">
 <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"></path></symbol>
 <symbol id="icon-gamepad" viewBox="0 0 24 24"><line x1="6" x2="10" y1="11" y2="11"></line><line x1="8" x2="8" y1="9" y2="13"></line><line x1="15" x2="15.01" y1="12" y2="12"></line><line x1="18" x2="18.01" y1="10" y2="10"></line><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"></path></symbol>
@@ -29,7 +29,7 @@
 <div class="brand"><span class="brand-mark"><svg aria-hidden="true" class="icon"><use href="#icon-robot"></use></svg></span><div><h1>WonderDuck Studio</h1><span class="brand-caption">v{{APP_VERSION}}</span></div></div>
 <div class="connection-block"><button aria-label="切换到亮色主题" class="theme-toggle" id="theme-toggle" title="切换到亮色主题" type="button"><svg aria-hidden="true" class="icon" data-theme-icon="dark"><use href="#icon-sun"></use></svg><svg aria-hidden="true" class="icon" data-theme-icon="light"><use href="#icon-moon"></use></svg></button><span aria-label="电量未知" class="battery-indicator" id="battery-indicator" role="img" title="电量未知"><svg aria-hidden="true" class="battery-icon" viewBox="0 0 24 24"><rect x="1" y="6" width="18" height="12" rx="2"></rect><path d="M23 11v2"></path><rect class="battery-fill" id="battery-fill" x="3" y="8" width="0" height="8" rx="1"></rect></svg><span class="battery-reading"><output id="battery-status">--%</output><span aria-hidden="true" class="battery-separator">|</span><output id="battery-voltage">--V</output></span></span></div>
 </header>
-<nav aria-label="控制台页面" aria-orientation="vertical" class="page-nav" role="tablist"><button aria-controls="console-page-control" aria-selected="true" data-page="control" role="tab" tabindex="0" title="运动控制" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-control"></use></svg><span>运动控制</span></button><button aria-controls="console-page-vision" aria-selected="false" data-page="target" role="tab" tabindex="-1" title="目标追踪" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-eye"></use></svg><span>目标追踪</span></button><button aria-controls="console-page-vision" aria-selected="false" data-page="person" role="tab" tabindex="-1" title="行人跟随" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-user-round-search"></use></svg><span>行人跟随</span></button><button aria-controls="console-page-maze" aria-selected="false" data-page="maze" role="tab" tabindex="-1" title="避障行走" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-radar"></use></svg><span>避障行走</span></button><button aria-controls="console-page-system" aria-selected="false" data-page="system" role="tab" tabindex="-1" title="系统设置" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-settings"></use></svg><span>系统设置</span></button><button aria-controls="console-page-status" aria-selected="false" data-page="status" role="tab" tabindex="-1" title="实时状态" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-activity"></use></svg><span>实时状态</span></button></nav>
+<nav aria-label="控制台页面" aria-orientation="vertical" class="page-nav" role="tablist"><button aria-controls="console-page-control" aria-selected="true" data-page="control" role="tab" tabindex="0" title="运动控制" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-control"></use></svg><span>运动控制</span></button><button aria-controls="console-page-vision" aria-selected="false" data-page="target" role="tab" tabindex="-1" title="目标追踪" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-eye"></use></svg><span>目标追踪</span></button><button aria-controls="console-page-vision" aria-selected="false" data-page="pickup" role="tab" tabindex="-1" title="拾取搬运" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-hand-helping"></use></svg><span>拾取搬运</span></button><button aria-controls="console-page-vision" aria-selected="false" data-page="line" role="tab" tabindex="-1" title="自主巡线" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-footprints"></use></svg><span>自主巡线</span></button><button aria-controls="console-page-vision" aria-selected="false" data-page="person" role="tab" tabindex="-1" title="行人跟随" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-user-round-search"></use></svg><span>行人跟随</span></button><button aria-controls="console-page-maze" aria-selected="false" data-page="maze" data-requires-tof role="tab" tabindex="-1" title="避障行走" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-radar"></use></svg><span>避障行走</span></button><button aria-controls="console-page-system" aria-selected="false" data-page="system" role="tab" tabindex="-1" title="系统设置" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-settings"></use></svg><span>系统设置</span></button><button aria-controls="console-page-status" aria-selected="false" data-page="status" role="tab" tabindex="-1" title="实时状态" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-activity"></use></svg><span>实时状态</span></button></nav>
 <button aria-label="查看画面" aria-pressed="false" class="compact-view-toggle" id="compact-view-toggle" title="查看画面" type="button"><svg aria-hidden="true" class="icon"><use href="#icon-camera"></use></svg><span>查看画面</span></button>
 <div class="workspace">
 <div class="camera-column"><section aria-label="摄像头" class="camera-panel panel">
@@ -38,7 +38,7 @@
 <canvas aria-hidden="true" id="color-overlay"></canvas>
 <canvas aria-hidden="true" id="object-overlay"></canvas>
 <div aria-hidden="true" class="tracking-guide" hidden="" id="tracking-guide"><div class="tracking-goal" id="tracking-goal"></div><span class="tracking-target" hidden="" id="tracking-target"></span></div>
-<div class="camera-fps"><span>FPS：<output id="video-fps">0</output><output id="detection-fps">0</output></span><span>TOF：<output id="camera-tof">--</output></span></div>
+<div class="camera-fps"><span>FPS：<output id="video-fps">0</output><output id="detection-fps">0</output></span><span data-requires-tof>TOF：<output id="camera-tof">--</output></span></div>
 <div class="camera-placeholder" id="camera-placeholder">等待画面</div>
 <span aria-live="polite" class="camera-status" id="camera-status">正在连接</span>
 </div></div>
@@ -46,12 +46,12 @@
 <section aria-label="机器人操控" class="page-panel control-panel panel" data-console-panel="control" id="console-page-control" role="tabpanel">
 <div aria-hidden="true" class="control-divider" data-control-divider="session"></div>
 <div aria-hidden="true" class="control-divider" data-control-divider="actions"></div>
-<div aria-hidden="true" class="control-divider" data-control-divider="obstacle"></div>
+<div aria-hidden="true" class="control-divider" data-control-divider="obstacle" data-requires-tof></div>
 <div aria-hidden="true" class="control-divider" data-control-divider="safety"></div>
 <div aria-hidden="true" class="control-divider" data-control-divider="runtime"></div>
 <div class="panel-heading"><div aria-label="操控面板" class="segmented operator-tabs" role="tablist"><button aria-selected="true" data-operator-tab="sticks" role="tab" type="button">摇杆</button><button aria-selected="false" data-operator-tab="actions" role="tab" type="button">动作</button></div></div>
 <div class="operator-view stick-panel" data-operator-panel="sticks"><div class="sticks"><div class="stick"><div class="stick-header sr-only"><span class="stick-title">左摇杆</span><span class="stick-hint" id="left-hint">移动</span></div>
-<div class="stick-speed"><label class="stick-lock" title="速度锁定"><input aria-label="左摇杆速度锁定" data-stick-lock="left" disabled="" type="checkbox"/><span>锁定</span></label><input aria-label="移动速度上限" class="speed-range" id="speed-range" max="0.40" min="0" step="0.01" type="range" value="0.40"/><input aria-label="移动速度上限" class="speed-input" id="speed-input" inputmode="decimal" max="0.40" min="0" step="0.01" type="number" value="0.40"/><span class="speed-unit">m/s</span></div>
+<div class="stick-speed"><label class="stick-lock" title="左摇杆位置锁定（Q）"><input aria-label="左摇杆位置锁定" aria-keyshortcuts="Q" data-stick-lock="left" disabled="" type="checkbox"/><span>锁定</span></label><input aria-label="移动速度上限" class="speed-range" id="speed-range" max="0.30" min="0" step="0.01" type="range" value="0.30"/><input aria-label="移动速度上限" class="speed-input" id="speed-input" inputmode="decimal" max="0.30" min="0" step="0.01" type="number" value="0.30"/><span class="speed-unit">m/s</span></div>
 <div class="pad-slot"><div aria-disabled="true" aria-label="左摇杆，键盘 W A S D" class="pad" data-stick="left" role="group">
 <span aria-hidden="true" class="pad-ring"></span>
 <span class="axis top" data-axis-label="left-top">前进</span>
@@ -68,8 +68,21 @@
 </div></div>
 
 <p class="stick-summary sr-only" id="left-summary">前后或横移方向 ±20° 内，仅输出对应主轴分量。</p>
-</div><div class="stick"><div class="stick-header sr-only"><span class="stick-title">右摇杆</span><span class="stick-hint" id="right-hint">转向</span></div>
-<div class="stick-speed"><label class="stick-lock" title="速度锁定"><input aria-label="右摇杆速度锁定" data-stick-lock="right" disabled="" type="checkbox"/><span>锁定</span></label><input aria-label="转向速度上限" class="speed-range" id="turn-range" max="1" min="0" step="0.1" type="range" value="1"/><input aria-label="转向速度上限" class="speed-input" id="turn-input" max="1" min="0" step="0.1" type="number" value="1"/><span class="speed-unit">rad/s</span></div>
+</div>
+<div class="stick head-stick">
+<div class="head-stick-content">
+<div class="pad-slot"><div aria-disabled="true" aria-label="头部摇杆，上下俯仰，左右转向" class="pad" data-stick="head" role="group">
+<span aria-hidden="true" class="pad-ring"></span>
+<span class="axis top">抬头</span><span class="axis bottom">低头</span>
+<span class="axis left">左看</span><span class="axis right">右看</span>
+<div class="knob"></div>
+</div></div>
+<button aria-label="头部回中" class="action head-stick-center" data-action="center_head" disabled type="button">回中</button>
+<div class="head-stick-feedback"><span>ID 31 <output id="head-stick-pitch">--</output></span><span>ID 32 <output id="head-stick-yaw">--</output></span></div>
+</div>
+</div>
+<div class="stick stick-right"><div class="stick-header sr-only"><span class="stick-title">右摇杆</span><span class="stick-hint" id="right-hint">转向</span></div>
+<div class="stick-speed"><label class="stick-lock" title="右摇杆位置锁定（E）"><input aria-label="右摇杆位置锁定" aria-keyshortcuts="E" data-stick-lock="right" disabled="" type="checkbox"/><span>锁定</span></label><input aria-label="转向速度上限" class="speed-range" id="turn-range" max="1" min="0" step="0.1" type="range" value="1"/><input aria-label="转向速度上限" class="speed-input" id="turn-input" max="1" min="0" step="0.1" type="number" value="1"/><span class="speed-unit">rad/s</span></div>
 <div class="pad-slot"><div aria-disabled="true" aria-label="右摇杆，键盘方向键" class="pad" data-stick="right" role="group">
 <span aria-hidden="true" class="pad-ring"></span>
 <span class="axis top unused" data-axis-label="right-top">未使用</span>
@@ -92,7 +105,7 @@
   <div class="control-action-picker"><button class="action" id="control-action-select" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="control-action-options"><span id="control-action-name">选择动作</span><svg aria-hidden="true" class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button><div class="control-action-options" id="control-action-options" role="listbox" aria-label="可用动作" hidden></div></div>
   <button class="action primary" id="control-action-run" type="button" disabled>运行</button>
 </div><div class="accessory-controls"><label class="mouth-control"><span>嘴部开合</span><input aria-label="嘴部开合" class="speed-range" data-trigger-range="left_trigger" max="1" min="0" step="0.01" type="range" value="0"/></label></div></div>
-<section aria-label="自动避障" class="mode-obstacle" data-operator-reveal="actions"><div class="subsection-heading"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-radar"></use></svg>自动避障</h2><label class="obstacle-switch" for="obstacle-enabled"><span>启用</span><input disabled="" id="obstacle-enabled" type="checkbox"/></label></div><div class="obstacle-controls">
+<section aria-label="自动避障" class="mode-obstacle" data-requires-tof data-operator-reveal="actions"><div class="subsection-heading"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-radar"></use></svg>自动避障</h2><label class="obstacle-switch" for="obstacle-enabled"><span>启用</span><input disabled="" id="obstacle-enabled" type="checkbox"/></label></div><div class="obstacle-controls">
 <span aria-live="polite" class="obstacle-state" id="obstacle-state"></span>
 <label for="obstacle-distance"><span>避障距离 <output id="obstacle-distance-value">500 mm</output></span><input class="speed-range" disabled="" id="obstacle-distance" max="2000" min="100" step="50" type="range" value="500"/></label>
 <label for="obstacle-delay"><span>解除延时 <output id="obstacle-delay-value">200 ms</output></span><input class="speed-range" disabled="" id="obstacle-delay" max="5000" min="0" step="100" type="range" value="200"/></label>
@@ -108,32 +121,29 @@
 </section>
 </section>
 <section aria-label="目标追踪参数" class="page-panel vision-panel panel" data-console-panel="vision" hidden="" id="console-page-vision" role="tabpanel">
-<div class="panel-heading"><div class="heading-label"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-eye"></use></svg><span id="vision-heading">目标追踪</span></h2></div><label class="performance-mode-control" for="performance-mode" title="关闭实时画面，继续识别和跟踪"><span>性能模式</span><input id="performance-mode" role="switch" type="checkbox" autocomplete="off"/></label></div>
+<div class="panel-heading"><div class="heading-label"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-eye"></use></svg><span id="vision-heading">目标追踪</span></h2></div></div>
 <div class="vision-content">
+<div class="segmented" id="pickup-stages" role="group" aria-label="搬运阶段配置" hidden=""><button type="button" data-pickup-stage="target" aria-pressed="true">动作前</button><button type="button" data-pickup-stage="pickup_after" aria-pressed="false">动作后</button></div>
 <div class="vision-source-fields" data-vision-fields="color" id="vision-fields-color"><button aria-pressed="false" class="action" id="color-pick" type="button">取色</button><div class="color-preset-editor"><input aria-label="颜色名称" class="speed-input" id="color-preset-name" placeholder="颜色名称" type="text"/><button class="action" disabled="" id="color-preset-save" type="button">保存</button></div><label for="color-presets">选择颜色</label><div class="color-preset-editor"><select class="action" disabled="" id="color-presets"><option value="">请选择</option></select><button aria-label="删除所选颜色" class="action" disabled="" id="color-preset-delete" type="button">删除</button></div><label class="parameter color-threshold"><span>色差阈值 <output for="color-threshold" id="color-threshold-value">0.50</output></span><input class="speed-range" id="color-threshold" max="1" min="0" step="0.01" type="range" value="0.5"/></label></div>
-<div aria-live="polite" class="vision-feedback"><div class="color-result" data-vision-feedback="color"><span class="color-swatch" hidden="" id="color-swatch"></span><span id="color-result"></span></div><div class="color-result" data-vision-feedback="object" hidden="" id="object-status"></div></div>
+<div aria-live="polite" class="vision-feedback"><div class="color-result" data-vision-feedback="color"><span class="color-swatch" hidden="" id="color-swatch"></span><span id="color-result"></span><span id="line-result" hidden=""></span></div></div>
 <label class="head-position-setting" hidden="" id="head-position-setting">头部 ID 31 位置 <input aria-label="头部 ID 31 位置" class="speed-input" id="head-position" min="1024" max="2250" step="1" type="number" placeholder="输入位置" value="2100"/><span hidden="" id="head-position-home">Home</span><span id="head-position-range">（1024～2250）</span></label>
 <div class="settings-section vision-target" hidden=""><div class="subsection-heading" hidden="" id="inactive-arrival-heading"><h3>联合追踪到位参数（未启用）</h3></div><div class="target-parameters"><div class="parameter coordinated-goal" hidden=""><span>目标(320×180)</span><div class="tracking-deadzones coordinated-final-point"><label class="tracking-deadzone"><span>X</span><input aria-label="最终目标 X" class="speed-input" data-coordinated-final-point="0" disabled="" max="320" min="0" required="" step="any" type="number" value="180"/><output>px</output></label><label class="tracking-deadzone"><span>Y</span><input aria-label="最终目标 Y" class="speed-input" data-coordinated-final-point="1" disabled="" max="180" min="0" required="" step="any" type="number" value="150"/><output>px</output></label></div></div><div class="parameter coordinated-goal" hidden=""><span>目标误差</span><div class="tracking-deadzones coordinated-final-point"><label class="tracking-deadzone"><span>X ±</span><input aria-label="最终目标 X 误差" class="speed-input" data-coordinated-final-tolerance="0" disabled="" min="0" required="" step="any" type="number" value="10"/><output>px</output></label><label class="tracking-deadzone"><span>Y ±</span><input aria-label="最终目标 Y 误差" class="speed-input" data-coordinated-final-tolerance="1" disabled="" min="0" required="" step="any" type="number" value="10"/><output>px</output></label></div></div>
 <label class="parameter coordinated-follow-area" hidden="" id="follow-stop-area-setting" title="面积按 1280×720 画面换算"><span>跟踪目标面积</span><input aria-label="跟踪目标面积" class="speed-input" id="follow-stop-area" min="1" required="" step="1" type="number" value="320000"/><span>px²</span></label>
 <label class="parameter coordinated-follow-area" hidden="" id="follow-area-deadzone-setting" title="面积按 1280×720 画面换算"><span>面积死区 ±</span><input aria-label="面积死区" class="speed-input" id="follow-area-deadzone" min="0" max="9007199254740991" required="" step="1" type="number" value="80000"/><span>px²</span></label>
-<label class="parameter coordinated-follow-area" hidden="" id="follow-stop-distance-setting"><span>ToF 跟踪距离</span><input aria-label="ToF 跟踪距离" class="speed-input" id="follow-stop-distance" min="1" max="4294967295" required="" step="1" type="number" value="900"/><span>mm</span></label>
-<label class="parameter coordinated-follow-area" hidden="" id="follow-distance-deadzone-setting"><span>ToF 距离死区 ±</span><input aria-label="ToF 距离死区" class="speed-input" id="follow-distance-deadzone" min="0" max="4294967295" required="" step="1" type="number" value="100"/><span>mm</span></label>
+<label class="parameter coordinated-follow-area" hidden="" id="follow-stop-distance-setting" data-requires-tof><span>ToF 跟踪距离</span><input aria-label="ToF 跟踪距离" class="speed-input" id="follow-stop-distance" min="1" max="4294967295" required="" step="1" type="number" value="900"/><span>mm</span></label>
+<label class="parameter coordinated-follow-area" hidden="" id="follow-distance-deadzone-setting" data-requires-tof><span>ToF 距离死区 ±</span><input aria-label="ToF 距离死区" class="speed-input" id="follow-distance-deadzone" min="0" max="4294967295" required="" step="1" type="number" value="100"/><span>mm</span></label>
 <div class="parameter coordinated-arrival" hidden=""><label for="coordinated-arrival-skill">到位后动作</label><select class="action" data-coordinated-arrival-skill="" disabled="" id="coordinated-arrival-skill"><option value="">无</option></select><label class="coordinated-arrival-delay" for="coordinated-arrival-delay">动作延时 <input aria-label="到位动作延时" class="speed-input" disabled="" id="coordinated-arrival-delay" min="0" required="" step="any" type="number" value="1"/><span>秒</span></label></div>
 <div class="parameter coordinated-mouth" hidden=""><label class="mouth-enable"><input data-coordinated-mouth="before" data-mouth-field="enabled" disabled="" type="checkbox"/>动作前嘴部</label><label>开度 <input aria-label="动作前嘴部开度" class="speed-input" data-coordinated-mouth="before" data-mouth-field="open" disabled="" min="0" max="100" required="" step="any" type="number" value="0"/> %</label><label>时间 <input aria-label="动作前嘴部转动时间" class="speed-input" data-coordinated-mouth="before" data-mouth-field="duration_s" disabled="" min="0" required="" step="any" type="number" value="0.5"/> 秒</label></div>
 <div class="parameter coordinated-mouth" hidden=""><label class="mouth-enable"><input data-coordinated-mouth="after" data-mouth-field="enabled" disabled="" type="checkbox"/>动作后嘴部</label><label>开度 <input aria-label="动作后嘴部开度" class="speed-input" data-coordinated-mouth="after" data-mouth-field="open" disabled="" min="0" max="100" required="" step="any" type="number" value="0"/> %</label><label>时间 <input aria-label="动作后嘴部转动时间" class="speed-input" data-coordinated-mouth="after" data-mouth-field="duration_s" disabled="" min="0" required="" step="any" type="number" value="0.5"/> 秒</label></div>
 </div></div>
 <div class="settings-section vision-pid"><div class="subsection-heading"><h3>追踪参数</h3></div><div class="tracking-pid" data-pid-pane="body" hidden="" id="body-pid">
-<fieldset><legend>前后 PID</legend>
-<div class="pid-control"><span>P</span><input aria-label="前后 P 滑杆" class="speed-range" data-pid-axis="0" data-pid-term="0" max="10" min="0" step="any" type="range" value="0.5"/><input aria-label="前后 P 数值" class="speed-input" data-pid-value-axis="0" data-pid-value-term="0" max="10" min="0" step="any" type="number" value="0.5"/></div>
-<div class="pid-control"><span>I</span><input aria-label="前后 I 滑杆" class="speed-range" data-pid-axis="0" data-pid-term="1" max="10" min="0" step="any" type="range" value="0.04"/><input aria-label="前后 I 数值" class="speed-input" data-pid-value-axis="0" data-pid-value-term="1" max="10" min="0" step="any" type="number" value="0.04"/></div>
-<div class="pid-control"><span>D</span><input aria-label="前后 D 滑杆" class="speed-range" data-pid-axis="0" data-pid-term="2" max="10" min="0" step="any" type="range" value="0.01"/><input aria-label="前后 D 数值" class="speed-input" data-pid-value-axis="0" data-pid-value-term="2" max="10" min="0" step="any" type="number" value="0.01"/></div>
-</fieldset>
+<label class="parameter"><span>巡线速度</span> <input aria-label="巡线速度" class="speed-input" id="line-speed" min="0" max="0.4" step="0.01" required type="number" value="0.15"/> m/s</label>
 <fieldset><legend>转向 PID</legend>
 <div class="pid-control"><span>P</span><input aria-label="转向 P 滑杆" class="speed-range" data-pid-axis="1" data-pid-term="0" max="10" min="0" step="any" type="range" value="0.5"/><input aria-label="转向 P 数值" class="speed-input" data-pid-value-axis="1" data-pid-value-term="0" max="10" min="0" step="any" type="number" value="0.5"/></div>
 <div class="pid-control"><span>I</span><input aria-label="转向 I 滑杆" class="speed-range" data-pid-axis="1" data-pid-term="1" max="10" min="0" step="any" type="range" value="0.04"/><input aria-label="转向 I 数值" class="speed-input" data-pid-value-axis="1" data-pid-value-term="1" max="10" min="0" step="any" type="number" value="0.04"/></div>
 <div class="pid-control"><span>D</span><input aria-label="转向 D 滑杆" class="speed-range" data-pid-axis="1" data-pid-term="2" max="10" min="0" step="any" type="range" value="0.01"/><input aria-label="转向 D 数值" class="speed-input" data-pid-value-axis="1" data-pid-value-term="2" max="10" min="0" step="any" type="number" value="0.01"/></div>
 </fieldset>
-<div class="vision-deadzone" id="body-tracking-deadzone"><div class="subsection-heading"><h3>身体追踪目标与死区</h3></div><label class="parameter" id="tracking-area-setting"><span>目标面积 <output for="tracking-area" id="tracking-area-value">--</output></span><input class="speed-range" disabled="" id="tracking-area" max="100" min="0.01" step="0.01" type="range" value="1"/></label><div class="tracking-deadzones"><label class="tracking-deadzone"><span>前后</span><input class="speed-input" data-tracking-deadzone="0" min="0" step="any" type="number" value="10"/><output>%</output></label><label class="tracking-deadzone"><span>转向</span><input class="speed-input" data-tracking-deadzone="1" min="0" step="any" type="number" value="5"/><output>%</output></label></div></div>
+<div class="vision-deadzone"><div class="tracking-deadzones"><label class="tracking-deadzone"><span>转向死区</span><input class="speed-input" data-tracking-deadzone="1" min="0" step="any" type="number" value="5"/><output>%</output></label></div></div>
 </div><div class="tracking-pid" data-pid-pane="head" hidden="" id="head-pid">
 <fieldset><legend>俯仰 PID</legend>
 <div class="pid-control"><span>P</span><input aria-label="俯仰 P 滑杆" class="speed-range" data-head-pid-range-axis="0" data-head-pid-range-term="0" max="10" min="0" step="any" type="range" value="0.5"/><input aria-label="俯仰 P 数值" class="speed-input" data-head-pid-axis="0" data-head-pid-term="0" step="any" type="number" value="0.5"/></div>
@@ -177,9 +187,15 @@
 </div></div>
 </div>
 <div class="object-area" data-vision-fields="object" title="面积按 1280×720 画面换算" hidden="">检测框面积：<span id="object-area-value">--</span></div>
-<div class="tracking-actions"><button class="action primary" disabled="" id="tracking-start" type="button">开始追踪</button><button class="action" disabled="" id="tracking-stop" type="button">停止追踪</button></div>
+<div class="tracking-actions">
+<div class="person-model-controls" data-vision-fields="object" hidden="">
+<label for="person-model" hidden=""><span>行人检测模型</span><select class="action" id="person-model" disabled="" autocomplete="off"><option value="yolov5s-relu-640x384">YOLOv5s-ReLU 640×384</option><option value="yolo26n">YOLO26n（原模型）</option><option value="yolov6n-512">YOLOv6n 512×512</option></select></label>
+<div class="color-result" id="object-status" role="status"></div>
+</div>
+<button class="action primary" disabled="" id="tracking-start" type="button">开始追踪</button><button class="action" disabled="" id="tracking-stop" type="button">停止追踪</button>
+<button class="action" disabled="" id="pickup-sequence-start" type="button">开始两段搬运</button></div>
 </section>
-<section aria-label="避障行走参数" class="page-panel maze-panel panel" data-console-panel="maze" hidden="" id="console-page-maze" role="tabpanel">
+<section aria-label="避障行走参数" class="page-panel maze-panel panel" data-console-panel="maze" data-requires-tof hidden="" id="console-page-maze" role="tabpanel">
 <div class="panel-heading"><div class="heading-label"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-radar"></use></svg>避障行走</h2></div></div>
 <div aria-live="polite" class="color-result" id="maze-status"></div>
 <div aria-label="三段连续转向" class="route-flow"><span><b>01</b>预转</span><svg aria-hidden="true" class="icon"><use href="#icon-arrow"></use></svg><span><b>02</b>转动测距</span><svg aria-hidden="true" class="icon"><use href="#icon-arrow"></use></svg><span><b>03</b>续转</span></div>
@@ -207,7 +223,7 @@
 <dl class="software-info-rows">
 <div><dt>硬件版本</dt><dd id="device-hardware-version">--</dd></div>
 <div><dt>镜像版本</dt><dd id="device-image-version">--</dd></div>
-<div><dt>软件版本</dt><dd id="device-software-version">--</dd></div>
+<div><dt>软件版本</dt><dd class="software-version-value"><button class="action" id="check-software-update" type="button" hidden>检查更新</button><span id="device-software-version">--</span></dd></div>
 <div><dt>固件版本</dt><dd id="device-imu-firmware-version">--</dd></div>
 <div><dt>版权说明</dt><dd>© 2026 Hiwonder</dd></div>
 <div><dt>软件许可证</dt><dd><button class="action" id="licenses-open" type="button">查看许可证</button></dd></div>
@@ -216,11 +232,12 @@
 </section>
 <section aria-labelledby="robot-status-title" class="page-panel status-panel panel" data-console-panel="status" hidden="" id="console-page-status" role="tabpanel">
 <div class="panel-heading"><h2 id="robot-status-title"><svg aria-hidden="true" class="icon section-icon"><use href="#icon-activity"></use></svg>实时状态</h2></div>
-<div class="status-content"><dl class="status-grid status-list"><div class="metric"><dt>当前策略</dt><dd id="policy-status">--</dd></div><div class="metric"><dt>运行模式</dt><dd id="robot-mode-status">--</dd></div><div class="metric" title="最近统计窗口平均控制周期 / 控制周期延误累计次数 / 总线读取超时累计次数"><dt>周期/延误/超时</dt><dd id="loop-status">-- / -- / --</dd></div><div class="metric"><dt>控制权</dt><dd id="human-owner" role="status">等待连接</dd></div><div class="metric"><dt>安全状态</dt><dd id="safety-status">--</dd></div><div class="metric"><dt>机器人服务</dt><dd id="robotd-status">未连接</dd></div><div class="metric"><dt>健康状态</dt><dd id="health-status">等待数据</dd></div><div class="metric"><dt>最高舵机温度</dt><dd id="motor-status">--</dd></div><div class="metric"><dt>CPU 温度</dt><dd id="cpu-status">--</dd></div><div class="metric"><dt>ToF 距离</dt><dd id="tof-distance">--</dd></div><div class="status-vector metric"><dt>IMU 角速度</dt><dd id="gyro-status">--</dd></div><div class="status-vector metric"><dt>IMU RPY (°)</dt><dd id="rpy-status">--</dd></div></dl><p class="status-note" id="robotd-summary">等待机器人服务。</p><p class="status-detail" id="status-detail">状态数据尚未到达。</p></div>
+<div class="status-content"><dl class="status-grid status-list"><div class="metric"><dt>当前策略</dt><dd id="policy-status">--</dd></div><div class="metric"><dt>运行模式</dt><dd id="robot-mode-status">--</dd></div><div class="metric" title="最近统计窗口平均控制周期 / 控制周期延误累计次数 / 总线读取超时累计次数"><dt>周期/延误/超时</dt><dd id="loop-status">-- / -- / --</dd></div><div class="metric"><dt>控制权</dt><dd id="human-owner" role="status">等待连接</dd></div><div class="metric"><dt>安全状态</dt><dd id="safety-status">--</dd></div><div class="metric"><dt>机器人服务</dt><dd id="robotd-status">未连接</dd></div><div class="metric"><dt>健康状态</dt><dd id="health-status">等待数据</dd></div><div class="metric"><dt>最高舵机温度</dt><dd id="motor-status">--</dd></div><div class="metric"><dt>CPU 温度</dt><dd id="cpu-status">--</dd></div><div class="metric" data-requires-tof><dt>ToF 距离</dt><dd id="tof-distance">--</dd></div><div class="status-vector metric"><dt>IMU 角速度</dt><dd id="gyro-status">--</dd></div><div class="status-vector metric"><dt>IMU RPY (°)</dt><dd id="rpy-status">--</dd></div></dl><p class="status-note" id="robotd-summary">等待机器人服务。</p><p class="status-detail" id="status-detail">状态数据尚未到达。</p></div>
 </section>
 </div>
 <div class="feedback-dock"><div class="status"><span aria-label="控制连接中" class="dot" id="dot" role="img"></span><span id="connection">正在连接</span></div><button class="sidebar-shutdown" id="standalone-shutdown" type="button">关机</button><div class="feedback"><div aria-live="polite" class="tracking-phase" id="coordinated-status"></div><div aria-live="polite" class="notice" id="notice">正在等待机器人控制服务。</div><span class="status-note" id="settings-status" role="status"></span></div></div>
 
+<p class="control-busy" id="control-busy" role="status" hidden></p>
 </main>
 <dialog aria-labelledby="motion-blocked-title" class="relax-confirm" id="motion-blocked"><form method="dialog"><h2 id="motion-blocked-title">请先启动</h2><p id="motion-blocked-text">机器人已休息，请点击启动后再操控。</p><div class="relax-confirm-actions"><button class="action primary" value="ok">知道了</button></div></form></dialog>
 <dialog aria-labelledby="shutdown-confirm-title" class="relax-confirm" id="shutdown-confirm"><form method="dialog"><h2 id="shutdown-confirm-title">确认关机</h2><p>机器人将先坐下并收回姿态，然后关闭系统。</p><div class="relax-confirm-actions"><button class="action" value="cancel">取消</button><button class="action primary" value="confirm">确认关机</button></div></form></dialog>
@@ -239,11 +256,11 @@
 <form method="dialog" class="licenses-actions"><button class="action" type="submit">关闭</button></form>
 </dialog>
 <script src="/console.js"></script>
-<script src="/controls.js"></script>
-<script src="/action-library.js"></script>
-<script src="/video.js"></script>
-<script src="/color-picker.js"></script>
-<script src="/objects.js"></script>
+<script type="module" src="/controls.js"></script>
+<script type="module" src="/action-library.js"></script>
+<script type="module" src="/video.js"></script>
+<script type="module" src="/color-picker.js"></script>
+<script type="module" src="/objects.js"></script>
 <script type="module" src="/language.js"></script>
 </body>
 </html>

@@ -2,11 +2,10 @@
 
 import time
 
-from app.models.update_control import UpdateControl
+from app.models.update_control import REST_TIMEOUT, UpdateControl
 from app.robot.robotd_state import query_robotd
 
 
-REST_TIMEOUT = 4.0
 POLL_INTERVAL = .25
 
 
@@ -43,8 +42,8 @@ def _wait_rest(path, deadline):
         time.sleep(_remaining(deadline, POLL_INTERVAL))
 
 
-def ensure_rest(path):
-    deadline = time.monotonic() + REST_TIMEOUT
+def ensure_rest(path, timeout=REST_TIMEOUT):
+    deadline = time.monotonic() + timeout
     phase, enabled = rest_status(path, deadline)
     if phase == "rested":
         return

@@ -10,6 +10,7 @@ export function createCalibrationControls({ request, confirmAction, toast }) {
   let revision = 0;
   let demoMode = false;
   let imuSource = 'id200';
+  let headAvailable = true;
   const announcedResults = new Map();
 
   async function command(body) {
@@ -68,8 +69,10 @@ export function createCalibrationControls({ request, confirmAction, toast }) {
 
   for (const button of document.querySelectorAll('[data-calibration-source]')) {
     button.addEventListener('click', () => {
-      if (pending || bodyState.active || headState.active || button.dataset.calibrationSource === selectedSource) return;
-      selectedSource = button.dataset.calibrationSource;
+      const source = button.dataset.calibrationSource;
+      if (pending || bodyState.active || headState.active || source === selectedSource ||
+          source === 'head' && !headAvailable) return;
+      selectedSource = source;
       render();
       document.dispatchEvent(new CustomEvent('calibration-source-change', { detail: selectedSource }));
     });
@@ -146,5 +149,16 @@ export function createCalibrationControls({ request, confirmAction, toast }) {
     }
   }
   render();
-  return { render, source: () => selectedSource };
+  return {
+    render,
+    source: () => selectedSource,
+    setHeadAvailable(available) {
+      headAvailable = available;
+      if (!available && selectedSource === 'head') {
+        selectedSource = 'body';
+        render();
+        document.dispatchEvent(new CustomEvent('calibration-source-change', { detail: selectedSource }));
+      }
+    },
+  };
 }

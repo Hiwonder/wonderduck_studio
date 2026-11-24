@@ -9,11 +9,11 @@ function usable(sample, maxAgeUs = 100000) {
       Array.isArray(sample[field]) && sample[field].length === 3 && sample[field].every(Number.isFinite));
 }
 
-export function createCalibrationCharts({ request, context, onError, onStatus, onClear }) {
+export function createCalibrationCharts({ request, context, onStatus }) {
   const get = id => document.getElementById(id);
   const charts = ['accel-chart', 'gyro-chart'].map(get);
   let active = false, timer = null, pending = false, generation = 0, latestState = {}, idleStatus = '等待采样';
-  let source = 'body', lastStreamNotice = '', streamNoticeId;
+  let source = 'body';
   let live = [], lastSample = '';
   const visibility = {
     'accel-chart': { raw: [true, true, true], corrected: [true, true, true] },
@@ -21,12 +21,7 @@ export function createCalibrationCharts({ request, context, onError, onStatus, o
   };
 
   function streamNotice(message, error = false) {
-    if (message === lastStreamNotice) return;
-    if (streamNoticeId !== undefined) onClear(streamNoticeId);
-    streamNoticeId = undefined;
-    lastStreamNotice = message;
-    if (!message) return;
-    streamNoticeId = error ? onError(message) : onStatus(message);
+    onStatus(message, error);
   }
 
   function add(sample, source, maxAgeUs) {
@@ -222,7 +217,8 @@ export function createCalibrationCharts({ request, context, onError, onStatus, o
       }
       const stale = !live.length || live.at(-1).source !== 'console' || performance.now() - live.at(-1).received > 1200;
       const status = stale && idleStatus.startsWith('实时') ? '等待新样本' : idleStatus;
-      streamNotice(status.startsWith('实时 · 传感器坐标') ? '' : status, status.startsWith('采样不可用'));
+      streamNotice(status.startsWith('实时 · 传感器坐标') ? '' : status,
+        status === '躯体 IMU 读取超时' || status.startsWith('采样不可用'));
       if (stale) updateValues(null);
     }
   }
@@ -234,6 +230,8 @@ export function createCalibrationCharts({ request, context, onError, onStatus, o
       if (info.readonly || latestState.imu_source === 'i2c') {
         idleStatus = info.readonly ? (latestState.imu?.raw_sample
           ? '实时 · 传感器坐标（只读）' : '等待 IMU 原始六轴数据') : '当前来源不是 ID200';
+      } else if (info.studio && !latestState.maintenance_owner) {
+        idleStatus = latestState.maintenance_error || '等待采样';
       } else {
         pending = true;
         try {
@@ -244,7 +242,7 @@ export function createCalibrationCharts({ request, context, onError, onStatus, o
           }
         } catch (error) {
           if (active && current === generation && !latestState.calibration?.active) {
-            idleStatus = `采样不可用：${error.message}`;
+            idleStatus = error.message === '躯体 IMU 读取超时' ? error.message : `采样不可用：${error.message}`;
           }
         } finally { pending = false; }
       }

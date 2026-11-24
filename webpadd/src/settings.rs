@@ -15,6 +15,7 @@ pub(super) enum TrackingScope {
     #[default]
     Target,
     Person,
+    PickupAfter,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -48,8 +49,14 @@ pub(super) struct MazeSettings {
 #[serde(deny_unknown_fields)]
 pub(super) struct TrackingSettings {
     pub(super) reference_area: Option<f64>,
+    #[serde(default = "default_line_speed")]
+    pub(super) line_speed: f64,
     pub(super) deadzone: [f64; 2],
     pub(super) gains: [[f64; 3]; 2],
+}
+
+fn default_line_speed() -> f64 {
+    0.15
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -144,6 +151,7 @@ impl CoordinatedTrackingSettings {
             arrival_skill: self.arrival_skill.clone(),
             mouth_before: self.mouth_before,
             mouth_after: self.mouth_after,
+            pickup_after: None,
         }.valid()
     }
 }
@@ -186,6 +194,18 @@ pub(super) struct TrackingPhaseStore {
 }
 
 impl TrackingPhaseStore {
+    pub(super) fn load_pickup_after(config: &Path) -> Result<Self, String> {
+        let path = config.with_extension("pickup-after-phases.json");
+        let value = match fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str::<TrackingPhaseSettings>(&text)
+                .map_err(|error| format!("解析搬运动作后速度参数 {} 失败：{error}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => TrackingPhaseSettings::default(),
+            Err(error) => return Err(format!("读取搬运动作后速度参数 {} 失败：{error}", path.display())),
+        };
+        if !value.valid() { return Err(format!("搬运动作后速度参数 {} 包含无效值", path.display())); }
+        Ok(Self { path, value })
+    }
+
     pub(super) fn load(config: &Path, initial_gains: [f64; 3]) -> Result<Self, String> {
         let path = config.with_extension("tracking-phases.json");
         let value = match fs::read_to_string(&path) {
@@ -268,7 +288,7 @@ impl Default for Settings {
                 turn_initial_ms: 400, turn_final_ms: 600, restore_ms: 1000,
             },
             tracking: TrackingSettings {
-                reference_area: None, deadzone: [0.1, 0.05],
+                reference_area: None, line_speed: default_line_speed(), deadzone: [0.1, 0.05],
                 gains: [[0.5, 0.04, 0.01], [0.5, 0.04, 0.01]],
             },
             color_threshold: 0.5, color_reference: None, object_label: None,
@@ -298,6 +318,7 @@ impl Settings {
             initial_pitch: None,
             action: proto::MotionTrackingAction::Update,
             target: None,
+            line_speed: Some(self.tracking.line_speed),
             reference_area: self.tracking.reference_area.unwrap_or(0.01),
             deadzone: self.tracking.deadzone,
             gains: self.tracking.gains,
@@ -390,6 +411,10 @@ impl Store {
         };
         let mut value: Settings = serde_json::from_str(&text)
             .map_err(|error| format!("解析页面参数 {} 失败：{error}", path.display()))?;
+        // Older snapshots allowed a linear speed up to 0.4 m/s.
+        if (MAX_LINEAR..=0.4).contains(&value.linear_speed) {
+            value.linear_speed = MAX_LINEAR;
+        }
         if !value.valid() {
             return Err(format!("页面参数 {} 包含无效值", path.display()));
         }
@@ -453,7 +478,15 @@ pub(super) struct CoordinatedStore {
 
 impl CoordinatedStore {
     pub(super) fn load(config: &Path) -> Result<Self, String> {
-        let path = config.with_extension("coordinated-pid.json");
+        Self::load_with_extension(config, "coordinated-pid.json")
+    }
+
+    pub(super) fn load_pickup_after(config: &Path) -> Result<Self, String> {
+        Self::load_with_extension(config, "pickup-after-pid.json")
+    }
+
+    fn load_with_extension(config: &Path, extension: &str) -> Result<Self, String> {
+        let path = config.with_extension(extension);
         let value = match fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str::<CoordinatedTrackingSettings>(&text)
                 .map_err(|error| format!("解析联合追踪参数 {} 失败：{error}", path.display()))?,

@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use super::AppState;
 
+const UNOQ_CARD: &str = "ArduinoImolaHPH";
+const UNOQ_GAIN: &str = "name=RX_RX0 Digital Volume";
+// The QCM2290 gain starts at -84 dB (mute). Keep the upper setting at unity gain.
+const UNOQ_UNITY_GAIN: u32 = 84;
+
 #[derive(Clone)]
 pub(super) struct AudioVolume {
     card: Result<String, String>,
@@ -54,6 +59,16 @@ impl AudioVolume {
     }
 
     fn read(&self) -> Result<Volume, String> {
+        if self.card.as_deref() == Ok(UNOQ_CARD) {
+            let gain = self.mixer(&["cget", UNOQ_GAIN])?;
+            let [raw] = values(&gain)?[..] else {
+                return Err("无法读取声卡音量".into());
+            };
+            let raw: u32 = raw.parse().map_err(|_| "无效声卡音量")?;
+            return Ok(Volume {
+                volume: ((raw.min(UNOQ_UNITY_GAIN) * 100 + UNOQ_UNITY_GAIN / 2) / UNOQ_UNITY_GAIN) as u8,
+            });
+        }
         let line = self.mixer(&["cget", "name=Line Playback Switch"])?;
         let switches = values(&line)?;
         if switches
@@ -106,7 +121,10 @@ impl AudioVolume {
         if volume > 100 {
             return Err("音量必须在 0 到 100 之间".into());
         }
-        if volume == 0 {
+        if self.card.as_deref() == Ok(UNOQ_CARD) {
+            let gain = (u32::from(volume) * UNOQ_UNITY_GAIN + 50) / 100;
+            self.mixer(&["cset", UNOQ_GAIN, &gain.to_string()])?;
+        } else if volume == 0 {
             self.mixer(&["cset", "name=Line Playback Switch", "off,off"])?;
         } else {
             self.mixer(&["cset", "name=PCM Playback Volume", &format!("{volume}%,{volume}%")])?;

@@ -24,6 +24,13 @@ WRITE_ACTIONS = {"torque", "move", "move_direct", "write_register", "offset_dire
 REALTIME_WRITE_ACTIONS = {"move_direct", "offset_direct"}
 CALIBRATION_ACTIONS = {"calibration_start", "calibration_restore", "calibration_next", "calibration_cancel"}
 SERVO_DEBUG_TIMEOUT = 25
+POSITION_WRITE_IDLE_SECONDS = .18
+POSITION_SAMPLE_INTERVAL_MAX = 2.0
+SERIAL_INTERRUPTED = "卸力前的排队操作已取消"
+
+
+class SerialOperationCancelled(RuntimeError):
+    """The bus worker has reached a safe boundary for a pending release."""
 
 
 class CommandQueue(queue.Queue):
@@ -267,12 +274,14 @@ class Controller:
             CONSOLE_ROOT / "vendor/imu/imu-calibrate-gyro.py", port, maintenance=maintenance)
         self.commands = CommandQueue(maxsize=16)
         self.stop = threading.Event()
+        self.closing = threading.Event()
         self.lock = threading.Lock()
         self.emergency_lock = threading.RLock()
         self.control_generation = 0
         self.emergency_in_progress = False
         self.emergency_pending = 0
         self.calibration_release_verified = False
+        self.calibration_start = None
         self.partial_maintenance = False
         self.partial_unavailable_ids = set()
         self.imu_only = imu_only
@@ -292,6 +301,7 @@ class Controller:
         self.servo_debug = "off"
         self.servo_debug_ids = set()
         self.servo_debug_pending = set()
+        self.hardware.check_interrupted = self._check_serial_interrupt
         self.worker = threading.Thread(target=self.run, name="hx-bus", daemon=True)
         self.worker.start()
 
@@ -315,6 +325,8 @@ class Controller:
     def arm(self, client, on):
         with self.lock:
             generation = self.control_generation
+            if on and self.closing.is_set():
+                raise RuntimeError("维护控制器已关闭")
             if on and self.emergency_in_progress:
                 raise PermissionError("卸力尚未完成，请稍后重新解锁")
         with self.emergency_lock:
@@ -342,26 +354,31 @@ class Controller:
         return dict(armed=self.armed(client))
 
     def submit(self, command, client):
+        return self.finish_command(command, self.enqueue_command(command, client))
+
+    def enqueue_command(self, command, client):
         action = command.get("action")
+        if self.closing.is_set() and action not in ("release_all", "release_unlocked"):
+            raise RuntimeError("维护控制器已关闭")
         if action == "release_unlocked":
             locked = command.get("locked_ids")
             if (not isinstance(locked, list) or not locked or
                     any(type(device_id) is not int for device_id in locked) or
                     not set(locked).issubset({joint["id"] for joint in self.joints})):
                 raise ValueError("锁定舵机列表无效")
-            return self.emergency_release(locked)
+            return self.enqueue_emergency_release(locked)
         if action == "save_parameters" or action not in READ_ACTIONS | WRITE_ACTIONS | CALIBRATION_ACTIONS:
             raise ValueError("未知操作")
         if (action in {"torque", "move", "move_direct", "write_register", "offset_direct"}
                 and command.get("id") in self.unavailable_servo_ids()):
             raise ValueError(f"ID {command.get('id')} 未连接或数据已过期")
         if action == "release_all":
-            return self.emergency_release()
+            return self.enqueue_emergency_release()
         if action == "servo_debug":
             if type(command.get("enabled")) is not bool:
                 raise ValueError("调试模式状态必须为布尔值")
             with self.servo_debug_request_lock:
-                if self.stop.is_set():
+                if self.closing.is_set():
                     raise RuntimeError("维护控制器已关闭")
                 with self.lock:
                     if command["enabled"] and not (self.owner == client and time.monotonic() < self.armed_until):
@@ -380,20 +397,34 @@ class Controller:
         elif action in WRITE_ACTIONS | CALIBRATION_ACTIONS and self.playback.active():
             raise RuntimeError("动作正在播放，请先停止")
         future = Future()
-        self.commands.put_nowait((dict(command, _control_generation=generation), client, time.monotonic() + 3, future))
-        return future.result(timeout=5)
+        with self.emergency_lock:
+            if self.closing.is_set():
+                raise RuntimeError("维护控制器已关闭")
+            calibration_start = action in ("calibration_start", "calibration_restore")
+            if calibration_start and self.calibration_busy():
+                raise RuntimeError("标定正在进行")
+            self.commands.put_nowait((dict(command, _control_generation=generation), client, time.monotonic() + 3, future))
+            if calibration_start:
+                self.calibration_start = future
+        return future
 
-    def emergency_release(self, locked_ids=()):
+    def calibration_busy(self):
+        return (self.calibration_start is not None and not self.calibration_start.done()
+                or self.calibration.snapshot()["active"])
+
+    def enqueue_emergency_release(self, locked_ids=()):
         with self.emergency_lock:
             with self.lock:
+                if self.closing.is_set():
+                    raise RuntimeError("维护控制器已关闭")
                 self.control_generation += 1
                 self.emergency_in_progress = True
                 self.emergency_pending += 1
                 self.owner, self.armed_until = None, 0
             self.batch.cancel("已请求卸力")
+            # Invalidate queued frames without waiting for the serial worker.
             with self.action_request_lock:
                 self.action_generation += 1
-                self.playback.cancel("已请求卸力")
             future = Future()
             def completed(_future):
                 with self.lock:
@@ -404,10 +435,30 @@ class Controller:
             if locked_ids:
                 release["locked_ids"] = list(locked_ids)
             self.commands.put_emergency((release, None, float("inf"), future))
-            try:
-                return future.result(timeout=SERVO_DEBUG_TIMEOUT)
-            except FutureTimeout:
-                raise TimeoutError("卸力仍在执行，结果尚未确认") from None
+            return future
+
+    @staticmethod
+    def finish_emergency_release(future):
+        try:
+            return future.result(timeout=SERVO_DEBUG_TIMEOUT)
+        except FutureTimeout:
+            raise TimeoutError("卸力仍在执行，结果尚未确认") from None
+
+    def emergency_release(self, locked_ids=()):
+        return self.finish_emergency_release(self.enqueue_emergency_release(locked_ids))
+
+    def finish_command(self, command, future):
+        action = command["action"]
+        if action in ("release_all", "release_unlocked"):
+            return self.finish_emergency_release(future)
+        if action == "servo_debug":
+            return self._finish_servo_debug(future)
+        return future.result(timeout=5)
+
+    def _check_serial_interrupt(self):
+        with self.lock:
+            if self.emergency_in_progress:
+                raise SerialOperationCancelled(SERIAL_INTERRUPTED)
 
     def _queue_servo_debug(self, enabled, client, internal=False, generation=None):
         future = Future()
@@ -425,6 +476,10 @@ class Controller:
         except queue.Full:
             future.cancel()
             raise
+        return future
+
+    @staticmethod
+    def _finish_servo_debug(future):
         try:
             return future.result(timeout=SERVO_DEBUG_TIMEOUT)
         except FutureTimeout:
@@ -468,6 +523,9 @@ class Controller:
                 self.servo_debug_ids = set(ids)
         try:
             set_gain(66 if enabled else 15)
+        except SerialOperationCancelled:
+            # Leave restoration pending. The next bus operation must be release.
+            raise
         except Exception as error:
             if not enabled:
                 raise RuntimeError(f"恢复位置 P=15 失败：{error}") from error
@@ -489,6 +547,8 @@ class Controller:
         operation = command.get('operation')
         if operation == 'start':
             with self.emergency_lock:
+                if self.closing.is_set():
+                    raise RuntimeError("维护控制器已关闭")
                 if self.playback.active():
                     raise RuntimeError('动作正在播放，请先停止')
                 if not self.armed(client):
@@ -514,7 +574,7 @@ class Controller:
                 raise TimeoutError("动作帧排队超时，未发送") from None
             raise TimeoutError("动作帧仍在发送，结果尚未确认") from None
 
-    def action_task(self, command, client, *, defer_frame=False):
+    def enqueue_action(self, command, client):
         operation = command.get("operation")
         if operation == "status":
             return self.playback.snapshot()
@@ -524,6 +584,8 @@ class Controller:
                 return self.playback.cancel("已停止")
         if operation not in ("start", "send_frame"):
             raise ValueError("未知动作播放操作")
+        if self.closing.is_set():
+            raise RuntimeError("维护控制器已关闭")
         with self.action_request_lock:
             generation = self.action_generation
         if not self.armed(client):
@@ -551,16 +613,24 @@ class Controller:
                 raise ValueError("本帧舵机均已锁定或隐藏")
         future = Future()
         with self.action_request_lock:
-            if generation != self.action_generation:
+            if generation != self.action_generation or self.closing.is_set():
                 raise RuntimeError("动作播放请求已取消")
             queued = (dict(action="send_action_frame", duration_ms=duration, targets=targets, generation=generation)
                       if operation == "send_frame" else
-                      dict(action="start_action_playback", document=document, loop=command.get("loop", False),
-                           locked_ids=locked, generation=generation))
+                      dict(action="start_action_playback", frames=available_frames, loop=command.get("loop", False),
+                           generation=generation))
             self.commands.put_nowait((queued, client, time.monotonic() + 3, future))
+        return future
+
+    def finish_action(self, operation, result):
         if operation == "send_frame":
-            return future if defer_frame else self.finish_action_frame(future)
-        return future.result(timeout=5)
+            return self.finish_action_frame(result)
+        if operation == "start":
+            return result.result(timeout=5)
+        return result
+
+    def action_task(self, command, client):
+        return self.finish_action(command.get("operation"), self.enqueue_action(command, client))
 
     def snapshot(self, client):
         with self.lock:
@@ -609,8 +679,9 @@ class Controller:
 
     def run(self):
         next_sample = time.monotonic()
+        last_sample_at = next_sample
         last_sample_error = None
-        while not self.stop.is_set() or self.batch.active():
+        while not self.stop.is_set() or self.batch.active() or self.emergency_in_progress:
             try:
                 command, client, deadline, future = self.commands.get_emergency_nowait()
             except queue.Empty:
@@ -628,12 +699,17 @@ class Controller:
                     except queue.Empty:
                         command = None
             if command is not None:
-                if command["action"] in ("servo_debug", "send_action_frame") and not future.set_running_or_notify_cancel():
+                if not future.set_running_or_notify_cancel():
                     continue
                 try:
                     if time.monotonic() > deadline:
                         raise TimeoutError("排队操作已过期，未执行")
-                    if command["action"] == "servo_debug" and command["internal"]:
+                    internal = command["action"] == "servo_debug" and command["internal"]
+                    if command["action"] != "release_all" and not internal:
+                        if self.closing.is_set():
+                            raise RuntimeError("维护控制器已关闭")
+                        self._check_serial_interrupt()
+                    if internal:
                         while self.batch.active():
                             if not self.batch.step():
                                 raise RuntimeError("批量保存尚未完成，串口不能交回")
@@ -655,6 +731,7 @@ class Controller:
                             raise PermissionError("标定中，舵机操作已暂停")
                         result = self._set_servo_debug(command["enabled"])
                     elif command["action"] == "release_all":
+                        self.playback.cancel("已请求卸力")
                         if self.calibration.snapshot()["active"]:
                             if not self.calibration_release_verified:
                                 raise RuntimeError("标定期间无法确认舵机已卸力")
@@ -664,6 +741,7 @@ class Controller:
                                 if self.hardware_factory is None:
                                     raise RuntimeError("串口未就绪，无法确认卸力")
                                 self.hardware = self.hardware_factory()
+                                self.hardware.check_interrupted = self._check_serial_interrupt
                                 self.hardware.set_imu_source(self.imu_source)
                                 self.joints = self.hardware.joints
                             result = self.hardware.execute(command)
@@ -679,28 +757,30 @@ class Controller:
                                 raise RuntimeError("动作播放请求已取消")
                             with self.lock:
                                 self.maintenance_voltage_ready = False
-                            result = self.playback.start(command["document"], client,
-                                                         [joint["id"] for joint in self.joints],
-                                                         command["loop"], command["locked_ids"])
+                            result = self.playback.start(command["frames"], client, command["loop"])
                     elif command["action"] == "send_action_frame":
                         with self.action_request_lock:
                             if command["generation"] != self.action_generation:
                                 raise RuntimeError("动作帧请求已取消")
-                            if not self.armed(client):
-                                raise PermissionError("写操作未解锁或已过期")
-                            if self.playback.active():
-                                raise RuntimeError("动作正在播放，请先停止")
-                            targets = command["targets"]
-                            with self.lock:
-                                self.maintenance_voltage_ready = False
-                            self.hardware.prepare_action_playback(list(targets))
-                            result = self.hardware.move_action_frame(targets, command["duration_ms"])
-                            if not result.get("sent"):
-                                raise RuntimeError("动作帧未发送完成")
-                            with self.lock:
-                                self.pose_targets.update(targets)
-                                self.maintenance_voltage_ready = False
-                                self.maintenance_voltage_after = time.monotonic() + command["duration_ms"] / 1000
+                        if not self.armed(client):
+                            raise PermissionError("写操作未解锁或已过期")
+                        if self.playback.active():
+                            raise RuntimeError("动作正在播放，请先停止")
+                        targets = command["targets"]
+                        with self.lock:
+                            self.maintenance_voltage_ready = False
+                        self.hardware.prepare_action_playback(list(targets))
+                        with self.action_request_lock:
+                            if command["generation"] != self.action_generation:
+                                raise RuntimeError("动作帧请求已取消")
+                        self._check_serial_interrupt()
+                        result = self.hardware.move_action_frame(targets, command["duration_ms"])
+                        if not result.get("sent"):
+                            raise RuntimeError("动作帧未发送完成")
+                        with self.lock:
+                            self.pose_targets.update(targets)
+                            self.maintenance_voltage_ready = False
+                            self.maintenance_voltage_after = time.monotonic() + command["duration_ms"] / 1000
                     elif command["action"] == "save_parameters":
                         with self.lock:
                             self.maintenance_voltage_ready = False
@@ -727,8 +807,18 @@ class Controller:
                         with self.lock:
                             self.pose_targets.update(result["targets"])
                     elif command["action"] == "move_direct" and result.get("sent"):
+                        now = time.monotonic()
+                        # Coalesce position reads until there is a gap between writes.
+                        # A long drag still needs a fresh sample before its telemetry expires.
+                        next_sample = max(next_sample, min(
+                            now + POSITION_WRITE_IDLE_SECONDS, last_sample_at + POSITION_SAMPLE_INTERVAL_MAX,
+                        ))
                         with self.lock:
                             self.pose_targets[result["id"]] = result["target"]
+                            self.maintenance_voltage_ready = False
+                    elif (command["action"] == "write_register" and result.get("address") == 5
+                          and result.get("verified") and result["id"] != result["previous_id"]):
+                        result["joints"] = [dict(joint) for joint in self.joints]
                     if command["action"] == "registers":
                         result["registers"] = parse_registers(bytes(result["raw"]))
                     if command["action"] in WRITE_ACTIONS:
@@ -737,6 +827,8 @@ class Controller:
                     future.set_result(result)
                 except Exception as error:
                     future.set_exception(error)
+            if self.emergency_in_progress:
+                continue
             if self.playback.active() and self.hardware is not None:
                 with self.lock:
                     self.maintenance_voltage_ready = False
@@ -758,9 +850,11 @@ class Controller:
             try:
                 if self.hardware is None:
                     self.hardware = self.hardware_factory()
+                    self.hardware.check_interrupted = self._check_serial_interrupt
                     self.hardware.set_imu_source(self.imu_source)
                     self.joints = self.hardware.joints
                 state = self.hardware.sample_imu() if self.imu_only else self.hardware.sample()
+                last_sample_at = time.monotonic()
                 self.sequence += 1
                 self.failures += int(bool(state.get("errors")))
                 state.update(sequence=self.sequence, timestamp_ms=int(time.time() * 1000),
@@ -770,6 +864,8 @@ class Controller:
                 if last_sample_error is not None:
                     logging.info("sample recovered")
                     last_sample_error = None
+            except SerialOperationCancelled:
+                continue
             except Exception as error:
                 self.playback.cancel("设备采集失败：" + str(error))
                 self.failures += 1
@@ -785,6 +881,13 @@ class Controller:
                 self.maintenance_voltage_ready = voltage_ready
             period = 1 / self.hz
             next_sample += (int(max(0, time.monotonic() - next_sample) / period) + 1) * period
+        while True:
+            try:
+                _, _, _, future = self.commands.get_nowait()
+            except queue.Empty:
+                break
+            if future.set_running_or_notify_cancel():
+                future.set_exception(RuntimeError("维护控制器已关闭"))
         try:
             self.calibration.close()
         finally:
@@ -792,6 +895,8 @@ class Controller:
                 self.hardware.close()
 
     def close(self):
+        with self.emergency_lock:
+            self.closing.set()
         with self.servo_debug_request_lock:
             with self.action_request_lock:
                 self.action_generation += 1
@@ -801,7 +906,7 @@ class Controller:
                     needs_restore = self.servo_debug != "off" or bool(self.servo_debug_pending)
                 if needs_restore:
                     self.batch.cancel("服务关闭")
-                    self._queue_servo_debug(False, None, internal=True)
+                    self._finish_servo_debug(self._queue_servo_debug(False, None, internal=True))
                 self.stop.set()
             self.worker.join(timeout=8)
             if self.worker.is_alive():

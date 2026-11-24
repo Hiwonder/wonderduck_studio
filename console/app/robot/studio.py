@@ -16,8 +16,9 @@ from app.robot.workspace_rest import ensure_rest
 
 
 MAINTENANCE_WORKSPACES = frozenset(("action", "debug", "calibration"))
-WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "control", "target", "person", "maze", "system", "network", "models"))
-MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status", "maze", "person", "target"))
+AUTOMATIC_WORKSPACES = frozenset(("target", "pickup", "line", "person", "maze"))
+WORKSPACES = MAINTENANCE_WORKSPACES | AUTOMATIC_WORKSPACES | frozenset(("status", "control", "system", "network", "models"))
+MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status",))
 REST_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status",))
 OBSERVATION_WORKSPACES = REST_WORKSPACES
 CLIENT_TIMEOUT = 30
@@ -85,11 +86,11 @@ class StudioController:
     full_servo_range = False
 
     def __init__(self, path, hz, controller_factory, lease_factory=MaintenanceLease, demo=False,
-                 status_hardware_factory=None):
+                 status_hardware_factory=None, *, tof_enabled=True):
         self.path, self.hz = str(path), hz
         self.controller_factory, self.lease_factory = controller_factory, lease_factory
         self.demo = demo
-        self.observer = RobotdController(path, hz, include_details=True)
+        self.observer = RobotdController(path, hz, include_details=True, tof_enabled=tof_enabled)
         self.status_viewers = {}
         self.status_hardware_factory = status_hardware_factory
         self.status_lease = None
@@ -99,6 +100,7 @@ class StudioController:
         self.manual_page_guard = ManualPageGuard(path)
         self.manual_guard_error = None
         self.rest_transition_client = None
+        self.rest_transition_departing = False
         self.rest_unconfirmed = set()
         self.unconfirmed_warnings = {}
         self.token = secrets.token_urlsafe(32)
@@ -110,6 +112,7 @@ class StudioController:
         self.partial_maintenance = False
         self.partial_unavailable_ids = set()
         self.rest_invalidated = False
+        self.robotd_releases = 0
         self.last_seen = 0
         self.error = None
         self.library_owner = None
@@ -135,6 +138,9 @@ class StudioController:
             raise RuntimeError("没有活动的标定工作区")
         return self.controller.calibration
 
+    def calibration_busy(self):
+        return self.controller is not None and self.controller.calibration_busy()
+
     def _require(self, client, workspaces):
         if client in self.rest_unconfirmed:
             raise PermissionError("维护接管未确认，设备操作不可用")
@@ -147,14 +153,17 @@ class StudioController:
 
     def authorize(self, client, path, workspace):
         with self.lock:
-            if workspace != self.workspace:
-                raise PermissionError("工作区已切换，请重新操作")
+            self._check_requested_workspace(workspace)
             if path in ("/api/action-document", "/api/action-playback"):
                 self._require(client, {"action"})
             elif path in ("/api/parameter-batch", "/api/export-targets", "/api/list-targets", "/api/load-targets"):
                 self._require(client, {"debug"})
             elif path == "/api/head-imu/calibration":
                 self._require(client, {"calibration"})
+
+    def _check_requested_workspace(self, workspace):
+        if workspace is not None and workspace != self.workspace:
+            raise PermissionError("工作区已切换，请重新操作")
 
     def _switch_unconfirmed_workspace(self, client, workspace):
         """Allow guarded observation without treating an unconfirmed release as safe."""
@@ -223,10 +232,15 @@ class StudioController:
             with self.lock:
                 if self.rest_transition_client == client:
                     self.rest_transition_client = None
+                    if self.rest_transition_departing:
+                        return self.switch(client, "system")
             return fallback
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
             with self.lock:
+                if self.rest_transition_client == client and self.rest_transition_departing:
+                    self.rest_transition_client = None
+                    return self.switch(client, "system")
                 if (self.rest_transition_client != client or client not in self.rest_unconfirmed
                         or self.client_workspaces.get(client, (None,))[0] != workspace):
                     if self.rest_transition_client == client:
@@ -240,8 +254,13 @@ class StudioController:
             with self.lock:
                 if self.rest_transition_client == client:
                     self.rest_transition_client = None
+                    if self.rest_transition_departing:
+                        return self.switch(client, "system")
             return fallback
         with self.lock:
+            if self.rest_transition_client == client and self.rest_transition_departing:
+                self.rest_transition_client = None
+                return self.switch(client, "system")
             if self.rest_transition_client != client or self.owner is not None:
                 if self.rest_transition_client == client:
                     self.rest_transition_client = None
@@ -318,11 +337,21 @@ class StudioController:
                 self.manual_page_guard.ensure(client, status=False)
             return result
 
-    def switch_after_rest(self, client, workspace):
+    def leave_workspace(self, client):
+        with self.lock:
+            if self.rest_transition_client == client:
+                # Keep the movement guard until the in-flight rest settles.
+                self.rest_transition_departing = True
+                return dict(workspace="system", maintenance=False, pending=True)
+            return self.switch(client, "system")
+
+    def switch_after_rest(self, client, workspace, current_request=lambda: True):
         """Rest once before a user-initiated servo workspace transition."""
         if not client or workspace not in REST_WORKSPACES:
             raise ValueError("工作区无效")
         with self.lock:
+            if not current_request():
+                raise ValueError("页面状态已更新，请重新操作")
             if self.rest_transition_client is not None:
                 raise RuntimeError("机器人正在休息，请等待页面切换完成")
             previous = self.client_workspaces.get(client)
@@ -336,6 +365,7 @@ class StudioController:
             previous_status_seen = self.status_viewers.get(client)
             retry_unconfirmed = client in self.rest_unconfirmed
             self.rest_transition_client = client
+            self.rest_transition_departing = False
             try:
                 if self.owner == client and (self.controller is not None or self.lease is not None):
                     self._leave()
@@ -374,6 +404,8 @@ class StudioController:
                     logging.error("%s", message)
                     with self.lock:
                         self.rest_transition_client = None
+                        if self.rest_transition_departing:
+                            return self._unconfirmed_fallback(client, "system", message)
                         fallback = self._unconfirmed_fallback(client, workspace, message)
                         if workspace in MAINTENANCE_WORKSPACES and fallback.get("ready"):
                             self.rest_transition_client = client
@@ -381,6 +413,10 @@ class StudioController:
                 fallback = True
             with self.lock:
                 self.rest_transition_client = None
+                if self.rest_transition_departing:
+                    self.rest_unconfirmed.discard(client)
+                    self.unconfirmed_warnings.pop(client, None)
+                    return self.switch(client, "system")
                 # An unconfirmed release keeps the status guard active.  The
                 # maintenance lease needs that guard removed to acquire the
                 # bus, so overlap it with a separate movement block until the
@@ -456,6 +492,8 @@ class StudioController:
                     paused = self.controller is not None or self.lease is not None
                     result.update(ready=not paused, error="维护占用，采集暂停" if paused else None)
                 return result
+            if self.robotd_releases:
+                raise RuntimeError("卸力尚未完成，请稍后重新解锁")
             if self.lease is not None and not self.lease.alive():
                 # A disconnected lease cannot protect an active serial worker.
                 # Stop that worker before discarding the connection or trying to
@@ -543,7 +581,7 @@ class StudioController:
     def _sync_status(self):
         # Never keep a device subscription after its connection-bound status
         # guard has disappeared; the daemon may otherwise resume normal reads.
-        enabled = (self.lease is None and self.controller is None
+        enabled = (not self.robotd_releases and self.lease is None and self.controller is None
                    and any(self.manual_page_guard.status_enabled(client) for client in self.status_viewers))
         self.observer.set_devices_enabled(enabled)
         if enabled:
@@ -651,22 +689,38 @@ class StudioController:
             self.library_owner = client
             self.library_id = run_id
             self.library_active = True
+            self.library_result = dict(state="idle", frame=None, count=0, error=None)
             try:
                 self.switch(client, "action")
-                self.controller.arm(client, True)
+                controller = self.controller
+                controller.arm(client, True)
                 self._invalidate_rest_for_maintenance()
-                self.library_result = self.controller.action_task(
+                future = controller.enqueue_action(
                     dict(operation="start", document=document, loop=False, locked_ids=[]), client)
-                return dict(self.library_result, active=True)
             except Exception as error:
-                try:
-                    if self.owner == client and self.lease is not None:
-                        self._leave()
-                except Exception as cleanup_error:
-                    raise RuntimeError(f"动作启动失败：{error}；维护资源释放失败：{cleanup_error}") from error
-                self.library_active = False
-                self.library_result = dict(state="error", frame=None, count=0, error=str(error))
+                self._fail_library_start(client, error)
                 raise
+        try:
+            result = controller.finish_action("start", future)
+        except Exception as error:
+            with self.lock:
+                if self.controller is controller and self.library_id == run_id and self.library_active:
+                    self._fail_library_start(client, error)
+            raise
+        with self.lock:
+            if self.controller is not controller or self.library_id != run_id or not self.library_active:
+                raise RuntimeError("动作请求已取消")
+            self.library_result = result
+            return dict(result, active=True)
+
+    def _fail_library_start(self, client, error):
+        try:
+            if self.owner == client and self.lease is not None:
+                self._leave()
+        except Exception as cleanup_error:
+            raise RuntimeError(f"动作启动失败：{error}；维护资源释放失败：{cleanup_error}") from error
+        self.library_active = False
+        self.library_result = dict(state="error", frame=None, count=0, error=str(error))
 
     def library_action(self, client, operation, run_id):
         with self.lock:
@@ -700,16 +754,28 @@ class StudioController:
             self._stop_status()
             if run_id is not None and (self.library_owner != client or self.library_id != run_id):
                 self.library_cancelled.add((client, run_id))
-            if self.controller is not None:
+            controller = self.controller
+            if controller is not None:
                 if self.lease is None or not self.lease.alive():
                     raise RuntimeError("维护会话已断开，卸力结果未确认")
-                library_active = self.library_active
-                try:
-                    return self.controller.emergency_release()
-                finally:
-                    if library_active:
+                future = controller.enqueue_emergency_release()
+                library_id = self.library_id if self.library_active else None
+            else:
+                self.robotd_releases += 1
+        if controller is not None:
+            try:
+                return controller.finish_emergency_release(future)
+            finally:
+                with self.lock:
+                    if (library_id is not None and self.controller is controller and self.library_active
+                            and self.library_id == library_id):
                         self._leave()
+        try:
             return self._robotd_emergency_release()
+        finally:
+            with self.lock:
+                self.robotd_releases -= 1
+                self._sync_status()
 
     def _robotd_emergency_release(self):
         try:
@@ -741,13 +807,14 @@ class StudioController:
                 raise RuntimeError(result.get("reason") or "机器人拒绝关机")
             return dict(accepted=True)
 
-    def arm(self, client, on):
+    def arm(self, client, on, *, workspace=None):
         with self.lock:
+            self._check_requested_workspace(workspace)
             if not on and self.owner != client:
                 return dict(armed=False)
             return self._require(client, {"action", "debug"}).arm(client, on)
 
-    def submit(self, command, client):
+    def submit(self, command, client, *, workspace=None, validate=None):
         action = command.get("action")
         if action == "servo_debug":
             allowed = {"action"}
@@ -756,11 +823,15 @@ class StudioController:
         else:
             allowed = {"action", "debug"}
         with self.lock:
+            self._check_requested_workspace(workspace)
             controller = self._require(client, allowed)
+            if validate is not None:
+                validate()
             if (action in REST_INVALIDATING_ACTIONS or action == "torque" and command.get("on") is True
                     or action == "servo_debug" and command.get("enabled") is True):
                 self._invalidate_rest_for_maintenance()
-            return controller.submit(command, client)
+            future = controller.enqueue_command(command, client)
+        return controller.finish_command(command, future)
 
     def _invalidate_rest_for_maintenance(self):
         # Maintenance writes bypass robotd, so it must forget its old rest result
@@ -770,23 +841,22 @@ class StudioController:
             self.lease.request("invalidate_rest")
             self.rest_invalidated = True
 
-    def parameter_task(self, command, client):
+    def parameter_task(self, command, client, *, workspace=None):
         with self.lock:
+            self._check_requested_workspace(workspace)
             controller = self._require(client, {"debug"})
             if command.get("operation") == "start":
                 self._invalidate_rest_for_maintenance()
             return controller.parameter_task(command, client)
 
-    def action_task(self, command, client):
+    def action_task(self, command, client, *, workspace=None):
         with self.lock:
+            self._check_requested_workspace(workspace)
             controller = self._require(client, {"action"})
             if command.get("operation") in ("start", "send_frame"):
                 self._invalidate_rest_for_maintenance()
-            if command.get("operation") != "send_frame":
-                return controller.action_task(command, client)
-            future = controller.action_task(command, client, defer_frame=True)
-        # Waiting for the serial write must not block state snapshots or the rest of Studio.
-        return controller.finish_action_frame(future)
+            result = controller.enqueue_action(command, client)
+        return controller.finish_action(command.get("operation"), result)
 
     def maintenance_voltage_snapshot(self):
         """Expose only an already sampled, complete maintenance voltage snapshot."""

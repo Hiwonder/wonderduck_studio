@@ -108,13 +108,22 @@ def status():
             raise RuntimeError("不支持的无线网络模式")
         result.update(mode="ap" if mode == "ap" else "station",
                       ssid=settings.get("802-11-wireless.ssid", ""))
-        match = re.search(r"channel\s+\d+\s+\((\d+)\s+MHz\)", _run("iw", "dev", INTERFACE, "info"))
+        try:
+            wireless_info = _run("iw", "dev", INTERFACE, "info")
+        except (OSError, RuntimeError):
+            wireless_info = ""
+        match = re.search(r"channel\s+\d+\s+\((\d+)\s+MHz\)", wireless_info)
         if match:
             result["frequency_mhz"] = int(match.group(1))
     try:
         result["networks"] = _networks()
     except RuntimeError as error:
         result["networks_error"] = str(error)
+    if result["mode"] == "station" and result["frequency_mhz"] is None:
+        active = next((item for item in result["networks"] if item["active"]), None)
+        frequency = re.fullmatch(r"([0-9]+)(?:\s+MHz)?", active["frequency"].strip()) if active else None
+        if frequency:
+            result["frequency_mhz"] = int(frequency.group(1))
     return result
 
 

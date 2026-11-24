@@ -14,6 +14,8 @@
         <nav class="workspace-nav" aria-label="控制台页面">
           <button type="button" data-workspace="control" class="studio-only" title="运动控制" hidden><i data-lucide="gamepad-2"></i><span>运动控制</span></button>
           <button type="button" data-workspace="target" class="studio-only" title="目标追踪" hidden><i data-lucide="crosshair"></i><span>目标追踪</span></button>
+          <button type="button" data-workspace="pickup" class="studio-only" title="拾取搬运" hidden><i data-lucide="hand-helping"></i><span>拾取搬运</span></button>
+          <button type="button" data-workspace="line" class="studio-only" title="自主巡线" hidden><i data-lucide="footprints"></i><span>自主巡线</span></button>
           <button type="button" data-workspace="person" class="studio-only" title="行人跟随" hidden><i data-lucide="user-round-search"></i><span>行人跟随</span></button>
           <button type="button" data-workspace="maze" class="studio-only" title="避障行走" hidden><i data-lucide="radar"></i><span>避障行走</span></button>
           <button type="button" data-workspace="status" title="设备状态"><i data-lucide="activity"></i><span>设备状态</span></button>
@@ -201,7 +203,7 @@
                   <div class="chart-section"><div class="chart-layout"><div class="chart-labels"><div class="curve-label c1"><span>X / Roll</span><output id="curve-roll">--</output></div><div class="curve-label c2"><span>Y / Pitch</span><output id="curve-pitch">--</output></div><div class="curve-label c3"><span>Z / Yaw</span><output id="curve-yaw">--</output></div></div><canvas id="chart" aria-label="躯体 IMU 三轴姿态角实时曲线"></canvas></div></div>
                   <dl class="imu-readings"><div><dt>角速度 XYZ</dt><dd id="status-gyro">--</dd></div><div><dt>重力方向 XYZ</dt><dd id="status-gravity">--</dd></div><div><dt>四元数 WXYZ</dt><dd id="status-quaternion">--</dd></div></dl>
                 </section>
-                <section class="imu-channel" aria-label="头部 IMU 姿态">
+                <section id="head-imu-channel" class="imu-channel" aria-label="头部 IMU 姿态">
                   <div class="section-title"><h2>头部 IMU 姿态</h2><span id="aux-imu-caption" class="muted">I²C3 · 传感器坐标</span></div>
                   <div class="chart-section"><div class="chart-layout"><div class="chart-labels"><div class="curve-label c1"><span>X / Roll</span><output id="aux-curve-roll">--</output></div><div class="curve-label c2"><span>Y / Pitch</span><output id="aux-curve-pitch">--</output></div><div class="curve-label c3"><span>Z / Yaw</span><output id="aux-curve-yaw">--</output></div></div><canvas id="aux-chart" aria-label="头部 IMU 三轴姿态角实时曲线"></canvas></div></div>
                   <dl class="imu-readings"><div><dt>角速度 XYZ</dt><dd id="aux-gyro">--</dd></div><div><dt>重力方向 XYZ</dt><dd id="aux-gravity">--</dd></div><div><dt>四元数 WXYZ</dt><dd id="aux-quaternion">--</dd></div></dl>
@@ -226,9 +228,10 @@
           <section id="calibration-workspace" class="workspace-content" data-workspace-panel="calibration" hidden>
             <div class="workspace-heading"><div><h1>IMU 校准</h1></div></div>
             <section class="calibration-panel" aria-label="IMU 标定">
-              <div class="calibration-source-row"><div class="calibration-source" role="group" aria-label="选择校准的 IMU"><button type="button" data-calibration-source="body" aria-pressed="true">躯体 IMU</button><button type="button" data-calibration-source="head" aria-pressed="false">头部 IMU</button></div></div>
+              <div id="calibration-source-row" class="calibration-source-row"><div class="calibration-source" role="group" aria-label="选择校准的 IMU"><button type="button" data-calibration-source="body" aria-pressed="true">躯体 IMU</button><button type="button" data-calibration-source="head" aria-pressed="false">头部 IMU</button></div></div>
               <div class="calibration-primary"><div class="calibration-mode"><button id="calibration-accel" class="primary">加速度六面</button><button id="calibration-accel-default" title="恢复默认加速度标定">恢复默认</button></div><div class="calibration-mode"><button id="calibration-gyro" class="primary">陀螺仪静置</button><button id="calibration-gyro-default" title="恢复默认陀螺仪标定">恢复默认</button></div><button id="calibration-next" disabled>继续</button><button id="calibration-cancel" disabled>取消</button><span id="calibration-status" role="status">未开始</span><a id="calibration-download" href="/api/calibration/report" download hidden>下载记录</a></div>
               <p id="calibration-profile-status" hidden></p><p id="calibration-faces"></p><p id="calibration-check"></p>
+              <p id="calibration-stream-status" role="status" hidden></p>
               <details id="calibration-resume-options"><summary>续采 / 重采</summary><div class="calibration-resume"><input id="calibration-record" type="text" placeholder="已有记录路径" aria-label="已有加速度记录路径" /><select id="calibration-face" aria-label="重采面"><option value="">缺失面</option><option>+X</option><option>-X</option><option>+Y</option><option>-Y</option><option>+Z</option><option>-Z</option></select><button id="calibration-resume">开始</button></div></details>
             </section>
             <div class="calibration-charts">
@@ -241,6 +244,13 @@
     </main>
     <dialog id="action-select"><form method="dialog"><h2 id="action-select-title"></h2><label class="field">实机动作文件<select id="action-select-name" required><option value="">请选择动作</option></select></label><div class="dialog-actions"><button value="cancel" formnovalidate>取消</button><button id="action-select-confirm" value="ok" class="primary">确认</button></div></form></dialog>
     <dialog id="confirm"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div class="dialog-actions"><button value="cancel">取消</button><button value="ok" class="primary">确认</button></div></form></dialog>
+    <dialog id="software-update-progress" aria-labelledby="software-update-title">
+      <h2 id="software-update-title">软件更新</h2>
+      <p id="software-update-stage" role="status"></p>
+      <progress id="software-update-download" aria-label="下载进度" max="100" hidden></progress>
+      <p id="software-update-error" role="alert" hidden></p>
+      <form method="dialog" class="dialog-actions"><button id="software-update-close" type="submit">关闭</button></form>
+    </dialog>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

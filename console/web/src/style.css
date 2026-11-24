@@ -179,7 +179,7 @@ main{grid-column:2;max-width:none;margin:0;width:100%;padding:12px;min-width:0}
 .calibration-links{display:flex;gap:12px;margin-top:8px}
 .calibration-links a{font-size:11px;color:var(--muted)}
 
-.servo-table tr.historical td:not(:first-child):not(:nth-child(2)):not(:last-child),.chart-layout.historical output{opacity:.45}
+.servo-table tr.historical td:not(:first-child):not(:nth-child(2)):not(:last-child),.chart-layout.historical output,.imu-readings dd.historical{opacity:.45}
 
 .viewer-palette{position:absolute;top:10px;right:230px;z-index:3;background:#ffffffe6;max-width:150px;font-size:12px}
 

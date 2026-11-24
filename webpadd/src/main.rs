@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{RawQuery, State, WebSocketUpgrade};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use clap::Parser;
@@ -27,6 +28,7 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::{MissedTickBehavior, timeout};
 
 mod commands;
+mod browser_session;
 mod telemetry;
 mod control;
 mod ipc;
@@ -36,6 +38,8 @@ mod voice;
 mod frame_prefetch;
 mod color_detection;
 mod object_detection;
+mod object_detection_ncnn;
+mod person_models;
 mod vision_relay;
 mod vision_record;
 mod settings;
@@ -47,6 +51,7 @@ use ipc::*;
 const PAGE: &str = include_str!("../web/index.html");
 const CONTROL_PERIOD: Duration = Duration::from_millis(20);
 const INPUT_TTL: Duration = Duration::from_millis(150);
+const CONTROL_IDLE_RELEASE: Duration = Duration::from_millis(250);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(1);
 const BROWSER_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const BROWSER_PING_INTERVAL: Duration = Duration::from_millis(500);
@@ -59,8 +64,8 @@ const STATUS_STREAM_HZ: u32 = 10;
 const OBSTACLE_PERIOD: Duration = Duration::from_millis(200);
 const LEASE_PERIOD: Duration = Duration::from_millis(100);
 const MIN_LINEAR_SPEED: f64 = 0.0;
-const MAX_LINEAR: f64 = 0.4;
-const MAX_LINEAR_BACKWARD: f64 = 0.4;
+const MAX_LINEAR: f64 = 0.30;
+const MAX_LATERAL: f64 = 0.25;
 const MAX_ANGULAR: f64 = 1.0;
 const MAX_HEAD: f64 = 2.5;
 const BODY_MAX_Z_UP: f64 = 0.010;
@@ -110,6 +115,7 @@ struct Args {
 #[derive(Clone)]
 struct AppState {
     socket: PathBuf,
+    capabilities: Capabilities,
     control: Arc<Mutex<ControlState>>,
     commands: mpsc::Sender<RobotCommand>,
     status: watch::Receiver<BrowserStatus>,
@@ -120,8 +126,8 @@ struct AppState {
     recorder: Arc<audio_record::Recorder>,
     next_session: Arc<AtomicU64>,
     views: watch::Receiver<ControlsView>,
-    feedback: broadcast::Sender<ServerMessage>,
-    objects: object_detection::Detector,
+    feedback: broadcast::Sender<(u64, ServerMessage)>,
+    objects: object_detection::Detectors,
     colors: Arc<color_detection::ColorRuntime>,
     settings: Arc<Mutex<settings::Store>>,
     color_presets: Arc<Mutex<settings::ColorStore>>,
@@ -130,8 +136,26 @@ struct AppState {
     tracking_phases: Arc<Mutex<settings::TrackingPhaseStore>>,
     person_coordinated_settings: Arc<Mutex<settings::CoordinatedStore>>,
     person_tracking_phases: Arc<Mutex<settings::TrackingPhaseStore>>,
+    pickup_after_settings: Arc<Mutex<settings::CoordinatedStore>>,
+    pickup_after_phases: Arc<Mutex<settings::TrackingPhaseStore>>,
     mouth_settings: Arc<Mutex<settings::MouthStore>>,
     mouth_sound_directory: PathBuf,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct Capabilities {
+    tof_enabled: bool,
+    head_imu_enabled: bool,
+}
+
+impl Capabilities {
+    fn from_environment() -> Self {
+        let enabled = |name| std::env::var(name).as_deref() != Ok("false");
+        Self {
+            tof_enabled: enabled("WONDERDUCK_UNOQ_TOF_ENABLED"),
+            head_imu_enabled: enabled("WONDERDUCK_UNOQ_HEAD_IMU_ENABLED"),
+        }
+    }
 }
 
 /// The small status snapshot sent to a browser. The full `robot.state` contains joint and
@@ -143,7 +167,15 @@ struct BrowserStatus {
     head_feedback: Option<(u16, u16)>,
     #[serde(skip)]
     head_feedback_sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_positions: Option<[u16; 2]>,
+    #[serde(skip)]
+    head_positions_at: Option<Instant>,
     skills: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_skill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_skill_timeout: Option<proto::SkillTimeout>,
     #[serde(skip_serializing_if = "Option::is_none")]
     connection_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,6 +213,8 @@ struct BrowserStatus {
     power_status_sequence: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tracking_phase: Option<proto::CoordinatedTrackingPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pickup_stage: Option<proto::PickupStage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_unavailable: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,6 +277,8 @@ enum ServerMessage {
         person_coordinated_defaults: settings::CoordinatedTrackingSettings,
         person_tracking_phases: settings::TrackingPhaseSettings,
         person_tracking_phase_defaults: settings::TrackingPhaseSettings,
+        pickup_after_settings: settings::CoordinatedTrackingSettings,
+        pickup_after_phases: settings::TrackingPhaseSettings,
         color_presets: std::collections::BTreeMap<String, settings::ColorPreset>,
         mouth_sound: String,
         mouth_sound_default: String,
@@ -333,10 +369,18 @@ enum RobotCommand {
         reply: oneshot::Sender<Result<proto::IntentResult, String>>,
     },
     Lease {
+        session: u64,
+        generation: u64,
         action: proto::HumanControlAction,
-        final_calls: Vec<proto::Call>,
         reply: oneshot::Sender<Result<HumanControlResult, String>>,
     },
+}
+
+#[derive(Clone)]
+struct RealtimeFrame {
+    calls: Vec<proto::Call>,
+    generation: u64,
+    created: Instant,
 }
 
 type HumanControlResult = proto::HumanControlResult;
@@ -422,6 +466,16 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let (pickup_after_settings, pickup_after_phases) = match settings::CoordinatedStore::load_pickup_after(&args.config)
+        .and_then(|settings| settings::TrackingPhaseStore::load_pickup_after(&args.config)
+            .map(|phases| (settings, phases)))
+    {
+        Ok(stores) => stores,
+        Err(error) => {
+            tracing::error!(%error, "cannot load pickup after-action settings");
+            return ExitCode::FAILURE;
+        }
+    };
     let mouth_settings = match settings::MouthStore::load(&args.config) {
         Ok(settings) => settings,
         Err(error) => {
@@ -435,10 +489,10 @@ async fn main() -> ExitCode {
         control.turn_speed = saved.turn_speed;
     }
     control.drive = params.pad_drive;
-    let (view_tx, views) = watch::channel(control.view(Instant::now()));
+    let (view_tx, views) = watch::channel(control.view_for(None, Instant::now()));
     let (feedback, _) = broadcast::channel(32);
     let (connected_tx, connected_rx) = watch::channel(false);
-    let objects = object_detection::Detector::new(
+    let objects = object_detection::Detectors::new(
         std::env::var_os("WONDERDUCK_PERSON_VISION_RECORD").map(PathBuf::from));
     control.person_vision_record = objects.recorder();
     let colors = Arc::new(color_detection::ColorRuntime::new(
@@ -449,6 +503,7 @@ async fn main() -> ExitCode {
     let recorder = Arc::new(audio_record::Recorder::new(params.audio.capture_device(), Arc::clone(&voice), recording_dir));
     let state = AppState {
         socket: args.socket.clone(),
+        capabilities: Capabilities::from_environment(),
         control: Arc::new(Mutex::new(control)),
         commands: commands.clone(),
         status: status_rx,
@@ -469,28 +524,35 @@ async fn main() -> ExitCode {
         tracking_phases: Arc::new(Mutex::new(tracking_phases)),
         person_coordinated_settings: Arc::new(Mutex::new(person_coordinated_settings)),
         person_tracking_phases: Arc::new(Mutex::new(person_tracking_phases)),
+        pickup_after_settings: Arc::new(Mutex::new(pickup_after_settings)),
+        pickup_after_phases: Arc::new(Mutex::new(pickup_after_phases)),
         mouth_settings: Arc::new(Mutex::new(mouth_settings)),
         mouth_sound_directory: PathBuf::from(proto::SOUND_CLIPS_DIR),
     };
 
+    let (frames, latest_frame) = watch::channel(None);
     tokio::spawn(robotd_worker(
         args.socket.clone(),
         command_rx,
+        latest_frame,
         connected_tx,
         state.control.clone(),
         state.settings.clone(),
         state.feedback.clone(),
+        state.capabilities.tof_enabled,
     ));
-    tokio::spawn(control_loop(state.clone(), connected_rx, view_tx));
+    tokio::spawn(control_loop(state.clone(), connected_rx, view_tx, frames));
     tokio::spawn(config_worker(args.config, state.control.clone()));
     tokio::spawn(status_stream_worker(args.socket.clone(), status_tx.clone()));
     tokio::spawn(policy_status_worker(args.socket.clone(), status_tx.clone()));
-    tokio::spawn(obstacle_status_worker(
-        args.socket.clone(),
-        status_tx.clone(),
-        state.control.clone(),
-        state.obstacle_lock.clone(),
-    ));
+    if state.capabilities.tof_enabled {
+        tokio::spawn(obstacle_status_worker(
+            args.socket.clone(),
+            status_tx.clone(),
+            state.control.clone(),
+            state.obstacle_lock.clone(),
+        ));
+    }
     tokio::spawn(low_voltage_status_worker(args.socket.clone(), status_tx.clone(), state.low_voltage_lock.clone()));
     tokio::spawn(health_worker(args.socket, status_tx));
 
@@ -524,20 +586,28 @@ async fn camera_metadata() -> Result<axum::Json<serde_json::Value>, axum::http::
 }
 
 fn router(state: AppState, media_port: u16) -> Router {
+    let capabilities = state.capabilities;
     Router::new()
+        .route("/health", get(browser_control_health))
         .route(
             "/",
             get(move || async move {
                 Html(PAGE.replace("{{MEDIA_PORT}}", &media_port.to_string())
-                    .replace("{{APP_VERSION}}", env!("CARGO_PKG_VERSION")))
+                    .replace("{{APP_VERSION}}", env!("CARGO_PKG_VERSION"))
+                    .replace("{{TOF_ENABLED}}", if capabilities.tof_enabled { "true" } else { "false" }))
             }),
         )
         .route("/control", get(control_upgrade))
+        .route("/capabilities", get(move || async move { axum::Json(capabilities) }))
         .route("/objects", get(object_detection::upgrade))
+        .route("/object-models", get(object_detection::available_models))
         .route("/colors", get(color_detection::upgrade))
         .route("/camera-metadata", get(camera_metadata))
         .route("/console.css", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], include_str!("../web/console.css")) }))
         .route("/console.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/console.js")) }))
+        .route("/control-session.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/control-session.js")) }))
+        .route("/control-pages.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/control-pages.js")) }))
+        .route("/motion-input.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/motion-input.js")) }))
         .route("/language.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/language.js")) }))
         .route("/action-library.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/action-library.js")) }))
         .route("/licenses/agpl-3.0.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../../LICENSE")) }))
@@ -594,14 +664,38 @@ fn router(state: AppState, media_port: u16) -> Router {
         .with_state(state)
 }
 
+async fn browser_control_health(State(state): State<AppState>) -> impl IntoResponse {
+    let connected = state.control.lock().await.connected;
+    let status = state.status.borrow();
+    let ready = connected && status.robotd_connected && status.motion_enabled.is_some();
+    let code = if ready { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
+    (code, axum::Json(serde_json::json!({
+        "ready": ready,
+        "version": env!("CARGO_PKG_VERSION"),
+    })))
+}
+
 async fn control_upgrade(
     upgrade: WebSocketUpgrade,
     State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| control_session(socket, state))
+    let client = query.as_deref().unwrap_or_default().split('&').find_map(|part| match part {
+        "client=app" => Some(ControlClient::App),
+        "client=web" => Some(ControlClient::Web),
+        _ => None,
+    }).unwrap_or_else(|| {
+        if headers.get("sec-fetch-mode").is_some_and(|mode| mode == "websocket") {
+            ControlClient::Web
+        } else {
+            ControlClient::Unknown
+        }
+    });
+    upgrade.on_upgrade(move |socket| control_session(socket, state, client))
 }
 
-async fn control_session(mut socket: WebSocket, state: AppState) {
+async fn control_session(mut socket: WebSocket, state: AppState, client: ControlClient) {
     let session = state.next_session.fetch_add(1, Ordering::Relaxed);
     let vision_token = match vision_relay::new_token() {
         Ok(token) => token,
@@ -614,7 +708,7 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
     let mut status_rx = state.status.clone();
     let mut views = state.views.clone();
     views.borrow_and_update();
-    let mut feedback = state.feedback.subscribe();
+    let feedback = state.feedback.subscribe();
     let directory = state.mouth_sound_directory.clone();
     let clips_result = tokio::task::spawn_blocking(move || settings::list_mouth_sounds(&directory)).await;
     let (mouth_sound_clips, clips_error) = match clips_result {
@@ -629,43 +723,14 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
     let tracking_phases = state.tracking_phases.lock().await.value.clone();
     let person_coordinated_settings = state.person_coordinated_settings.lock().await.value.clone();
     let person_tracking_phases = state.person_tracking_phases.lock().await.value.clone();
+    let pickup_after_settings = state.pickup_after_settings.lock().await.value.clone();
+    let pickup_after_phases = state.pickup_after_phases.lock().await.value.clone();
     let color_presets = state.color_presets.lock().await.value.clone();
     let mouth_sound = state.mouth_settings.lock().await.value.clone();
     let controls = {
         let mut control = state.control.lock().await;
-        if control.owner.is_some() {
-            drop(control);
-            drop(settings_guard);
-            let _ = send_message(
-                &mut socket,
-                &ServerMessage::Error {
-                    message: "已有其他网页正在控制，请关闭其他控制页面后重试".to_owned(),
-                },
-            )
-            .await;
-            return;
-        }
-        control.owner = Some(session);
-        control.vision_token = Some(vision_token.clone());
-        control.vision_binding = None;
-        control.vision_latest = None;
-        control.vision_pending = None;
-        control.coordinated_params = None;
-        control.head_tracking_started = false;
-        control.head_position = None;
-        control.head_tracking_dirty = false;
-        control.head_tracking_closing = false;
-        control.coordinated_tracking_started = false;
-        control.coordinated_tracking_dirty = false;
-        control.coordinated_tracking_closing = false;
-        control.input = Input::default();
-        control.last_input = Some(Instant::now());
-        control.cancel();
-        if let Some(saved) = settings.as_ref() {
-            control.linear_speed = saved.linear_speed;
-            control.turn_speed = saved.turn_speed;
-        }
-        control.view(Instant::now())
+        control.peers.insert(session, ControlPeer::new(client, vision_token.clone()));
+        control.view_for(Some(session), Instant::now())
     };
     drop(settings_guard);
 
@@ -677,6 +742,7 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
         tracking_phases, tracking_phase_defaults: settings::TrackingPhaseSettings::default(), color_presets,
         person_coordinated_settings, person_coordinated_defaults: settings::CoordinatedTrackingSettings::person_defaults(),
         person_tracking_phases, person_tracking_phase_defaults: settings::TrackingPhaseSettings::person_defaults(),
+        pickup_after_settings, pickup_after_phases,
         mouth_sound, mouth_sound_default: String::new(), mouth_sound_clips,
     })
         .await
@@ -708,375 +774,7 @@ async fn control_session(mut socket: WebSocket, state: AppState) {
         return;
     }
 
-    // Persist accepted snapshots in order without delaying control messages.
-    // The worker drains its queue even when the browser closes immediately.
-    let (save_tx, mut save_rx) = mpsc::unbounded_channel();
-    let save_state = state.clone();
-    let save_worker = tokio::spawn(async move {
-        while let Some(requested) = save_rx.recv().await {
-            let reply = match requested {
-                SettingsSave::Page(request_id, requested) => dispatch_save_settings(request_id, requested, &save_state).await,
-                SettingsSave::Head(request_id, requested) => dispatch_save_head_settings(request_id, requested, &save_state).await,
-                SettingsSave::Coordinated(request_id, scope, requested) => dispatch_save_coordinated_settings(request_id, scope, requested, &save_state).await,
-                SettingsSave::Phases(request_id, scope, requested) => dispatch_save_tracking_phases(request_id, scope, requested, &save_state).await,
-                SettingsSave::Mouth(request_id, sound) => dispatch_save_mouth_sound(request_id, sound, &save_state).await,
-                SettingsSave::Color(request_id, name, preset) => dispatch_save_color(request_id, name, preset, &save_state).await,
-                SettingsSave::DeleteColor(request_id, name) => dispatch_delete_color(request_id, name, &save_state).await,
-            };
-            if let ServerMessage::SettingsResult { accepted: false, reason: Some(reason), .. } = &reply {
-                tracing::warn!(%reason, "page settings were not saved");
-            }
-            if save_state.control.lock().await.owner == Some(session) {
-                let _ = save_state.feedback.send(reply);
-            }
-        }
-    });
-
-    let mut last_seq = None;
-    // An IPC lease request may take longer than the input deadline. Continue
-    // receiving heartbeats while it is in flight; never replay the old input.
-    let mut input_acquire: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
-    let mut input_acquire_failed = false;
-    let mut input_requested = false;
-    let mut browser_ping = tokio::time::interval(BROWSER_PING_INTERVAL);
-    browser_ping.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut last_browser_pong = Instant::now();
-    loop {
-        tokio::select! {
-            result = async { input_acquire.as_mut().expect("guarded").await }, if input_acquire.is_some() => {
-                input_acquire = None;
-                if let Err(reason) = result.unwrap_or_else(|error| Err(format!("控制权请求失败：{error}"))) {
-                    input_acquire_failed = input_requested;
-                    if input_requested && send_message(&mut socket, &ServerMessage::Error { message: reason }).await.is_err() { break; }
-                }
-            }
-            _ = browser_ping.tick() => {
-                let holding = state.control.lock().await.head_position.is_some();
-                let pong_timeout = if holding { BROWSER_HOLD_PONG_TIMEOUT } else { BROWSER_PONG_TIMEOUT };
-                if last_browser_pong.elapsed() > pong_timeout {
-                    tracing::warn!(session, holding, "browser connection timed out");
-                    break;
-                }
-                if send_frame(&mut socket, Message::Ping(Vec::new().into())).await.is_err() { break; }
-            }
-            changed = views.changed() => {
-                if changed.is_err() { break; }
-                views.borrow_and_update();
-                let controls = state.control.lock().await.view(Instant::now());
-                if send_message(&mut socket, &ServerMessage::Controls { controls }).await.is_err() { break; }
-            }
-            result = feedback.recv() => {
-                match result {
-                    Ok(message) => if send_message(&mut socket, &message).await.is_err() { break; },
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if send_message(&mut socket, &ServerMessage::Error { message: "动作反馈丢失，请检查机器人状态".into() }).await.is_err() { break; }
-                    }
-                    Err(_) => break,
-                }
-            }
-            changed = status_rx.changed() => {
-                if changed.is_err() {
-                    break;
-                }
-                let status = { status_rx.borrow_and_update().clone() };
-                if send_message(&mut socket, &ServerMessage::Status { status }).await.is_err() {
-                    break;
-                }
-            }
-            message = socket.recv() => match message {
-            Some(Ok(Message::Text(text))) => {
-                let message = match serde_json::from_str::<BrowserMessage>(&text.to_string()) {
-                    Ok(message) => message,
-                    Err(error) => {
-                        tracing::warn!(session, %error, "invalid browser control message");
-                        if send_message(
-                            &mut socket,
-                            &ServerMessage::Error {
-                                message: format!("invalid control message: {error}"),
-                            },
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-                };
-
-                match message {
-                    BrowserMessage::StudioLeave { request_id, return_tracking_head_home } => {
-                        let reply = leave_studio_workspace(session, request_id, return_tracking_head_home, &state).await;
-                        // Returning the head can take several seconds. Pongs cannot be read
-                        // while this request is in flight, so start a new heartbeat window.
-                        last_browser_pong = Instant::now();
-                        if send_message(&mut socket, &reply).await.is_err() { break; }
-                    }
-                    BrowserMessage::Input {
-                        seq,
-                        left_x,
-                        left_y,
-                        right_x,
-                        right_y, left_trigger, right_trigger, buttons, active,
-                    } => {
-                        let input = Input {
-                            left_x,
-                            left_y,
-                            right_x,
-                            right_y, left_trigger, right_trigger,
-                            buttons: buttons.into_iter().fold(0, |bits, button| bits | button.bit()),
-                        };
-                        if !input.valid() {
-                            if send_message(
-                                &mut socket,
-                                &ServerMessage::Error {
-                                    message: "input axes must be finite numbers in [-1, 1]".to_owned(),
-                                },
-                            )
-                            .await
-                            .is_err()
-                            {
-                                break;
-                            }
-                            continue;
-                        }
-                        if last_seq.is_some_and(|previous| seq <= previous) {
-                            tracing::debug!(session, seq, "discarded stale browser input");
-                            continue;
-                        }
-                        last_seq = Some(seq);
-                        let received = Instant::now();
-                        input_requested = active && !input.neutral();
-                        if !input_requested { input_acquire_failed = false; }
-                        if active && !input.neutral() {
-                            let (held, acquiring) = {
-                                let mut control = state.control.lock().await;
-                                let held = control.human_held;
-                                if !held && control.owner == Some(session) && control.connected
-                                    && control.armed && control.fresh(received)
-                                {
-                                    // Preserve only liveness until the lease is granted; a later
-                                    // fresh frame supplies the actual movement or button edge.
-                                    control.last_input = Some(received);
-                                }
-                                (held, control.human_acquiring)
-                            };
-                            if !held {
-                                if !acquiring && input_acquire.is_none() && !input_acquire_failed {
-                                    let state = state.clone();
-                                    input_acquire = Some(tokio::spawn(async move { acquire_human(session, &state).await }));
-                                }
-                                continue;
-                            }
-                        }
-                        let mut control = state.control.lock().await;
-                        if control.owner == Some(session) && received.elapsed() <= INPUT_TTL {
-                            if active && input.neutral() && !control.human_held {
-                                control.human_blocked = false;
-                            }
-                            if input.neutral() || control.human_held || !active {
-                                control.receive(input, active, received);
-                            }
-                        }
-                    }
-                    BrowserMessage::SetSpeed { linear_speed, turn_speed } => {
-                        let reply = dispatch_speed(session, linear_speed, turn_speed, &state).await;
-                        if send_message(&mut socket, &reply).await.is_err() {
-                            break;
-                        }
-                    }
-                    BrowserMessage::SaveSettings { request_id, settings } => {
-                        if state.control.lock().await.owner != Some(session) {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("页面已失去控制连接，参数未保存".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        } else if save_tx.send(SettingsSave::Page(request_id, settings)).is_err() {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("参数保存服务不可用".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        }
-                    }
-                    BrowserMessage::SaveHeadSettings { request_id, settings } => {
-                        if state.control.lock().await.owner != Some(session) {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("页面已失去控制连接，参数未保存".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        } else if save_tx.send(SettingsSave::Head(request_id, settings)).is_err() {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("参数保存服务不可用".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        }
-                    }
-                    BrowserMessage::SaveCoordinatedSettings { request_id, scope, settings } => {
-                        if state.control.lock().await.owner != Some(session) {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("页面已失去控制连接，参数未保存".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        } else if save_tx.send(SettingsSave::Coordinated(request_id, scope, settings)).is_err() {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false, reason: Some("参数保存服务不可用".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        }
-                    }
-                    BrowserMessage::SaveTrackingPhases { request_id, scope, settings } => {
-                        if state.control.lock().await.owner != Some(session) {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false, reason: Some("页面已失去控制连接，参数未保存".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        } else if save_tx.send(SettingsSave::Phases(request_id, scope, settings)).is_err() {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false, reason: Some("参数保存服务不可用".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        }
-                    }
-                    BrowserMessage::SaveMouthSound { request_id, sound } => {
-                        if state.control.lock().await.owner != Some(session) {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("页面已失去控制连接，参数未保存".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        } else if save_tx.send(SettingsSave::Mouth(request_id, sound)).is_err() {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("参数保存服务不可用".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        }
-                    }
-                    BrowserMessage::SaveColorPreset { request_id, name, preset } => {
-                        if state.control.lock().await.owner != Some(session) {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("页面已失去控制连接，颜色未保存".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        } else if save_tx.send(SettingsSave::Color(request_id, name, preset)).is_err() {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false, reason: Some("颜色保存服务不可用".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        }
-                    }
-                    BrowserMessage::DeleteColorPreset { request_id, name } => {
-                        if state.control.lock().await.owner != Some(session) {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false,
-                                reason: Some("页面已失去控制连接，颜色未删除".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        } else if save_tx.send(SettingsSave::DeleteColor(request_id, name)).is_err() {
-                            let reply = ServerMessage::SettingsResult {
-                                request_id, accepted: false, reason: Some("颜色删除服务不可用".into()),
-                            };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                        }
-                    }
-                    BrowserMessage::SetObstacle { enabled, threshold_mm, clear_delay_ms } => {
-                        let params = proto::ObstacleParams { enabled, threshold_mm, clear_delay_ms };
-                        let reply = dispatch_obstacle(session, params, &state).await;
-                        if send_message(&mut socket, &reply).await.is_err() { break; }
-                    }
-                    BrowserMessage::SetLowVoltage { threshold_v, duration_s } => {
-                        let params = proto::LowVoltageParams { threshold_v, duration_s };
-                        let reply = dispatch_low_voltage(session, params, &state).await;
-                        if send_message(&mut socket, &reply).await.is_err() { break; }
-                    }
-                    BrowserMessage::MotionTracking { action, initial_pitch, target, reference_area, deadzone, gains } => {
-                        let params = proto::MotionTrackingParams { action, initial_pitch, target, reference_area, deadzone, gains };
-                        let reply = dispatch_motion_tracking(session, params, &state).await;
-                        if send_message(&mut socket, &reply).await.is_err() { break; }
-                    }
-                    BrowserMessage::HeadPosition { action, position } => {
-                        if action != proto::MotionTrackingAction::Stop && position.is_none() {
-                            let reply = ServerMessage::HeadPositionResult { action, accepted: false, reason: Some("请填写头部位置".into()) };
-                            if send_message(&mut socket, &reply).await.is_err() { break; }
-                            continue;
-                        }
-                        let params = proto::HeadTrackingParams {
-                            action, target: None, pitch_position: position,
-                            deadzone: [0.0; 2], gains: [[0.0; 3]; 2],
-                        };
-                        let reply = match dispatch_head_tracking(session, params, &state).await {
-                            ServerMessage::HeadTrackingResult { action, accepted, reason } =>
-                                ServerMessage::HeadPositionResult { action, accepted, reason },
-                            _ => unreachable!("head tracking dispatch result"),
-                        };
-                        if send_message(&mut socket, &reply).await.is_err() { break; }
-                    }
-                    BrowserMessage::HeadTracking { action, target, pitch_position, deadzone, gains } => {
-                        let params = proto::HeadTrackingParams { action, target, pitch_position, deadzone, gains };
-                        let reply = dispatch_head_tracking(session, params, &state).await;
-                        if send_message(&mut socket, &reply).await.is_err() { break; }
-                    }
-                    BrowserMessage::CoordinatedTracking {
-                        action, initial_pitch, target, camera,
-                        head_deadzone, head_gains, body_gains, final_body_gains, approach_linear_limit,
-                        final_linear_limit, final_lateral_limit, final_point, final_tolerance, stop_area_px, stop_area_deadzone_px,
-                        stop_distance_mm, stop_distance_deadzone_mm,
-                        arrival_delay_s, arrival_skill, mouth_before, mouth_after,
-                    } => {
-                        let params = proto::CoordinatedTrackingParams {
-                            action, initial_pitch, target, camera,
-                            head_deadzone, head_gains, body_gains, final_body_gains, approach_linear_limit,
-                            final_linear_limit, final_lateral_limit, final_point, final_tolerance, stop_area_px, stop_area_deadzone_px,
-                            stop_distance_mm, stop_distance_deadzone_mm,
-                            arrival_delay_s, arrival_skill, mouth_before, mouth_after,
-                        };
-                        let reply = dispatch_coordinated_tracking(session, params, &state).await;
-                        if send_message(&mut socket, &reply).await.is_err() { break; }
-                    }
-                    BrowserMessage::Maze { action, threshold_mm, head_step_deg, settle_ms, sample_ms, turn_initial_ms, turn_final_ms, restore_ms, linear_speed, angular_speed } => {
-                        let params = proto::MazeParams { action, threshold_mm, head_step_deg, settle_ms, sample_ms, turn_initial_ms, turn_final_ms, restore_ms, linear_speed, angular_speed };
-                        let reply = dispatch_maze(session, params, &state).await;
-                        if send_message(&mut socket, &reply).await.is_err() { break; }
-                    }
-                    BrowserMessage::Action { name } => {
-                        let state = state.clone();
-                        tokio::spawn(async move {
-                            let reply = dispatch_action(session, name, &state).await;
-                            let _ = state.feedback.send(reply);
-                        });
-                    }
-                }
-            }
-            Some(Ok(Message::Pong(_))) => last_browser_pong = Instant::now(),
-            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-            Some(Ok(_)) => {}
-            }
-        }
-    }
-    // Stop stale input immediately; keep the lease until accepted saves finish.
-    {
-        let mut control = state.control.lock().await;
-        if control.owner == Some(session) {
-            control.last_input = None;
-            control.maze_active = false;
-            control.coordinated_tracking_started = false;
-            control.vision_pending = None;
-        }
-    }
-    if let Some(task) = input_acquire.take() { let _ = task.await; }
-    finish_head_tracking(session, &state).await;
-    finish_coordinated_tracking(session, &state).await;
-    drop(save_tx);
-    if let Err(error) = save_worker.await {
-        tracing::error!(%error, "page settings worker failed");
-    }
-    release_session(session, &state).await;
+    browser_session::serve(socket, session, &state, status_rx, views, feedback).await;
 }
 
 async fn send_message(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
@@ -1108,59 +806,123 @@ async fn control_loop(
     state: AppState,
     connected: watch::Receiver<bool>,
     views: watch::Sender<ControlsView>,
+    frames: watch::Sender<Option<RealtimeFrame>>,
 ) {
+    let (queued_actions, actions) = mpsc::channel(8);
+    tokio::spawn(run_input_actions(state.clone(), actions));
     let mut ticker = tokio::time::interval(CONTROL_PERIOD);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut release_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut release_checked: Option<Instant> = None;
+    let mut previous_owner = None;
     loop {
         ticker.tick().await;
-        let (actions, generation, final_calls) = {
+        if release_task.as_ref().is_some_and(|task| task.is_finished()) {
+            release_task = None;
+        }
+        let (actions, generation, owner, release) = {
             let mut control = state.control.lock().await;
             control.roller = state.status.borrow().uses_roller();
             let now = Instant::now();
+            control.update_head_stick(&state.status.borrow(), now);
             let (mut calls, actions) = control.tick(now, *connected.borrow());
-            if !control.human_held || control.maze_active {
+            let manual = control.human_held && !control.autonomous_deactivated
+                && !control.maze_active && !control.motion_tracking_active
+                && !control.coordinated_tracking_started;
+            if !manual {
                 calls.clear();
             }
-            let view = control.view(now);
-            views.send_if_modified(|old| {
-                if *old == view {
-                    false
-                } else {
-                    *old = view;
-                    true
+            let readiness_changed = control.update_peer_readiness(now);
+            let owner_changed = previous_owner != control.owner;
+            if owner_changed {
+                release_checked = None;
+                previous_owner = control.owner;
+            }
+            let view = control.view_for(control.owner, now);
+            views.send_if_modified(|previous| {
+                if !readiness_changed && !owner_changed && *previous == view {
+                    return false;
                 }
+                *previous = view;
+                true
             });
             enqueue_notifications(&state.commands, calls, Some(control.human_generation));
-            let release = control.human_held && !control.maze_active && control.head_position.is_none()
-                && !control.human_acquiring
-                && control.human_actions == 0
-                && !control.fresh(now);
-            let final_calls = if release {
-                let input = control.input;
-                control.input = Input::default();
-                let zero = control_frame(&control, now);
-                control.input = input;
-                Some(zero)
+            let frame = manual.then(|| RealtimeFrame {
+                calls: control_frame(&control, now),
+                generation: control.human_generation,
+                created: control.last_input.filter(|_| control.fresh(now) && control.armed)
+                    .unwrap_or(now),
+            });
+            // The IPC worker gets the current frame after any slow request. Earlier
+            // motion frames do not accumulate in the discrete-command queue.
+            if let Some(frame) = frame {
+                frames.send_replace(Some(frame));
+            } else {
+                frames.send_if_modified(|frame| frame.take().is_some());
+            }
+            let release = if release_task.is_none()
+                && let Some(reason) = control.autonomous_stop_reason(now)
+            {
+                tracing::info!(session = ?control.owner, reason, "autonomous control stopped");
+                control.owner_closing = true;
+                Some(proto::HumanControlAction::Abandon)
+            } else if release_task.is_none() && control.release_due(now)
+                && release_checked.is_none_or(|at| now.saturating_duration_since(at) >= LEASE_PERIOD)
+            {
+                release_checked = Some(now);
+                Some(proto::HumanControlAction::Release)
             } else {
                 None
             };
             (
-                if control.human_held && !control.maze_active { actions } else { vec![] },
+                if manual { actions } else { vec![] },
                 control.human_generation,
-                final_calls,
+                control.owner,
+                release,
             )
         };
         for action in actions {
-            let result = perform_action(action, generation, &state).await;
-            let _ = state.feedback.send(result);
-        }
-        if let Some(final_calls) = final_calls {
-            if let Err(error) =
-                lease_request(&state, proto::HumanControlAction::Release, final_calls).await
-            {
-                tracing::warn!(%error, "human-control release failed");
-                state.control.lock().await.lose_human_control();
+            if queued_actions.try_send((owner, generation, action, Instant::now())).is_err() {
+                tracing::warn!(?action, "browser button action queue is full");
             }
+        }
+        if let Some(action) = release {
+            let state = state.clone();
+            release_task = Some(tokio::spawn(async move {
+                let Some(owner) = owner else { return; };
+                let result = lease_request(&state, owner, generation, action).await;
+                if result.is_err() || action == proto::HumanControlAction::Abandon {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "human-control release failed");
+                    }
+                    let mut control = state.control.lock().await;
+                    if control.human_generation == generation && control.owner == Some(owner) {
+                        control.lose_human_control();
+                    }
+                }
+            }));
+        }
+    }
+}
+
+async fn run_input_actions(
+    state: AppState,
+    mut actions: mpsc::Receiver<(Option<u64>, u64, Action, Instant)>,
+) {
+    while let Some((owner, generation, action, received)) = actions.recv().await {
+        {
+            let mut control = state.control.lock().await;
+            if received.elapsed() > INPUT_TTL || control.owner != owner
+                || control.human_generation != generation || !control.human_held
+            {
+                continue;
+            }
+            control.human_actions += 1;
+        }
+        let result = perform_action(action, generation, &state).await;
+        state.control.lock().await.human_actions -= 1;
+        if let Some(session) = owner {
+            let _ = state.feedback.send((session, result));
         }
     }
 }
