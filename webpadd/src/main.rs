@@ -801,8 +801,8 @@ async fn control_loop(
             let now = Instant::now();
             control.update_head_stick(&state.status.borrow(), now);
             let (mut calls, actions) = control.tick(now, *connected.borrow());
-            let manual = control.human_held && !control.autonomous_deactivated
-                && !control.maze_active && !control.motion_tracking_active
+            let manual = control.human_held && control.maze.is_none()
+                && control.motion_tracking.is_none()
                 && !control.coordinated_tracking_started;
             if !manual {
                 calls.clear();
@@ -835,20 +835,11 @@ async fn control_loop(
             } else {
                 frames.send_if_modified(|frame| frame.take().is_some());
             }
-            let release = if release_task.is_none()
-                && let Some(reason) = control.autonomous_stop_reason(now)
-            {
-                tracing::info!(session = ?control.owner, reason, "autonomous control stopped");
-                control.owner_closing = true;
-                Some(proto::HumanControlAction::Abandon)
-            } else if release_task.is_none() && control.release_due(now)
-                && release_checked.is_none_or(|at| now.saturating_duration_since(at) >= LEASE_PERIOD)
-            {
+            let release = release_task.is_none() && control.release_due(now)
+                && release_checked.is_none_or(|at| now.saturating_duration_since(at) >= LEASE_PERIOD);
+            if release {
                 release_checked = Some(now);
-                Some(proto::HumanControlAction::Release)
-            } else {
-                None
-            };
+            }
             (
                 if manual { actions } else { vec![] },
                 control.human_generation,
@@ -861,15 +852,13 @@ async fn control_loop(
                 tracing::warn!(?action, "browser button action queue is full");
             }
         }
-        if let Some(action) = release {
+        if release {
             let state = state.clone();
             release_task = Some(tokio::spawn(async move {
                 let Some(owner) = owner else { return; };
-                let result = lease_request(&state, owner, generation, action).await;
-                if result.is_err() || action == proto::HumanControlAction::Abandon {
-                    if let Err(error) = result {
-                        tracing::warn!(%error, "human-control release failed");
-                    }
+                let result = lease_request(&state, owner, generation, proto::HumanControlAction::Release).await;
+                if let Err(error) = result {
+                    tracing::warn!(%error, "human-control release failed");
                     let mut control = state.control.lock().await;
                     if control.human_generation == generation && control.owner == Some(owner) {
                         control.lose_human_control();

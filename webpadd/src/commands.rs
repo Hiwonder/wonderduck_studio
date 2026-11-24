@@ -190,16 +190,6 @@ pub(super) async fn dispatch_maze(session: u64, params: proto::MazeParams, state
         if control.owner != Some(session) || !control.human_held || !control.connected || control.owner_closing {
             return response(false, Some("控制连接不可用".into()));
         }
-        if params.action != proto::MotionTrackingAction::Stop
-            && (control.autonomous_deactivated || !control.active)
-        {
-            return response(false, Some("控制连接不可用".into()));
-        }
-        if params.action == proto::MotionTrackingAction::Update
-            && control.autonomous_stop_reason(Instant::now()).is_some()
-        {
-            return response(false, Some("避障行走更新超时".into()));
-        }
         if state.commands.try_send(RobotCommand::Request {
             calls: vec![proto::Call::RobotMaze(params)], sit_on_loss: false,
             generation: Some(control.human_generation), created: Instant::now(), reply,
@@ -215,21 +205,14 @@ pub(super) async fn dispatch_maze(session: u64, params: proto::MazeParams, state
     let mut control = state.control.lock().await;
     control.human_actions -= 1;
     if control.owner == Some(session) && control.human_generation == generation {
-        match params.action {
-            proto::MotionTrackingAction::Start => control.maze_active = accepted,
-            proto::MotionTrackingAction::Stop => control.maze_active = false,
-            proto::MotionTrackingAction::Update if !accepted => control.maze_active = false,
-            _ => {}
-        }
-    }
-    if control.owner == Some(session) && control.human_generation == generation {
-        control.autonomous_updated = control.maze_active.then(Instant::now);
-        if !control.maze_active { control.owner_idle_since = Some(Instant::now()); }
+        control.maze = (accepted && params.action != proto::MotionTrackingAction::Stop)
+            .then_some(params);
+        if control.maze.is_none() { control.owner_idle_since = Some(Instant::now()); }
     }
     response(accepted, reason)
 }
 
-pub(super) async fn dispatch_motion_tracking(session: u64, params: proto::MotionTrackingParams, state: &AppState) -> ServerMessage {
+pub(super) async fn dispatch_motion_tracking(session: u64, mut params: proto::MotionTrackingParams, state: &AppState) -> ServerMessage {
     let response = |accepted, reason| ServerMessage::MotionTrackingResult { action: params.action, accepted, reason };
     if !params.valid() {
         return response(false, Some("目标坐标或 PID 参数无效".into()));
@@ -243,10 +226,15 @@ pub(super) async fn dispatch_motion_tracking(session: u64, params: proto::Motion
         if control.owner != Some(session) || !control.human_held || !control.connected || control.owner_closing {
             return response(false, Some("控制连接不可用".into()));
         }
-        if params.action != proto::MotionTrackingAction::Stop
-            && (control.autonomous_deactivated || !control.active)
+        if params.action != proto::MotionTrackingAction::Stop && params.line_speed.is_some()
+            && control.peers.get(&session).and_then(|peer| peer.vision_binding)
+                .is_some_and(|binding| binding.source == crate::vision_relay::Source::Color)
         {
-            return response(false, Some("控制连接不可用".into()));
+            params.target = crate::vision_relay::current_line(&control).and_then(|frame| frame.line);
+        }
+        if params.action != proto::MotionTrackingAction::Update {
+            control.vision_generation = control.vision_generation.wrapping_add(1);
+            control.vision_pending = None;
         }
         if state.commands.try_send(RobotCommand::Request {
             calls: vec![proto::Call::RobotMotionTracking(params)], sit_on_loss: false,
@@ -265,8 +253,9 @@ pub(super) async fn dispatch_motion_tracking(session: u64, params: proto::Motion
     let mut control = state.control.lock().await;
     control.human_actions -= 1;
     if control.owner == Some(session) && control.human_generation == generation {
-        control.motion_tracking_active = accepted && params.action != proto::MotionTrackingAction::Stop;
-        if !control.motion_tracking_active { control.owner_idle_since = Some(Instant::now()); }
+        control.motion_tracking = (accepted && params.action != proto::MotionTrackingAction::Stop)
+            .then_some(params);
+        if control.motion_tracking.is_none() { control.owner_idle_since = Some(Instant::now()); }
     }
     response(accepted, reason)
 }
@@ -281,11 +270,6 @@ pub(super) async fn dispatch_head_tracking(session: u64, params: proto::HeadTrac
     let generation = {
         let mut control = state.control.lock().await;
         if control.owner != Some(session) || !control.human_held || !control.connected || control.owner_closing {
-            return response(false, Some("控制连接不可用".into()));
-        }
-        if params.action != proto::MotionTrackingAction::Stop
-            && (control.autonomous_deactivated || !control.active)
-        {
             return response(false, Some("控制连接不可用".into()));
         }
         if params.action == proto::MotionTrackingAction::Update && !control.head_tracking_started {
@@ -341,11 +325,6 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
         if control.owner != Some(session) || !control.human_held || !control.connected || control.owner_closing {
             return response(false, Some("控制连接不可用".into()));
         }
-        if params.action != proto::MotionTrackingAction::Stop
-            && (control.autonomous_deactivated || !control.active)
-        {
-            return response(false, Some("控制连接不可用".into()));
-        }
         if action == proto::MotionTrackingAction::Update && !control.coordinated_tracking_started {
             return response(false, Some("本网页尚未启动联合追踪".into()));
         }
@@ -354,9 +333,7 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
         // allowed to overwrite a newer locally captured frame.
         if action != proto::MotionTrackingAction::Stop {
             desired_params.target = None;
-            if control.tracking_input_fresh(Instant::now())
-                && let Some(frame) = crate::vision_relay::current_frame(&control, &params)
-            {
+            if let Some(frame) = crate::vision_relay::current_frame(&control, &params) {
                 params.target = frame.target;
             } else {
                 params.target = None;
@@ -364,7 +341,7 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
             }
         }
         if matches!(action, proto::MotionTrackingAction::Start | proto::MotionTrackingAction::Stop) {
-            control.coordinated_tracking_generation = control.coordinated_tracking_generation.wrapping_add(1);
+            control.vision_generation = control.vision_generation.wrapping_add(1);
             control.vision_pending = None;
             if action == proto::MotionTrackingAction::Stop {
                 control.coordinated_tracking_started = false;
@@ -374,7 +351,7 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
             if let Some(recorder) = &control.target_vision_record { recorder.set_following(false); }
         }
         let human_generation = control.human_generation;
-        let tracking_generation = control.coordinated_tracking_generation;
+        let tracking_generation = control.vision_generation;
         if state.commands.try_send(RobotCommand::Request {
             calls: vec![proto::Call::RobotCoordinatedTracking(params.clone())], sit_on_loss: false,
             generation: Some(control.human_generation), created: Instant::now(), reply,
@@ -396,7 +373,7 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
     let mut control = state.control.lock().await;
     control.human_actions -= 1;
     if control.owner == Some(session) && control.human_generation == human_generation
-        && control.coordinated_tracking_generation == tracking_generation
+        && control.vision_generation == tracking_generation
     {
         match action {
             proto::MotionTrackingAction::Start => {

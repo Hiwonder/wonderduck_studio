@@ -272,12 +272,12 @@ pub(super) async fn serve(
     drop(requests);
     drop(stop);
     drop(save_tx);
+    release_session(session, state).await;
     if let Some(task) = input_acquire.take() {
         let _ = task.await;
     }
     let _ = dispatcher.await;
     let _ = stop_dispatcher.await;
-    release_session(session, state).await;
     if let Err(error) = settings_worker.await {
         tracing::error!(%error, "page settings worker failed");
     }

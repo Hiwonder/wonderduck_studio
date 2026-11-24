@@ -28,6 +28,8 @@ pub(super) struct Frame {
     pub height: u32,
     pub rotate: Option<u16>,
     pub target: Option<proto::VisualTrackingTarget>,
+    pub line: Option<[f64; 2]>,
+    pub line_frame: bool,
 }
 
 #[derive(Deserialize)]
@@ -99,14 +101,20 @@ fn compatible(frame: &Frame, params: &proto::CoordinatedTrackingParams) -> bool 
     }
 }
 
-pub(super) fn current_frame<'a>(control: &'a ControlState, params: &proto::CoordinatedTrackingParams)
-    -> Option<&'a Frame> {
+fn latest_frame(control: &ControlState) -> Option<&Frame> {
     let peer = control.peers.get(&control.owner?)?;
     let frame = peer.vision_latest.as_ref()?;
-    let now = wall_us()?;
-    if peer.vision_binding != Some(frame.binding) || !fresh(frame.captured, now)
-        || !compatible(frame, params) { return None; }
-    Some(frame)
+    (peer.vision_binding == Some(frame.binding) && fresh(frame.captured, wall_us()?)).then_some(frame)
+}
+
+pub(super) fn current_frame<'a>(
+    control: &'a ControlState, params: &proto::CoordinatedTrackingParams,
+) -> Option<&'a Frame> {
+    latest_frame(control).filter(|frame| !frame.line_frame && compatible(frame, params))
+}
+
+pub(super) fn current_line(control: &ControlState) -> Option<&Frame> {
+    latest_frame(control).filter(|frame| frame.line_frame)
 }
 
 fn frame_valid(frame: &Frame) -> bool {
@@ -124,13 +132,17 @@ pub(super) async fn publish(state: &AppState, frame: Frame) {
     let Some(peer) = control.peers.get_mut(&binding.session) else { return; };
     if peer.vision_binding != Some(binding)
         || peer.vision_latest.as_ref().is_some_and(|old| frame.captured <= old.captured) { return; }
+    let line_frame = frame.line_frame;
     peer.vision_latest = Some(frame);
-    if control.owner != Some(binding.session) || control.owner_closing { return; }
-    if !control.coordinated_tracking_started
-        || !control.connected || !control.tracking_input_fresh(std::time::Instant::now()) { return; }
-    let Some(params) = &control.coordinated_params else { return };
-    if current_frame(&control, params).is_none() { return; }
-    let marker = (binding.session, binding.id, control.coordinated_tracking_generation);
+    if control.owner != Some(binding.session) || control.owner_closing
+        || !control.connected || !control.human_held
+    { return; }
+    if line_frame {
+        if control.motion_tracking.is_none_or(|params| params.line_speed.is_none()) { return; }
+    } else if !control.coordinated_tracking_started
+        || control.coordinated_params.as_ref().is_none_or(|params| current_frame(&control, params).is_none())
+    { return; }
+    let marker = (binding.session, binding.id, control.vision_generation);
     if control.vision_pending.is_some() { return; }
     if state.commands.try_send(RobotCommand::VisionUpdate {
         session: marker.0, binding: marker.1, generation: marker.2,
@@ -140,20 +152,27 @@ pub(super) async fn publish(state: &AppState, frame: Frame) {
 // Called by the single ordered IPC worker immediately before it writes. A
 // single pending marker represents all frames received while IPC was busy.
 pub(super) fn take_update(control: &mut ControlState, session: u64, binding: u64, generation: u64)
-    -> Option<proto::CoordinatedTrackingParams> {
+    -> Option<proto::Call> {
     let marker = (session, binding, generation);
     if control.vision_pending != Some(marker) { return None; }
     control.vision_pending = None;
-    if control.owner != Some(session) || !control.connected || !control.tracking_input_fresh(std::time::Instant::now())
-        || !control.coordinated_tracking_started
-        || control.owner_closing || control.coordinated_tracking_generation != generation { return None; }
+    if control.owner != Some(session) || !control.connected || !control.human_held
+        || control.owner_closing || control.vision_generation != generation { return None; }
+
+    if let Some(mut params) = control.motion_tracking.filter(|params| params.line_speed.is_some()) {
+        let frame = current_line(control).filter(|frame| frame.binding.id == binding)?;
+        params.action = proto::MotionTrackingAction::Update;
+        params.initial_pitch = None;
+        params.target = frame.line;
+        return params.valid().then_some(proto::Call::RobotMotionTracking(params));
+    }
+    if !control.coordinated_tracking_started { return None; }
     let mut params = control.coordinated_params.clone()?;
-    let frame = current_frame(control, &params)?;
-    if frame.binding.id != binding { return None; }
+    let frame = current_frame(control, &params).filter(|frame| frame.binding.id == binding)?;
     params.action = proto::MotionTrackingAction::Update;
     params.initial_pitch = None;
     params.target = frame.target;
-    params.valid().then_some(params)
+    params.valid().then_some(proto::Call::RobotCoordinatedTracking(params))
 }
 
 pub(super) async fn relay_values(state: AppState, id: u64, source: Source, mut events: watch::Receiver<Value>) {
@@ -213,7 +232,14 @@ pub(super) async fn frame_from_value(state: &AppState, id: u64, source: Source, 
             (None, target)
         }
     };
-    Some(Frame { binding, captured, width, height, rotate, target })
+    let line_data = event.get("line").filter(|data| source == Source::Color && data.is_object());
+    let line = line_data.and_then(|data| {
+        let center = data.get("center")?.as_f64()?;
+        let aspect = data.get("aspect")?.as_f64()?;
+        ((0.0..=1.0).contains(&center) && aspect.is_finite() && aspect > 0.0)
+            .then_some([2.0 * center - 1.0, aspect])
+    });
+    Some(Frame { binding, captured, width, height, rotate, target, line, line_frame: line_data.is_some() })
 }
 
 pub(super) async fn relay_objects(state: AppState, id: u64, mut events: watch::Receiver<crate::object_detection::Event>) {
@@ -227,5 +253,55 @@ pub(super) async fn relay_objects(state: AppState, id: u64, mut events: watch::R
             && let Some(frame) = frame_from_value(&state, id, Source::Person, &value).await {
             publish(&state, frame).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ControlClient, ControlPeer, Input};
+    use std::time::Instant;
+
+    #[test]
+    fn background_line_uses_only_fresh_frames_from_its_own_binding() {
+        let session = 1;
+        let binding = Binding { session, id: 2, source: Source::Color };
+        let mut control = ControlState::default();
+        control.owner = Some(session);
+        control.connected = true;
+        control.human_held = true;
+        control.motion_tracking = Some(proto::MotionTrackingParams {
+                action: proto::MotionTrackingAction::Start, initial_pitch: Some(1820), target: None,
+                line_speed: Some(0.15), reference_area: 0.01, deadzone: [0.0; 2],
+                gains: [[0.0; 3]; 2],
+        });
+        control.receive(Input::default(), false, Instant::now());
+        let marker = (session, binding.id, control.vision_generation);
+        let mut peer = ControlPeer::new(ControlClient::Web, String::new());
+        peer.vision_binding = Some(binding);
+        peer.vision_latest = Some(Frame {
+            binding, captured: wall_us().unwrap(), width: 1280, height: 720, rotate: Some(0),
+            target: None, line: Some([0.25, 1.77]), line_frame: true,
+        });
+        control.peers.insert(session, peer);
+        control.vision_pending = Some(marker);
+        let call = take_update(&mut control, marker.0, marker.1, marker.2);
+        assert!(matches!(call, Some(proto::Call::RobotMotionTracking(params))
+            if params.action == proto::MotionTrackingAction::Update
+                && params.target == Some([0.25, 1.77]) && params.initial_pitch.is_none()));
+
+        control.peers.get_mut(&session).unwrap().vision_latest.as_mut().unwrap().captured -= MAX_FRAME_AGE_US + 1;
+        control.vision_pending = Some(marker);
+        assert!(take_update(&mut control, marker.0, marker.1, marker.2).is_none());
+
+        let frame = control.peers.get_mut(&session).unwrap().vision_latest.as_mut().unwrap();
+        frame.captured = wall_us().unwrap();
+        frame.line = None;
+        control.vision_pending = Some(marker);
+        assert!(matches!(take_update(&mut control, marker.0, marker.1, marker.2),
+            Some(proto::Call::RobotMotionTracking(params)) if params.target.is_none()));
+        control.owner_closing = true;
+        control.vision_pending = Some(marker);
+        assert!(take_update(&mut control, marker.0, marker.1, marker.2).is_none());
     }
 }
