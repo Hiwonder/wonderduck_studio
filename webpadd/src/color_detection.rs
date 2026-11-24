@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::frame_prefetch::{FramePrefetch, camera_recoverable, media_socket};
+use crate::frame_prefetch::{CameraFrames, camera_recoverable, media_socket};
 use crate::settings::ColorReference;
 
 const WORKER: &str = include_str!("../worker/color_detection.py");
@@ -256,7 +256,7 @@ fn run(
     recorder: Option<&crate::vision_record::Recorder>,
 ) -> Result<()> {
     let mut native = NativeProcess::start_with_standby(process, standby)?;
-    let mut frames: Option<FramePrefetch> = None;
+    let mut frames: Option<CameraFrames> = None;
     let mut previous_stamp = None;
     let mut recovering = false;
     while settings.has_changed().is_ok() {
@@ -276,10 +276,10 @@ fn run(
             continue;
         }
         if frames.is_none() {
-            frames = Some(FramePrefetch::camera(&media_socket()?)?);
+            frames = Some(CameraFrames::camera(&media_socket()?, false)?);
         }
         let cycle_start = recorder.map(|_| Instant::now());
-        let (header, data) = match frames.as_ref().expect("camera initialized").next() {
+        let (header, data) = match frames.as_mut().expect("camera initialized").next() {
             Ok(frame) => frame,
             Err(error) if camera_recoverable(&error) => {
                 if !recovering {

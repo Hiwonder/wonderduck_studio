@@ -119,6 +119,11 @@ def status():
         result["networks"] = _networks()
     except RuntimeError as error:
         result["networks_error"] = str(error)
+    if result["mode"] == "station" and result["frequency_mhz"] is None:
+        active = next((item for item in result["networks"] if item["active"]), None)
+        frequency = re.fullmatch(r"([0-9]+)(?:\s+MHz)?", active["frequency"].strip()) if active else None
+        if frequency:
+            result["frequency_mhz"] = int(frequency.group(1))
     return result
 
 

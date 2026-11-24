@@ -2,11 +2,10 @@
 
 import time
 
-from app.models.update_control import UpdateControl
+from app.models.update_control import REST_TIMEOUT, UpdateControl
 from app.robot.robotd_state import query_robotd
 
 
-REST_TIMEOUT = 4.0
 POLL_INTERVAL = .25
 
 

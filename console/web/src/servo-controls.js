@@ -35,9 +35,9 @@ export function createServoControls({ request, command, toast, cancel, setBusy, 
     progress.textContent = `0/${total} · 发现 0`;
     get('scan-servos').textContent = '停止';
     try {
-      for (let id = 1; id <= 255; id++) {
+      for (let id = 1; id <= 253; id++) {
         if (stopRequested) break;
-        if ([200, 254, 255].includes(id)) continue;
+        if (id === 200) continue;
         if (!active()) throw new Error('扫描已停止：控制状态已变化');
         progress.title = `正在扫描 ID ${id}`;
         get('last-command').textContent = `正在扫描 ID ${id} · 已完成 ${completed}/${total}`;

@@ -1,28 +1,35 @@
 export function createLiveTarget({ context, send, onError, onComplete }) {
-  let pending = null, inFlight = false, generation = 0;
+  let pending = null, inFlight = null, generation = 0;
 
   function cancel() {
     generation++;
     pending = null;
   }
 
-  async function pump() {
+  function pump() {
     if (!pending || inFlight) return;
     const current = context();
     if (!current.enabled || current.id !== pending.id) { cancel(); return; }
     const data = pending, version = generation;
     pending = null;
-    inFlight = true;
+    inFlight = sendTarget(data, version).finally(() => {
+      inFlight = null;
+      pump();
+    });
+  }
+
+  async function sendTarget(data, version) {
     try {
       const result = await send(data);
       if (!result.sent) throw new Error('目标未能发送');
       if (version === generation && !pending) onComplete?.(data.id);
     } catch (error) {
       if (version === generation) { cancel(); onError(error); }
-    } finally {
-      inFlight = false;
-      pump();
     }
+  }
+
+  async function flush() {
+    while (inFlight) await inFlight;
   }
 
   function setTarget(raw) {
@@ -33,5 +40,5 @@ export function createLiveTarget({ context, send, onError, onComplete }) {
     return true;
   }
 
-  return { setTarget, cancel };
+  return { setTarget, cancel, flush, busy: () => inFlight !== null };
 }

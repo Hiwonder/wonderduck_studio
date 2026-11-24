@@ -8,6 +8,7 @@ import gzip
 import json
 import logging
 import mimetypes
+import os
 from pathlib import Path
 import queue
 import shutil
@@ -24,7 +25,7 @@ from app.models.model_management import ModelManager, ModelUncertainError
 from app.models.online_update import OnlineModelUpdater, device_versions
 from app.models.update_control import UpdateControl
 from app.robot.controller import Controller, DemoHardware
-from app.robot.protocol import REGISTERS
+from app.robot.protocol import REGISTERS, UNOQ_OPTIONAL_SERVO_IDS
 from app.robot.robotd_state import query_robotd
 from app.robot.studio import WORKSPACES
 from app.sensors.camera import Camera
@@ -37,6 +38,10 @@ from app.system.secure_transport import SecureTransport
 
 STATE_DIAGNOSTIC_LOCK = threading.Lock()
 STATE_DIAGNOSTIC_LAST = 0.0
+
+
+def sensor_enabled(name):
+    return os.environ.get(name, "true").strip().lower() not in ("0", "false", "no", "off")
 
 
 class RequestBody:
@@ -180,6 +185,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, 503)
             return
         if path == "/api/info":
+            tof_enabled = getattr(self.server, "tof_enabled", True)
+            head_imu_enabled = getattr(self.server, "head_imu_enabled", True)
+            workspaces = WORKSPACES if tof_enabled else WORKSPACES - {"maze"}
             native_readonly = getattr(self.controller, "readonly", False)
             readonly = native_readonly
             if getattr(self.server, "studio", False) and hasattr(self.controller, "readonly_for"):
@@ -204,7 +212,8 @@ class Handler(BaseHTTPRequestHandler):
                                 demo=self.controller.demo, hz=self.controller.hz,
                                 imu_source=self.controller.imu_source, readonly=readonly, device_versions=versions,
                                 studio=getattr(self.server, "studio", False),
-                                workspaces=sorted(WORKSPACES) if getattr(self.server, "studio", False) else None,
+                                workspaces=sorted(workspaces) if getattr(self.server, "studio", False) else None,
+                                tof_enabled=tof_enabled, head_imu_enabled=head_imu_enabled,
                                 supports_software_update=(getattr(self.server, "studio", False) and not self.controller.demo
                                     and software_update.available(self.server.robot_root)),
                                 supports_service_restart=(getattr(self.server, "studio", False)
@@ -232,7 +241,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.controller.set_status_visible(self.client, workspace in ("status", "action", "debug", "calibration"))
             state = self.controller.snapshot(self.client)
             control_done = time.monotonic()
-            if getattr(self.server, "tof", None) is not None:
+            if not getattr(self.server, "tof_enabled", True):
+                state.pop("tof", None)
+            elif getattr(self.server, "tof", None) is not None:
                 state["tof"] = self.server.tof.snapshot()
             auxiliary = getattr(self.server, "auxiliary_imu", None)
             if auxiliary is not None:
@@ -258,6 +269,8 @@ class Handler(BaseHTTPRequestHandler):
             # Each device may have succeeded, failed, or been polled at a different
             # instant. Never substitute the aggregate control-frame timestamp.
             state["servos"] = [dict(item) for item in state.get("servos", [])]
+            if "optional_servos" in state:
+                state["optional_servos"] = [dict(item) for item in state["optional_servos"]]
             if "control_servos" in state:
                 state["control_servos"] = [dict(item) for item in state["control_servos"]]
             state["imu"] = dict(state.get("imu") or {})
@@ -266,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
                 sampled = raw_sample.pop("sampled_monotonic", None)
                 raw_sample["age_us"] = round((now - sampled) * 1_000_000) if sampled is not None else None
                 state["imu"]["raw_sample"] = raw_sample
-            for item in [*state["servos"], *state.get("control_servos", []), state["imu"]]:
+            for item in [*state["servos"], *state.get("control_servos", []), *state.get("optional_servos", []), state["imu"]]:
                 for source, target in (("sampled_monotonic", "age_ms"),
                                        ("observed_monotonic", "observation_age_ms")):
                     sampled = item.pop(source, None)
@@ -275,7 +288,7 @@ class Handler(BaseHTTPRequestHandler):
                         item.setdefault("t_ns", round(sampled * 1e9))
             self.send_json(state)
             state_done = time.monotonic()
-            if (state_done - state_started > .5 and
+            if (auxiliary is not None and state_done - state_started > .5 and
                     (workspace == "status" or workspace == "calibration" and
                      self.headers.get("X-Calibration-Source") == "head")):
                 global STATE_DIAGNOSTIC_LAST
@@ -465,6 +478,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/workspace" and hasattr(self.controller, "switch"):
                 operation = command.get("operation", "switch")
                 if operation == "switch":
+                    if command.get("workspace") == "maze" and not getattr(self.server, "tof_enabled", True):
+                        raise PermissionError("TOF 已禁用，避障行走不可用")
                     rest_before = command.get("rest_before", False)
                     if type(rest_before) is not bool:
                         raise ValueError("工作区休息选项无效")
@@ -512,6 +527,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(operation())
                 return
             studio = hasattr(self.controller, "authorize")
+            if path == "/api/head-imu/calibration" and not getattr(self.server, "head_imu_enabled", True):
+                raise PermissionError("头部 IMU 已禁用")
             with self.controller.lock if studio else nullcontext():
                 if studio:
                     self.controller.authorize(self.client, path, self.headers.get("X-Studio-Workspace", ""))
@@ -579,7 +596,7 @@ class Handler(BaseHTTPRequestHandler):
         return result, 200
 
 
-def create_controller(args):
+def create_controller(args, *, tof_enabled=True, unoq_bus=False):
     if args.studio:
         from app.robot.hardware import Hardware
         from app.robot.studio import StudioController
@@ -590,27 +607,28 @@ def create_controller(args):
             return Hardware(args.serial, args.source, args.layout, args.full_servo_range,
                             args.imu_source, home_policy=args.home_policy)
 
-        def create_action_hardware():
+        def create_hardware_with_accessory_servos():
             hardware = create_hardware()
-            for device_id in (35, 36):
+            for device_id in UNOQ_OPTIONAL_SERVO_IDS:
                 if device_id not in hardware.ids:
                     try:
                         hardware.execute(dict(action="scan_servo", id=device_id))
                     except (OSError, RuntimeError, ValueError) as error:
-                        logging.warning("Action editor could not probe servo %d: %s", device_id, error)
+                        logging.warning("Could not probe accessory servo %d: %s", device_id, error)
             return hardware
 
         def factory(workspace):
-            hardware_factory = create_action_hardware if workspace == "action" else create_hardware
+            probe_accessories = workspace == "action" or (unoq_bus and workspace == "debug")
+            hardware_factory = create_hardware_with_accessory_servos if probe_accessories else create_hardware
             return Controller(hardware_factory(), args.hz, demo=args.demo, hardware_factory=hardware_factory,
                               port=args.serial, full_servo_range=args.full_servo_range, maintenance=True,
                               imu_only=workspace == "calibration")
 
         return StudioController(args.robotd_socket, args.hz, factory, demo=args.demo,
-                                status_hardware_factory=create_hardware)
+                                status_hardware_factory=create_hardware, tof_enabled=tof_enabled)
     if args.robotd_socket:
         from app.robot.robotd_state import RobotdController
-        return RobotdController(args.robotd_socket, args.hz)
+        return RobotdController(args.robotd_socket, args.hz, tof_enabled=tof_enabled)
     if args.demo:
         hardware = DemoHardware(args.full_servo_range, args.imu_source, args.home_policy)
     else:
@@ -655,10 +673,13 @@ def main():
     if args.robotd_socket and not args.studio and (args.demo or args.full_servo_range):
         parser.error("--robotd-socket 不能与 --demo 或 --full-servo-range 同用")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    controller = create_controller(args)
+    tof_enabled = sensor_enabled("WONDERDUCK_UNOQ_TOF_ENABLED")
+    head_imu_enabled = sensor_enabled("WONDERDUCK_UNOQ_HEAD_IMU_ENABLED")
+    unoq_bus = bool(os.environ.get("WONDERDUCK_UNOQ_ROUTER")) and args.serial == os.environ.get("WONDERDUCK_SERVO_PORT")
+    controller = create_controller(args, tof_enabled=tof_enabled, unoq_bus=unoq_bus)
     camera = None if args.studio else Camera()
-    tof = None if args.studio else TofReader(demo=args.demo)
-    auxiliary_imu = create_auxiliary_imu(args)
+    tof = TofReader(demo=args.demo) if tof_enabled and not args.studio else None
+    auxiliary_imu = create_auxiliary_imu(args) if head_imu_enabled else None
     secure_transport = None
     try:
         server = ThreadingHTTPServer((args.listen, args.port), Handler)
@@ -668,7 +689,9 @@ def main():
         server.robot_root = args.robot_root
         server.camera = camera
         server.tof = tof
+        server.tof_enabled = tof_enabled
         server.auxiliary_imu = auxiliary_imu
+        server.head_imu_enabled = head_imu_enabled
         server.static = Path(args.static).resolve()
         server.actions_directory = Path(__file__).resolve().parent / "actions"
         server.action_documents = ActionDocuments(Path(__file__).resolve().parent / "action-groups")

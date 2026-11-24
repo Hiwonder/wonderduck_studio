@@ -13,6 +13,7 @@
           else input.setCustomValidity(window.WonderduckLanguage?.translate(message) || message);
         }
       });
+      const tofEnabled = document.body.dataset.tofEnabled !== 'false';
       const isVisionPage = () => document.body.hasAttribute('data-vision-page');
       const isMotionPage = () => isVisionPage() || ['control', 'maze'].includes(document.body.dataset.consolePage);
       const targetHeadOnly = () => document.body.dataset.consolePage === 'target';
@@ -72,6 +73,11 @@
       const knobs = new Map();
       const stickLocks = new Map([...document.querySelectorAll('[data-stick-lock]')]
         .map(input => [input.dataset.stickLock, input]));
+      const stickKeys = {
+        left: ['KeyW', 'KeyS', 'KeyA', 'KeyD'],
+        right: ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'],
+      };
+      const positionLocked = side => document.body.dataset.consolePage === 'control' && stickLocks.get(side)?.checked === true;
       const actionButtons = [...document.querySelectorAll('[data-action]')];
       const skillButtons = [...document.querySelectorAll('.skill-actions [data-action]')];
       let sequence = 0;
@@ -317,7 +323,7 @@
       const updateSticksAvailability = () => {
         const disabled = sticksBlocked();
         document.querySelectorAll('.pad').forEach(pad => pad.setAttribute('aria-disabled', String(disabled)));
-        stickLocks.forEach(input => { input.disabled = disabled; });
+        stickLocks.forEach(input => { input.disabled = disabled || motionUnavailable(); });
         headCenterButton.disabled = headCenterUnavailable();
       };
       const zero = () => {
@@ -334,8 +340,8 @@
           pad.classList.remove("is-active");
           if (pad.dataset.pointer) {
             const id = Number(pad.dataset.pointer);
-            if (pad.hasPointerCapture(id)) pad.releasePointerCapture(id);
             delete pad.dataset.pointer;
+            if (pad.hasPointerCapture(id)) pad.releasePointerCapture(id);
           }
         });
         updateKnobs();
@@ -376,7 +382,7 @@
         motionPower.querySelector('use').setAttribute('href', icon);
         motionPower.disabled = !connected || powerPending !== null || autoPreparing() || restPhase === 'resting'
           || motionEnabled === null || motionHomed === null;
-        headCenterButton.disabled = headCenterUnavailable();
+        updateSticksAvailability();
       };
       const updatePowerState = status => {
         const wasAvailable = !motionUnavailable();
@@ -400,7 +406,7 @@
         reconcileHeadPosition();
         prepareDriveOnEntry();
       };
-      const settingsReady = () => socket?.readyState === WebSocket.OPEN && !!confirmedObstacle;
+      const settingsReady = () => socket?.readyState === WebSocket.OPEN && (!tofEnabled || !!confirmedObstacle);
       const markSettingsSaved = () => {
         if (!settingsDirty && !settingsSaving && !headSettingsDirty && !headSettingsSaving
           && !trackingUnsaved()) {
@@ -634,8 +640,10 @@
           updateColorPresetControls();
         }
         else settingsDirty = true;
-        restoreObstacle = saved.obstacle;
-        restoreSharedSettings();
+        if (tofEnabled) {
+          restoreObstacle = saved.obstacle;
+          restoreSharedSettings();
+        } else applyObstacle(saved.obstacle);
         if (forceColor || (!volumeBusy && desiredVolume === null && volumeTimer === null)) {
           savedAudioVolume = saved.audio_volume;
           if (savedAudioVolume !== null) {
@@ -993,8 +1001,8 @@
           final_tolerance: coordinatedFinalTolerance,
           stop_area_px: personFollow ? Math.max(1, Math.round(followStopAreaValue * areaScale)) : null,
           stop_area_deadzone_px: personFollow ? Math.round(followAreaDeadzoneValue * areaScale) : 0,
-          stop_distance_mm: personFollow ? followStopDistanceValue : null,
-          stop_distance_deadzone_mm: personFollow ? followDistanceDeadzoneValue : 0,
+          stop_distance_mm: personFollow && tofEnabled ? followStopDistanceValue : null,
+          stop_distance_deadzone_mm: personFollow && tofEnabled ? followDistanceDeadzoneValue : 0,
           arrival_skill: personFollow || headOnly ? '' : coordinatedArrivalSkill,
           arrival_delay_s: personFollow || headOnly ? 0 : coordinatedArrivalDelay,
           mouth_before: {...coordinatedMouth.before, enabled: !personFollow && !headOnly && coordinatedMouth.before.enabled},
@@ -1321,13 +1329,13 @@
         }, 600);
       };
       const updateMazeButton = () => {
-        mazeButton.disabled = socket?.readyState !== WebSocket.OPEN || awaitingTarget || tracking || trackingPending
+        mazeButton.disabled = !tofEnabled || socket?.readyState !== WebSocket.OPEN || awaitingTarget || tracking || trackingPending
           || headTracking || headTrackingPending || coordinated || coordinatedPending || maze || mazePending;
-        mazeStop.disabled = socket?.readyState !== WebSocket.OPEN || !(maze || mazePending);
+        mazeStop.disabled = !tofEnabled || socket?.readyState !== WebSocket.OPEN || !(maze || mazePending);
         updateTrackingButton();
       };
       const sendMaze = (action) => {
-        if (studioActive && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'maze', action, ...mazeSettings, linear_speed: linearSpeed, angular_speed: turnSpeed }));
+        if (tofEnabled && studioActive && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'maze', action, ...mazeSettings, linear_speed: linearSpeed, angular_speed: turnSpeed }));
       };
       const stopMaze = (send = true) => {
         if (send && (maze || mazePending)) sendMaze('stop');
@@ -1351,7 +1359,7 @@
         if (maze) sendMaze('update');
       }));
       mazeButton.addEventListener('click', () => {
-        if (maze || mazePending) return;
+        if (!tofEnabled || maze || mazePending) return;
         if (awaitingTarget || tracking || trackingPending || headTracking || headTrackingPending || coordinated || coordinatedPending
           || !mazeInputs.every((input) => input.reportValidity())) return;
         keys.clear();
@@ -1538,8 +1546,8 @@
         document.querySelectorAll('.coordinated-goal').forEach(field => { field.hidden = !showCoordinated; });
         document.querySelector('#follow-stop-area-setting').hidden = !personFollow;
         document.querySelector('#follow-area-deadzone-setting').hidden = !personFollow;
-        document.querySelector('#follow-stop-distance-setting').hidden = !personFollow;
-        document.querySelector('#follow-distance-deadzone-setting').hidden = !personFollow;
+        document.querySelector('#follow-stop-distance-setting').hidden = !personFollow || !tofEnabled;
+        document.querySelector('#follow-distance-deadzone-setting').hidden = !personFollow || !tofEnabled;
         document.querySelectorAll('.coordinated-arrival, .coordinated-mouth').forEach(field => {
           field.hidden = !stagedTarget;
         });
@@ -2007,7 +2015,7 @@
       };
       const applyObstacle = (settings) => {
         if (!settings) return;
-        confirmedObstacle = settings;
+        if (tofEnabled) confirmedObstacle = settings;
         obstacleEnabled.checked = settings.enabled === true;
         obstacleDistance.value = settings.threshold_mm;
         obstacleDelay.value = settings.clear_delay_ms;
@@ -2015,7 +2023,7 @@
         setText(obstacleDelayValue, `${settings.clear_delay_ms} ms`);
       };
       const sendObstacle = (restoring = false) => {
-        if (!socket || socket.readyState !== WebSocket.OPEN || !confirmedObstacle || obstaclePending) return;
+        if (!tofEnabled || !socket || socket.readyState !== WebSocket.OPEN || !confirmedObstacle || obstaclePending) return;
         if (restoring !== true) restoreObstacle = null;
         obstaclePending = true;
         obstacleEnabled.disabled = obstacleDistance.disabled = obstacleDelay.disabled = true;
@@ -2109,6 +2117,7 @@
           const [x, y] = side === 'head' ? headStickKnob : [state[`${side}_x`], state[`${side}_y`]];
           knob.style.left = `${50 + x * 38}%`;
           knob.style.top = `${50 - y * 38}%`;
+          knob.parentElement.classList.toggle('is-locked', positionLocked(side));
         });
         updateAxisLockIndicator();
       };
@@ -2468,13 +2477,41 @@
         socket.onerror = () => socket.close();
       };
 
-      stickLocks.forEach((input, side) => input.addEventListener('change', () => {
+      const setStickLock = (side, lock) => {
+        const input = stickLocks.get(side);
+        input.checked = lock && !input.disabled && state.active;
         if (!input.checked) {
+          stickKeys[side].forEach(key => keys.delete(key));
           state[`${side}_x`] = state[`${side}_y`] = 0;
-          updateKnobs();
-          sendInput();
+          const pad = knobs.get(side).parentElement;
+          if (pad.dataset.pointer) {
+            const id = Number(pad.dataset.pointer);
+            delete pad.dataset.pointer;
+            if (pad.hasPointerCapture(id)) pad.releasePointerCapture(id);
+            pad.classList.remove('is-active');
+          }
         }
-      }));
+        updateKnobs();
+        sendInput();
+      };
+      stickLocks.forEach((input, side) => {
+        input.addEventListener('change', () => setStickLock(side, input.checked));
+        const label = input.closest('label');
+        let handledTouchId = null;
+        // A finger holding the joystick may prevent a second finger from generating a click.
+        label.addEventListener('pointerdown', event => {
+          handledTouchId = null;
+          if (document.body.dataset.consolePage !== 'control' || event.pointerType !== 'touch'
+            || event.isPrimary || input.disabled) return;
+          handledTouchId = event.pointerId;
+          event.preventDefault();
+          setStickLock(side, !input.checked);
+        });
+        label.addEventListener('click', event => {
+          if (event.pointerId === handledTouchId) event.preventDefault();
+          handledTouchId = null;
+        });
+      });
       document.querySelectorAll(".pad").forEach((pad) => {
         const side = pad.dataset.stick;
         const lock = stickLocks.get(side);
@@ -2511,7 +2548,9 @@
           setFromPointer(event);
         });
         pad.addEventListener("pointermove", (event) => {
-          if (state.active && !blocked() && pad.hasPointerCapture(event.pointerId)) setFromPointer(event);
+          if (state.active && !blocked() && pad.hasPointerCapture(event.pointerId)) {
+            setFromPointer(event);
+          }
         });
         const release = (event) => {
           if (pad.dataset.pointer !== String(event.pointerId)) return;
@@ -2521,7 +2560,7 @@
           if (side === 'head') {
             headStickAxes.fill(0);
             headStickKnob.fill(0);
-          } else if (event.type !== 'pointerup' || !isVisionPage() || !lock.checked) {
+          } else if (event.type !== 'pointerup' || !(positionLocked(side) || (isVisionPage() && lock.checked))) {
             lock.checked = false;
             state[`${side}_x`] = state[`${side}_y`] = 0;
           }
@@ -2561,13 +2600,12 @@
       obstacleDistance.addEventListener("change", sendObstacle);
       obstacleDelay.addEventListener("change", sendObstacle);
       const keys = new Set();
-      const tracked = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+      const tracked = new Set(Object.values(stickKeys).flat());
       const updateKeys = () => {
-        for (const [side, up, down, left, right] of [
-          ['left', 'KeyW', 'KeyS', 'KeyA', 'KeyD'],
-          ['right', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'],
-        ]) {
-          if (isVisionPage() && ![up, down, left, right].some(key => keys.has(key)) && stickLocks.get(side).checked) continue;
+        for (const [side, [up, down, left, right]] of Object.entries(stickKeys)) {
+          if (document.body.dataset.consolePage === 'control' && knobs.get(side).parentElement.dataset.pointer) continue;
+          const holdsPosition = positionLocked(side) || (isVisionPage() && stickLocks.get(side).checked);
+          if (holdsPosition && !stickKeys[side].some(key => keys.has(key))) continue;
           state[`${side}_y`] = (keys.has(up) ? 1 : 0) - (keys.has(down) ? 1 : 0);
           state[`${side}_x`] = (keys.has(right) ? 1 : 0) - (keys.has(left) ? 1 : 0);
         }
@@ -2575,9 +2613,18 @@
         sendInput();
       };
       window.addEventListener("keydown", (event) => {
-        if (!state.active || sticksBlocked() || /^(INPUT|TEXTAREA|BUTTON|SELECT)$/.test(event.target.tagName) || !tracked.has(event.code) || event.repeat) return;
+        if (!state.active || sticksBlocked() || event.repeat) return;
+        if (/^(INPUT|TEXTAREA|BUTTON|SELECT)$/.test(event.target.tagName)
+          && !event.target.matches('[data-stick-lock]')) return;
+        const lockSide = document.body.dataset.consolePage === 'control' && !event.altKey && !event.ctrlKey && !event.metaKey
+          ? ({KeyQ: 'left', KeyE: 'right'})[event.code] : null;
+        if (!tracked.has(event.code) && !lockSide) return;
         if (motionUnavailable()) { event.preventDefault(); remindMotion(); return; }
         event.preventDefault();
+        if (lockSide) {
+          setStickLock(lockSide, !stickLocks.get(lockSide).checked);
+          return;
+        }
         keys.add(event.code);
         updateKeys();
       });
@@ -2662,7 +2709,11 @@
       });
       const resume = (explicitWorkspace = false) => {
         if (studioActive && !document.hidden && (explicitWorkspace || document.hasFocus())) {
-          zero(); state.active = true; sendInput(); reconcileHeadPosition(); prepareDriveOnEntry();
+          if (!state.active || explicitWorkspace) {
+            zero(); state.active = true; sendInput();
+          }
+          reconcileHeadPosition();
+          prepareDriveOnEntry();
         }
       };
       window.addEventListener('studio-preview', () => {

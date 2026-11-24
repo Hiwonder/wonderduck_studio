@@ -191,8 +191,7 @@ impl FrameClient {
                 api_version: proto::API_VERSION,
             }),
         );
-        serde_json::to_writer(&mut stream, &hello)?;
-        stream.write_all(b"\n")?;
+        send_request(&mut stream, &hello)?;
         let mut reader = BufReader::new(stream);
         let hello: proto::HelloResult = serde_json::from_value(response(&mut reader, 1)?)?;
         if hello.api_version != proto::API_VERSION {
@@ -209,8 +208,7 @@ impl FrameClient {
             method: "media.video".into(),
             params: None,
         };
-        serde_json::to_writer(self.reader.get_mut(), &request)?;
-        self.reader.get_mut().write_all(b"\n")?;
+        send_request(self.reader.get_mut(), &request)?;
         response(&mut self.reader, 3)
     }
 
@@ -221,8 +219,7 @@ impl FrameClient {
             method: proto::method::MEDIA_FRAME.into(),
             params: None,
         };
-        serde_json::to_writer(self.reader.get_mut(), &request)?;
-        self.reader.get_mut().write_all(b"\n")?;
+        send_request(self.reader.get_mut(), &request)?;
         let header: proto::MediaFrameHeader =
             serde_json::from_value(response(&mut self.reader, 2)?)?;
         ensure!(header.valid_uyvy(), "invalid camera frame");
@@ -230,6 +227,12 @@ impl FrameClient {
         self.reader.read_exact(&mut data)?;
         Ok((header, data))
     }
+}
+
+fn send_request(stream: &mut UnixStream, request: &proto::Request) -> Result<()> {
+    let mut line = serde_json::to_vec(request)?;
+    line.push(b'\n');
+    stream.write_all(&line).context("write camera request")
 }
 
 fn response(reader: &mut BufReader<UnixStream>, id: u64) -> Result<serde_json::Value> {
@@ -300,6 +303,13 @@ mod tests {
         let (client, peer) = UnixStream::pair().unwrap();
         drop(peer);
         let error = response(&mut BufReader::new(client), 2).unwrap_err();
+        assert!(camera_recoverable(&error));
+
+        let (client, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        let mut client = FrameClient { reader: BufReader::new(client) };
+        let error = client.next().unwrap_err();
+        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::BrokenPipe);
         assert!(camera_recoverable(&error));
     }
 }

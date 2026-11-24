@@ -1,3 +1,5 @@
+import { ACTION_POSITION_LIMITS } from './servo-panel.js';
+
 const $ = id => document.getElementById(id);
 
 export function createActionEditor({ request, toast, confirmAction, context, servoPanel, iconsRefresh }) {
@@ -28,6 +30,17 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
     return { action_id: actionId, frames: source.map(frame => ({
       duration_ms: frame.duration_ms, positions: { ...frame.positions },
     })), layout, layout_scale_percent: servoPanel.scale() };
+  }
+
+  function validatePlaybackPositions(source, lockedIds) {
+    for (const frame of source) {
+      for (const [id, { min, max }] of Object.entries(ACTION_POSITION_LIMITS)) {
+        const value = frame.positions[id];
+        if (value != null && !lockedIds.includes(Number(id)) && (value < min || value > max)) {
+          throw new Error(`ID ${id} 的动作位置须在 ${min}～${max} 步之间`);
+        }
+      }
+    }
   }
 
   function applySelection(index, followPlayback = false) {
@@ -113,7 +126,8 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
       durationCell.append(duration); row.append(durationCell);
       for (const id of ids) {
         const cell = document.createElement('td');
-        const input = document.createElement('input'); input.type = 'number'; input.min = '0'; input.max = '4095'; input.step = '1';
+        const { min, max } = ACTION_POSITION_LIMITS[id] ?? { min: 0, max: 4095 };
+        const input = document.createElement('input'); input.type = 'number'; input.min = min; input.max = max; input.step = '1';
         input.placeholder = '-';
         input.value = frame.positions[id] ?? '';
         input.setAttribute('aria-label', `第 ${index + 1} 帧 ID ${id} 位置`);
@@ -122,8 +136,8 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
           if (input.value === '') {
             if (Object.keys(frame.positions).length === 1 && id in frame.positions) { input.value = frame.positions[id]; toast('每帧至少需要一个舵机目标', true); return; }
             delete frame.positions[id];
-          } else if (!Number.isInteger(value) || value < 0 || value > 4095) {
-            input.value = frame.positions[id] ?? ''; toast('舵机位置必须为 0～4095 的整数', true); return;
+          } else if (!Number.isInteger(value) || value < min || value > max) {
+            input.value = frame.positions[id] ?? ''; toast(`舵机位置必须为 ${min}～${max} 的整数`, true); return;
           } else frame.positions[id] = value;
           if (index === selected) { try { servoPanel.setTargets(frame.positions); } catch (error) { toast(error.message, true); } }
         });
@@ -241,10 +255,12 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
   async function sendFrame(frame) {
     if (!context().info?.supports_direct_action_frame) throw new Error('请重启控制台服务后使用单帧运行');
     const document = makeDocument([frame]);
+    const lockedIds = servoPanel.lockedIds();
+    validatePlaybackPositions(document.frames, lockedIds);
     servoPanel.cancel();
     frameGraceUntil = performance.now() + 1500;
     servoPanel.holdForFrame(frameGraceUntil);
-    const result = await request('action-playback', { operation: 'send_frame', document, locked_ids: servoPanel.lockedIds() });
+    const result = await request('action-playback', { operation: 'send_frame', document, locked_ids: lockedIds });
     if (!result.sent) throw new Error('动作帧未发送完成');
   }
 
@@ -260,7 +276,9 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
         $('action-name').value = $('action-groups').value.replace(/\.csv$/i, '');
       }
       const document = makeDocument(mode === 'group' ? frames : loaded);
-      const promise = request('action-playback', { operation: 'start', document, loop, locked_ids: servoPanel.lockedIds() });
+      const lockedIds = servoPanel.lockedIds();
+      validatePlaybackPositions(document.frames, lockedIds);
+      const promise = request('action-playback', { operation: 'start', document, loop, locked_ids: lockedIds });
       pendingStart = { generation, promise };
       const result = await promise;
       if (generation === playbackGeneration && result.state === 'playing') {

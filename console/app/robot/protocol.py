@@ -7,6 +7,7 @@ from pathlib import Path
 from app.paths import CONSOLE_ROOT
 
 IDS = (20, 21, 22, 23, 24, 30, 31, 32, 33, 34, 10, 11, 12, 13, 14)
+UNOQ_OPTIONAL_SERVO_IDS = (35, 36)
 NAMES = (
     "left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
     "neck_pitch", "head_pitch", "head_yaw", "head_roll", "mouth",
@@ -84,6 +85,14 @@ def servo_faults(status):
     return faults
 
 
+def discovered_joint(device_id, full_servo_range=False):
+    joint = dict(id=device_id, name=f"servo_{device_id}", label="扫描",
+                 limits=list(DISCOVERED_LIMITS), discovered=True)
+    if full_servo_range:
+        joint["encoder_limits"] = [0, 4096]
+    return joint
+
+
 class ServoLayout:
     home_policy = None
     full_servo_range = False
@@ -114,10 +123,7 @@ class ServoLayout:
         for joint in self.joints:
             if joint['id'] == device_id:
                 return dict(joint)
-        joint = dict(id=device_id, name=f'servo_{device_id}', label='扫描',
-                     limits=list(DISCOVERED_LIMITS), discovered=True)
-        if self.full_servo_range:
-            joint['encoder_limits'] = [0, 4096]
+        joint = discovered_joint(device_id, self.full_servo_range)
         self.joints.append(joint)
         self.joints[len(JOINTS):] = sorted(self.joints[len(JOINTS):], key=lambda item: item['id'])
         return dict(joint)
@@ -289,22 +295,23 @@ def pose_targets(action, ids=IDS, home_policy=None):
         raise ValueError("未知姿态操作")
     if action == "center_all":
         return dict.fromkeys(ids, 2048)
-    ids = ids[:len(NAMES)]
-    if len(ids) < len(NAMES):
+    configured_ids = ids[:len(NAMES)]
+    if len(configured_ids) < len(NAMES):
         raise ValueError("Home 需要全部 15 个已配置舵机")
     if home_policy is None:
         angles = HOME_RADIANS
     else:
         from app.robot.home_pose import read_home_radians
         angles = read_home_radians(home_policy, NAMES)
-    if len(angles) != len(ids) or not all(math.isfinite(angle) for angle in angles):
+    if len(angles) != len(configured_ids) or not all(math.isfinite(angle) for angle in angles):
         raise ValueError("Home 关节位置无效")
     targets = {device_id: math.floor(2048 - angle * 4096 / (2 * math.pi) + .5)
-               for device_id, angle in zip(ids, angles)}
+               for device_id, angle in zip(configured_ids, angles)}
     for target in targets.values():
         integer(target, 0, 4095, "Home 编码器位置")
     for name, target in HOME_ENCODER_TARGETS.items():
-        targets[ids[NAMES.index(name)]] = integer(target, 0, 4095, "Home 编码器位置")
+        targets[configured_ids[NAMES.index(name)]] = integer(target, 0, 4095, "Home 编码器位置")
+    targets.update((device_id, 2048) for device_id in UNOQ_OPTIONAL_SERVO_IDS if device_id in ids)
     return targets
 
 

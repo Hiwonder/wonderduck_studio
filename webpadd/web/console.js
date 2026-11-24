@@ -167,7 +167,8 @@
     ['data-operator-tab', 'data-operator-panel', 'operatorTab'],
   ];
   for (const [attribute, panelAttribute, property] of groups) {
-    const buttons = [...document.querySelectorAll(`button[${attribute}]`)];
+    const buttons = [...document.querySelectorAll(`button[${attribute}]`)]
+      .filter(button => body.dataset.tofEnabled !== 'false' || !button.hasAttribute('data-requires-tof'));
     const select = button => {
       const value = button.getAttribute(attribute);
       if (body.dataset[property] === value) return;
@@ -230,10 +231,17 @@
       sendFeedback('网络播报设置超时，请重试', true);
     }, 8000);
   }
+  function cancelNetworkAnnouncement() {
+    announcementRequestId++;
+    clearTimeout(announcementTimer);
+    networkAnnouncement.disabled = true;
+  }
   networkAnnouncement.addEventListener('change', () => requestNetworkAnnouncement(networkAnnouncement.checked));
-  window.addEventListener('console-page-changed', () => {
+  window.addEventListener('studio-enter', () => {
     if (body.dataset.consolePage === 'system') requestNetworkAnnouncement();
   });
+  window.addEventListener('studio-preview', cancelNetworkAnnouncement);
+  window.addEventListener('studio-leave', cancelNetworkAnnouncement);
   function forwardFeedback(node) {
     if (!node) return;
     const visibleText = node.textContent.trim();
@@ -291,7 +299,7 @@
     if (event.data?.type === 'studio-workspace-preview' || event.data?.type === 'studio-workspace') {
       const page = event.data.page;
       const button = typeof page === 'string' && document.querySelector(`button[data-page="${CSS.escape(page)}"]`);
-      if (!button) return;
+      if (!button || (body.dataset.tofEnabled === 'false' && button.hasAttribute('data-requires-tof'))) return;
       if (event.data.type === 'studio-workspace-preview') {
         window.dispatchEvent(new Event('studio-preview'));
         button.click();

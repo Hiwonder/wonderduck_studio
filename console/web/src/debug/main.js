@@ -29,6 +29,7 @@ let token = '', lastGood = 0;
 let connectionError = '';
 let targetInitialized = false;
 let parameterReadBusy = false, parameterReadPending = false, parameterReadTimer = null, parameterRevision = 0;
+let parameterReadError = '';
 let servoLayoutRevision = 0;
 let parameterAddress = 5, parameterDraft = null, parameterWriteBusy = false;
 let parameterView = 'compact';
@@ -180,7 +181,7 @@ async function command(action, data = {}) {
       if (!result.verified) console.warn('部分卸力未确认', result.results);
     }
     return result;
-  } finally { busy = false; updateControls(); }
+  } finally { busy = false; updateControls(); resumeParameterRead(); }
 }
 
 function handle(id, fn) {
@@ -239,12 +240,13 @@ setInterval(renewControl, 1000);
 handle('release', async () => { if (await confirmRelease()) return command('release_all'); });
 const servoControls = createServoControls({ request, command, toast,
   cancel: () => { stopSliderTrack(); liveTarget.cancel(); liveParameter.cancel(); },
-  setBusy: value => { scanBusy = value; updateControls(); if (!value && parameterReadPending) queueParameterRead(); },
+  setBusy: value => { scanBusy = value; updateControls(); },
   // Discovery probes can delay the next telemetry snapshot. Every probe still
   // requires an active maintenance session and an armed client on the server.
   active: canScanServos,
   onDiscovery: joint => {
     if (info.joints.some(current => current.id === joint.id)) return;
+    servoLayoutRevision++;
     info.joints.push(joint); makeServoRows(); renderServos(); updateControls();
   },
   onPose: result => {
@@ -273,7 +275,7 @@ const liveParameter = createLiveParameter({
     parameterRevision++;
     updateControls();
     try { return await request('command', { action: 'write_register', ...data }); }
-    finally { parameterWriteBusy = false; updateControls(); }
+    finally { parameterWriteBusy = false; updateControls(); resumeParameterRead(); }
   },
   onVerified: data => {
     const r = parameters?.registers.find(r => r.address === data.address);
@@ -336,7 +338,8 @@ function updateControls() {
     info?.joints.some(joint => state.servos.some(servo => servo.id === joint.id && servo.valid));
   servoControls.update({ center: poseEnabled,
     home: armed && !operationBusy && !parameterWriteBusy && !document.hidden && online &&
-      info?.joints.filter(joint => !joint.discovered).some(joint => state.servos.some(servo => servo.id === joint.id && servo.valid)),
+      info?.joints.some(joint => (!joint.discovered || joint.id === 35 || joint.id === 36) &&
+        state.servos.some(servo => servo.id === joint.id && servo.valid)),
     scan: canScanServos() && !operationBusy && !parameterWriteBusy && !parameterReadBusy });
   $('torque').disabled = !armed || operationBusy || parameterWriteBusy || !online || !current?.valid;
   $('torque').checked = current?.torque === 1;
@@ -348,7 +351,8 @@ function updateControls() {
   $('parameter-input').disabled = $('parameter-slider').disabled;
   if ($('parameter-slider').disabled) liveParameter.cancel();
   $('write-parameter').disabled = !parameterContext().enabled || parameterWriteBusy;
-  $('refresh-params').disabled = operationBusy || parameterReadBusy || parameterWriteBusy || !online;
+  $('refresh-params').disabled = busy || parameterSave.isRunning() || !!state?.parameter_batch_active ||
+    parameterReadBusy || parameterWriteBusy || !online;
   $('export-params').disabled = !!info?.readonly || !parameters || parameterId !== selected;
   $('release').disabled = !info || !!info.readonly;
   parameterSave.update();
@@ -495,6 +499,7 @@ function selectServo(id) {
   syncTarget();
   parameters = null;
   parameterId = null;
+  parameterReadError = '';
   renderParameters();
   updateParameterEditor();
   renderServos();
@@ -561,20 +566,29 @@ function queueParameterRead(delay = 120) {
   parameterReadTimer = setTimeout(readParameters, delay);
 }
 
+function resumeParameterRead() {
+  if (parameterReadPending && !parameterReadBusy && !busy && !parameterWriteBusy) queueParameterRead();
+}
+
 async function readParameters() {
   clearTimeout(parameterReadTimer);
   if (previewOnly) {
     parameters = null;
     parameterId = null;
-    renderParameters('维护未就绪，参数不可用');
+    parameterReadError = '维护未就绪，参数不可用';
+    renderParameters();
     updateParameterEditor();
     return;
   }
   parameterReadPending = true;
-  if (parameterReadBusy || busy || scanBusy || parameterWriteBusy) return;
+  // Scanning and reads share the serialized Studio bus queue. Read the
+  // selected servo between probes instead of waiting for the full scan.
+  if (parameterReadBusy || busy || parameterWriteBusy) return;
   const id = selected, revision = parameterRevision;
   parameterReadBusy = true;
   parameterReadPending = false;
+  parameterReadError = '';
+  if (!parameters) renderParameters();
   updateControls();
   try {
     const result = await request('command', { action: 'registers', id });
@@ -586,13 +600,14 @@ async function readParameters() {
   } catch (error) {
     if (id === selected && revision === parameterRevision) {
       console.warn('读取舵机参数失败', error);
-      renderParameters(friendlyErrorMessage(error.message));
+      parameterReadError = friendlyErrorMessage(error.message);
+      renderParameters();
       toast(error.message, true);
     }
   } finally {
     parameterReadBusy = false;
     updateControls();
-    if (parameterReadPending) queueParameterRead();
+    resumeParameterRead();
   }
 }
 handle('refresh-params', readParameters);
@@ -606,7 +621,7 @@ for (const button of $('parameter-view').querySelectorAll('button')) {
   });
 }
 
-function renderParameters(error) {
+function renderParameters() {
   const rows = $('parameter-rows');
   const scroller = rows.closest('.parameter-table-scroll');
   if (rows.querySelector('tr[data-address]')) {
@@ -614,7 +629,7 @@ function renderParameters(error) {
   }
   if (!parameters) {
     const tr = document.createElement('tr'); const td = document.createElement('td');
-    td.colSpan = 6; td.className = 'empty'; td.textContent = error || '读取中'; tr.append(td); rows.replaceChildren(tr); return;
+    td.colSpan = 6; td.className = 'empty'; td.textContent = parameterReadError || '读取中'; tr.append(td); rows.replaceChildren(tr); return;
   }
   const content = document.createDocumentFragment();
   for (const r of parameters.registers) {
@@ -711,7 +726,7 @@ const parameterSave = createParameterSave({ request, command, toast,
   cancelMotion: () => { stopSliderTrack(); liveTarget.cancel(); liveParameter.cancel(); },
   onServoSelectionChange: () => { renderServos(); updateControls(); },
   loaded: address => { parameterAddress = parameters.registers.find(r => compactParameterAddresses.has(r.address) && parameterSave.draft(r.address) !== undefined)?.address ?? address; parameterDraft = null; renderParameters(); updateParameterEditor(); updateControls(); },
-  setBusy: value => { busy = value; parameterRevision++; updateControls(); },
+  setBusy: value => { busy = value; parameterRevision++; updateControls(); resumeParameterRead(); },
   refresh: async result => {
     parameterDraft = null;
     if (result?.address === 5 && result.id !== result.previous_id) {
@@ -802,11 +817,13 @@ function renderState() {
   const angles = valid ? quaternionAngles(state.imu.quaternion_wxyz) : [null, null, null];
   const heldAngles = !fresh && $('curve-roll').textContent !== '--';
   $('chart').closest('.chart-layout').classList.toggle('historical', heldAngles);
-  const tof = state.tof;
-  const tofCurrent = !connectionError && tof?.valid && tof.age_ms + sampleElapsed() <= 1500;
-  const tofText = String(tofCurrent ? tof.distance_mm : '--');
-  if ($('tof-distance').firstChild.nodeValue !== tofText) $('tof-distance').firstChild.nodeValue = tofText;
-  $('tof-reading').title = tof?.error || (tof?.valid ? `数据年龄 ${tof.age_ms} ms` : '等待TOF数据');
+  if (info.tof_enabled !== false) {
+    const tof = state.tof;
+    const tofCurrent = !connectionError && tof?.valid && tof.age_ms + sampleElapsed() <= 1500;
+    const tofText = String(tofCurrent ? tof.distance_mm : '--');
+    if ($('tof-distance').firstChild.nodeValue !== tofText) $('tof-distance').firstChild.nodeValue = tofText;
+    $('tof-reading').title = tof?.error || (tof?.valid ? `数据年龄 ${tof.age_ms} ms` : '等待TOF数据');
+  }
   for (const [index, id] of ['roll', 'pitch', 'yaw'].entries()) {
     if (!heldAngles) {
       const text = fmt(angles[index]);
@@ -887,7 +904,11 @@ function applyMode() {
   if (info.readonly) calibrationControls.render({}, false, 'robotd');
   if (info.readonly) sliderTargets.clear();
   $('demo-badge').hidden = !info.demo;
-  $('footer-state').textContent = info.readonly ? 'robotd · 只读订阅 · 相机 / TOF 独立采集' : info.demo ? 'DEMO · 模拟设备' : 'HX · UART8 · 1 Mbps';
+  const tofEnabled = info.tof_enabled !== false;
+  $('tof-reading').hidden = !tofEnabled;
+  $('footer-state').textContent = info.readonly
+    ? (tofEnabled ? 'robotd · 只读订阅 · 相机 / TOF 独立采集' : 'robotd · 只读订阅')
+    : info.demo ? 'DEMO · 模拟设备' : 'HX · UART8 · 1 Mbps';
 }
 
 async function init() {

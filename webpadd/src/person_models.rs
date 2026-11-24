@@ -2,6 +2,8 @@ use anyhow::{Context, Result, ensure};
 use duck_detect::{Letterbox, objects::Object};
 
 const YOLOV5S_RELU_THRESHOLD: f32 = 0.26;
+const YOLOV6N_THRESHOLD: f32 = 0.4;
+const YOLOV6N_CANDIDATES: usize = 5376;
 const NMS_THRESHOLD: f32 = 0.45;
 const MAX_DETECTIONS: usize = 300;
 
@@ -19,6 +21,64 @@ pub(super) struct YoloV5Head {
 }
 
 pub(super) struct PersonDecoder([YoloV5Head; 3]);
+
+pub(super) struct Yolov6nDecoder {
+    scores: usize,
+    boxes: usize,
+}
+
+impl Yolov6nDecoder {
+    pub(super) fn new(shapes: &[Vec<i64>]) -> Result<Self> {
+        let candidates = YOLOV6N_CANDIDATES as i64;
+        let scores = shapes
+            .iter()
+            .position(|shape| shape == &[1, 1, candidates])
+            .context("missing YOLOv6n person scores [1, 1, 5376]")?;
+        let boxes = shapes
+            .iter()
+            .position(|shape| shape == &[1, candidates, 4])
+            .context("missing YOLOv6n person boxes [1, 5376, 4]")?;
+        Ok(Self { scores, boxes })
+    }
+
+    pub(super) fn decode(
+        &self,
+        outputs: &[&[f32]],
+        fit: Letterbox,
+        width: usize,
+        height: usize,
+    ) -> Result<Vec<Object>> {
+        let scores = outputs.get(self.scores).context("missing YOLOv6n scores")?;
+        let boxes = outputs.get(self.boxes).context("missing YOLOv6n boxes")?;
+        ensure!(
+            scores.len() == YOLOV6N_CANDIDATES && boxes.len() == 4 * YOLOV6N_CANDIDATES,
+            "invalid YOLOv6n person tensor lengths"
+        );
+        let limit = [width as f32, height as f32];
+        let pad = [fit.pad_x, fit.pad_y];
+        let mut candidates = Vec::new();
+        for (&score, coords) in scores.iter().zip(boxes.chunks_exact(4)) {
+            if !score.is_finite()
+                || score < YOLOV6N_THRESHOLD
+                || !coords.iter().all(|val| val.is_finite())
+            {
+                continue;
+            }
+            let bounds: [f32; 4] = std::array::from_fn(|axis| {
+                let dimension = axis % 2;
+                ((coords[axis] - pad[dimension]) / fit.scale).clamp(0.0, limit[dimension])
+            });
+            if bounds[2] > bounds[0] && bounds[3] > bounds[1] {
+                candidates.push(Object {
+                    class: 0,
+                    score,
+                    bounds,
+                });
+            }
+        }
+        Ok(suppress(candidates))
+    }
+}
 
 impl PersonDecoder {
     pub(super) fn yolov5s_relu(
@@ -127,21 +187,25 @@ impl PersonDecoder {
             }
         }
 
-        candidates.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
-        let mut kept: Vec<Object> = Vec::new();
-        for candidate in candidates {
-            if kept
-                .iter()
-                .all(|prior| overlap(prior.bounds, candidate.bounds) <= NMS_THRESHOLD)
-            {
-                kept.push(candidate);
-                if kept.len() == MAX_DETECTIONS {
-                    break;
-                }
+        Ok(suppress(candidates))
+    }
+}
+
+fn suppress(mut candidates: Vec<Object>) -> Vec<Object> {
+    candidates.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+    let mut kept: Vec<Object> = Vec::new();
+    for candidate in candidates {
+        if kept
+            .iter()
+            .all(|prior| overlap(prior.bounds, candidate.bounds) <= NMS_THRESHOLD)
+        {
+            kept.push(candidate);
+            if kept.len() == MAX_DETECTIONS {
+                break;
             }
         }
-        Ok(kept)
     }
+    kept
 }
 
 fn overlap(a: [f32; 4], b: [f32; 4]) -> f32 {
@@ -233,6 +297,31 @@ mod tests {
                 class: 0,
                 score: 0.3,
                 bounds: [274.0, 139.0, 398.0, 229.0],
+            }]
+        );
+    }
+
+    #[test]
+    fn yolov6n_decodes_and_suppresses_overlapping_person_boxes() {
+        let decoder = Yolov6nDecoder::new(&[vec![1, 5376, 4], vec![1, 1, 5376]]).unwrap();
+        let mut boxes = vec![0.0; 4 * YOLOV6N_CANDIDATES];
+        boxes[..12].copy_from_slice(&[
+            80.0, 152.0, 240.0, 272.0, 82.0, 154.0, 242.0, 274.0, 320.0, 152.0, 400.0, 272.0,
+        ]);
+        let mut scores = vec![0.0; YOLOV6N_CANDIDATES];
+        scores[..3].copy_from_slice(&[0.9, 0.8, 0.39]);
+        let fit = Letterbox {
+            scale: 0.8,
+            pad_x: 0.0,
+            pad_y: 112.0,
+        };
+        let objects = decoder.decode(&[&boxes, &scores], fit, 640, 360).unwrap();
+        assert_eq!(
+            objects,
+            [Object {
+                class: 0,
+                score: 0.9,
+                bounds: [100.0, 50.0, 300.0, 200.0]
             }]
         );
     }

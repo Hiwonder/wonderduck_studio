@@ -37,6 +37,7 @@ mod voice;
 mod frame_prefetch;
 mod color_detection;
 mod object_detection;
+mod object_detection_ncnn;
 mod person_models;
 mod vision_relay;
 mod vision_record;
@@ -112,6 +113,7 @@ struct Args {
 #[derive(Clone)]
 struct AppState {
     socket: PathBuf,
+    capabilities: Capabilities,
     control: Arc<Mutex<ControlState>>,
     commands: mpsc::Sender<RobotCommand>,
     status: watch::Receiver<BrowserStatus>,
@@ -136,6 +138,22 @@ struct AppState {
     pickup_after_phases: Arc<Mutex<settings::TrackingPhaseStore>>,
     mouth_settings: Arc<Mutex<settings::MouthStore>>,
     mouth_sound_directory: PathBuf,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct Capabilities {
+    tof_enabled: bool,
+    head_imu_enabled: bool,
+}
+
+impl Capabilities {
+    fn from_environment() -> Self {
+        let enabled = |name| std::env::var(name).as_deref() != Ok("false");
+        Self {
+            tof_enabled: enabled("WONDERDUCK_UNOQ_TOF_ENABLED"),
+            head_imu_enabled: enabled("WONDERDUCK_UNOQ_HEAD_IMU_ENABLED"),
+        }
+    }
 }
 
 /// The small status snapshot sent to a browser. The full `robot.state` contains joint and
@@ -471,6 +489,7 @@ async fn main() -> ExitCode {
     let recorder = Arc::new(audio_record::Recorder::new(params.audio.capture_device(), Arc::clone(&voice), recording_dir));
     let state = AppState {
         socket: args.socket.clone(),
+        capabilities: Capabilities::from_environment(),
         control: Arc::new(Mutex::new(control)),
         commands: commands.clone(),
         status: status_rx,
@@ -504,17 +523,20 @@ async fn main() -> ExitCode {
         state.control.clone(),
         state.settings.clone(),
         state.feedback.clone(),
+        state.capabilities.tof_enabled,
     ));
     tokio::spawn(control_loop(state.clone(), connected_rx, view_tx));
     tokio::spawn(config_worker(args.config, state.control.clone()));
     tokio::spawn(status_stream_worker(args.socket.clone(), status_tx.clone()));
     tokio::spawn(policy_status_worker(args.socket.clone(), status_tx.clone()));
-    tokio::spawn(obstacle_status_worker(
-        args.socket.clone(),
-        status_tx.clone(),
-        state.control.clone(),
-        state.obstacle_lock.clone(),
-    ));
+    if state.capabilities.tof_enabled {
+        tokio::spawn(obstacle_status_worker(
+            args.socket.clone(),
+            status_tx.clone(),
+            state.control.clone(),
+            state.obstacle_lock.clone(),
+        ));
+    }
     tokio::spawn(low_voltage_status_worker(args.socket.clone(), status_tx.clone(), state.low_voltage_lock.clone()));
     tokio::spawn(health_worker(args.socket, status_tx));
 
@@ -548,15 +570,18 @@ async fn camera_metadata() -> Result<axum::Json<serde_json::Value>, axum::http::
 }
 
 fn router(state: AppState, media_port: u16) -> Router {
+    let capabilities = state.capabilities;
     Router::new()
         .route(
             "/",
             get(move || async move {
                 Html(PAGE.replace("{{MEDIA_PORT}}", &media_port.to_string())
-                    .replace("{{APP_VERSION}}", env!("CARGO_PKG_VERSION")))
+                    .replace("{{APP_VERSION}}", env!("CARGO_PKG_VERSION"))
+                    .replace("{{TOF_ENABLED}}", if capabilities.tof_enabled { "true" } else { "false" }))
             }),
         )
         .route("/control", get(control_upgrade))
+        .route("/capabilities", get(move || async move { axum::Json(capabilities) }))
         .route("/objects", get(object_detection::upgrade))
         .route("/object-models", get(object_detection::available_models))
         .route("/colors", get(color_detection::upgrade))

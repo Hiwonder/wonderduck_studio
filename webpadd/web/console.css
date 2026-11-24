@@ -42,6 +42,7 @@ button:focus, input:focus, select:focus, textarea:focus { outline: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { border-color: var(--accent); }
 button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity: 1; }
 [hidden] { display: none !important; }
+body[data-tof-enabled="false"] [data-requires-tof] { display: none !important; }
 h1, h2, h3, p, dl { margin: 0; }
 h1 { font-size: 20px; font-weight: 600; letter-spacing: 0; }
 h2 { font-size: var(--font-section); font-weight: 600; }
@@ -170,7 +171,7 @@ html[data-debug-mode="off"] body[data-console-page="person"] .vision-panel > .tr
 .speed-input { width: 64px; max-width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; background: #27282b; color: var(--text); font-size: var(--font-body); font-variant-numeric: tabular-nums; }
 .speed-range { width: 100%; min-width: 0; margin: 8px 0 0; height: 14px; accent-color: var(--accent); }
 .pad-slot { display: grid; place-items: center; container-type: size; min-width: 0; min-height: 0; }
-.pad { position: relative; width: min(100cqw, 100cqh, 240px); aspect-ratio: 1; border: 1px solid var(--line); border-radius: 50%; background: #27282b; touch-action: none; user-select: none; }
+.pad { position: relative; width: min(100cqw, 100cqh, var(--pad-max-width, 240px)); aspect-ratio: 1; border: 1px solid var(--line); border-radius: 50%; background: #27282b; touch-action: none; user-select: none; }
 .pad::before, .pad::after { content: ""; position: absolute; background: #36414d; opacity: .7; pointer-events: none; }
 .pad::before { top: 8%; left: 50%; width: 1px; height: 84%; }
 .pad::after { top: 50%; left: 8%; height: 1px; width: 84%; }
@@ -791,7 +792,7 @@ body[data-operator-tab="actions"] .control-panel > .mode-obstacle { display: blo
   .camera-column > .stick-panel .sticks { gap: 24px; }
   .camera-column > .stick-panel .stick-speed .speed-label { grid-template-columns: minmax(0, 1fr) 64px; }
   .camera-column > .stick-panel .speed-unit { justify-self: start; }
-  .camera-column > .stick-panel .pad { width: min(100cqw, 100cqh, 200px); }
+  .camera-column > .stick-panel { --pad-max-width: 200px; --lock-outward-limit: -16px; }
   .control-panel { grid-template-columns: minmax(0, 1fr); }
   .control-panel > .panel-heading, .control-panel [data-operator-panel="modes"],
   .control-panel .session-controls, .control-panel [data-operator-panel="actions"],
@@ -1041,6 +1042,7 @@ html[data-theme="light"] .segmented { background: var(--surface-inset); border-c
 html[data-theme="light"] .pad::before, html[data-theme="light"] .pad::after { background: var(--guide); opacity: .5; }
 .pad-ring { position: absolute; inset: 22%; border: 1px dashed var(--guide); border-radius: 50%; opacity: .55; pointer-events: none; }
 .pad.is-active, html[data-theme="light"] .pad.is-active { border-color: var(--accent); }
+.pad.is-locked, html[data-theme="light"] .pad.is-locked { border-color: var(--accent); outline: 2px solid var(--accent); }
 .knob, html[data-theme="light"] .knob { border: 3px solid var(--accent); background: var(--surface-soft); }
 .knob::after { content: ""; position: absolute; inset: 30%; border-radius: 50%; background: var(--accent); }
 .pad.is-active .knob, html[data-theme="light"] .pad.is-active .knob { background: var(--accent); }
@@ -1505,8 +1507,10 @@ html[data-studio-embedded="true"] .feedback-dock,html[data-studio-embedded="true
 }
 
 /* The motion and target pages keep the sticks without speed controls. */
-body:is([data-console-page="control"], [data-color-vision]) .stick .stick-speed,
-body:is([data-console-page="control"], [data-color-vision]) .camera-column > .stick-panel .stick .stick-speed { display: none; }
+body[data-color-vision] .stick .stick-speed,
+body[data-color-vision] .camera-column > .stick-panel .stick .stick-speed { display: none; }
+body[data-console-page="control"] .stick-panel .stick .stick-speed { display: contents; }
+body[data-console-page="control"] .stick-speed > :not(.stick-lock) { display: none; }
 body:is([data-console-page="control"], [data-color-vision]) .stick,
 body:is([data-console-page="control"], [data-color-vision]) .stick.stick-right,
 body:is([data-console-page="control"], [data-color-vision]) .camera-column > .stick-panel .stick,
@@ -1576,6 +1580,30 @@ body[data-operator-tab="actions"] .control-panel > .operator-extras { flex: 0 0 
 
 .head-stick { display: none; }
 body[data-console-page="control"] .sticks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+body[data-console-page="control"] .stick:not(.head-stick) {
+  position: relative;
+  container-type: size;
+}
+body[data-console-page="control"] .stick-panel .stick-speed .stick-lock {
+  --pad-size: min(100cqw, 100cqh, var(--pad-max-width, 240px));
+  --pad-inline-inset: max(var(--lock-outward-limit, -11px), calc((100cqw - var(--pad-size)) / 2 - 24px));
+  --lock-drop: clamp(2.5px, calc((var(--pad-size) - 105px) / 4), 21px);
+  position: absolute;
+  inset-block-end: calc((100cqh + var(--pad-size)) / 2 + 3px - var(--lock-drop));
+  inset-inline-start: var(--pad-inline-inset);
+  z-index: 1;
+  width: fit-content;
+  min-height: 44px;
+  align-items: end;
+  padding: 0 5px;
+  gap: 4px;
+  touch-action: manipulation;
+}
+body[data-console-page="control"] .stick-panel .stick-right .stick-speed .stick-lock {
+  inset-inline-start: auto;
+  inset-inline-end: var(--pad-inline-inset);
+}
+body[data-console-page="control"] .stick-panel .stick-speed .stick-lock span { position: static; display: inline; }
 body[data-console-page="control"] .stick.head-stick { display: grid; }
 .head-stick-content {
   display: grid;

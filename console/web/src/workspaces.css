@@ -75,6 +75,7 @@ html[data-theme=dark] #debug-workspace{background:#11161b}
 .status-imu,.status-servos{padding-top:10px}
 .status-imu{container-type:inline-size}
 .status-imu-layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start}
+.status-imu-layout.body-only{grid-template-columns:minmax(0,1fr)}
 .imu-channel{min-width:0}
 .imu-channel .section-title{align-items:baseline;flex-wrap:wrap;gap:4px 10px}
 .imu-channel .section-title h2{flex:none}

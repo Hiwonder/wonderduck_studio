@@ -1,13 +1,12 @@
 //! Classic control semantics; this module has no hardware or socket access.
 
 use super::*;
+use duck_control::hx::MANUAL_HEAD_POSITION_LIMITS;
 use robotd_params::PadDriveParams;
 
 const DRIVE_AXIS_LOCK_ANGLE: f64 = 20.0 * std::f64::consts::PI / 180.0;
 const HEAD_STEP_INTERVAL: Duration = Duration::from_millis(5);
 const HEAD_STEP_COUNTS: f64 = 10.0;
-const HEAD_PITCH_RAW_LIMITS: (u16, u16) = (1100, 2300);
-const HEAD_YAW_LIMIT_RAD: f64 = std::f64::consts::FRAC_PI_2;
 const HEAD_FEEDBACK_TTL: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -416,19 +415,9 @@ impl HeadStick {
         self.last_step = Some(now - (interval - HEAD_STEP_INTERVAL * steps));
         let goal = self.goal.get_or_insert_with(|| measured.map(f64::from));
         let [yaw, pitch] = axes;
-        for (axis, deflection) in [pitch, yaw].into_iter().enumerate() {
-            let joint = axis + 6;
-            let (mut lower, mut upper) = duck_control::model::JOINT_LIMITS[joint];
-            if axis == 1 {
-                lower = lower.max(-HEAD_YAW_LIMIT_RAD);
-                upper = upper.min(HEAD_YAW_LIMIT_RAD);
-            }
-            let mut min = duck_control::hx::encode_position(joint, upper).expect("HX joint limit");
-            let mut max = duck_control::hx::encode_position(joint, lower).expect("HX joint limit");
-            if axis == 0 {
-                min = min.max(HEAD_PITCH_RAW_LIMITS.0);
-                max = max.min(HEAD_PITCH_RAW_LIMITS.1);
-            }
+        for (axis, (deflection, (min, max))) in [pitch, yaw].into_iter()
+            .zip(MANUAL_HEAD_POSITION_LIMITS).enumerate()
+        {
             goal[axis] = (goal[axis] + deflection * f64::from(steps) * HEAD_STEP_COUNTS)
                 .clamp(f64::from(min), f64::from(max));
         }

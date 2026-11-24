@@ -87,11 +87,11 @@ class StudioController:
     full_servo_range = False
 
     def __init__(self, path, hz, controller_factory, lease_factory=MaintenanceLease, demo=False,
-                 status_hardware_factory=None):
+                 status_hardware_factory=None, *, tof_enabled=True):
         self.path, self.hz = str(path), hz
         self.controller_factory, self.lease_factory = controller_factory, lease_factory
         self.demo = demo
-        self.observer = RobotdController(path, hz, include_details=True)
+        self.observer = RobotdController(path, hz, include_details=True, tof_enabled=tof_enabled)
         self.status_viewers = {}
         self.status_hardware_factory = status_hardware_factory
         self.status_lease = None

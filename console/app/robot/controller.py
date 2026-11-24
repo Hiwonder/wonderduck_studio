@@ -24,6 +24,8 @@ WRITE_ACTIONS = {"torque", "move", "move_direct", "write_register", "offset_dire
 REALTIME_WRITE_ACTIONS = {"move_direct", "offset_direct"}
 CALIBRATION_ACTIONS = {"calibration_start", "calibration_restore", "calibration_next", "calibration_cancel"}
 SERVO_DEBUG_TIMEOUT = 25
+POSITION_WRITE_IDLE_SECONDS = .18
+POSITION_SAMPLE_INTERVAL_MAX = 2.0
 
 
 class CommandQueue(queue.Queue):
@@ -609,6 +611,7 @@ class Controller:
 
     def run(self):
         next_sample = time.monotonic()
+        last_sample_at = next_sample
         last_sample_error = None
         while not self.stop.is_set() or self.batch.active():
             try:
@@ -727,8 +730,15 @@ class Controller:
                         with self.lock:
                             self.pose_targets.update(result["targets"])
                     elif command["action"] == "move_direct" and result.get("sent"):
+                        now = time.monotonic()
+                        # Coalesce position reads until there is a gap between writes.
+                        # A long drag still needs a fresh sample before its telemetry expires.
+                        next_sample = max(next_sample, min(
+                            now + POSITION_WRITE_IDLE_SECONDS, last_sample_at + POSITION_SAMPLE_INTERVAL_MAX,
+                        ))
                         with self.lock:
                             self.pose_targets[result["id"]] = result["target"]
+                            self.maintenance_voltage_ready = False
                     elif (command["action"] == "write_register" and result.get("address") == 5
                           and result.get("verified") and result["id"] != result["previous_id"]):
                         result["joints"] = [dict(joint) for joint in self.joints]
@@ -764,6 +774,7 @@ class Controller:
                     self.hardware.set_imu_source(self.imu_source)
                     self.joints = self.hardware.joints
                 state = self.hardware.sample_imu() if self.imu_only else self.hardware.sample()
+                last_sample_at = time.monotonic()
                 self.sequence += 1
                 self.failures += int(bool(state.get("errors")))
                 state.update(sequence=self.sequence, timestamp_ms=int(time.time() * 1000),

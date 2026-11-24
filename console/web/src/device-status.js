@@ -132,21 +132,23 @@ export function createDeviceStatus({ toast }) {
     reading('status-gravity', showImu ? vector(imu.gravity) : '--', historical);
     reading('status-quaternion', showImu && Array.isArray(imu.quaternion_wxyz) && imu.quaternion_wxyz.every(Number.isFinite)
       ? imu.quaternion_wxyz.map(value => value.toFixed(3)).join('  /  ') : '--', historical);
-    const aux = state.aux_imu || {};
-    for (const [index, axis] of ['roll', 'pitch', 'yaw'].entries()) {
-      setText(`aux-curve-${axis}`, auxiliary.valid ? `${aux.rpy_deg[index].toFixed(1)}°` : '--');
+    if (info.head_imu_enabled !== false) {
+      const aux = state.aux_imu || {};
+      for (const [index, axis] of ['roll', 'pitch', 'yaw'].entries()) {
+        setText(`aux-curve-${axis}`, auxiliary.valid ? `${aux.rpy_deg[index].toFixed(1)}°` : '--');
+      }
+      reading('aux-gyro', auxiliary.valid ? vector(aux.gyro_rad_s) : '--');
+      reading('aux-gravity', auxiliary.valid ? vector(aux.gravity) : '--');
+      reading('aux-quaternion', auxiliary.valid ? aux.quaternion_wxyz.map(value => value.toFixed(3)).join('  /  ') : '--');
+      const auxNotice = auxiliary.valid || auxiliary.kind === 'pending' ? '' : auxiliary.detail !== auxiliary.label
+        ? `${auxiliary.label}：${auxiliary.detail}` : auxiliary.label;
+      const transientAux = transientHandoff && ['starting', 'waiting', 'stale'].includes(auxiliary.kind);
+      if (!transientAux && auxNotice !== lastAuxNotice) {
+        lastAuxNotice = auxNotice;
+        if (auxNotice) toast(`头部 IMU：${auxNotice}`, !['starting', 'waiting'].includes(auxiliary.kind));
+      }
+      get('aux-imu-caption').hidden = !auxiliary.valid;
     }
-    reading('aux-gyro', auxiliary.valid ? vector(aux.gyro_rad_s) : '--');
-    reading('aux-gravity', auxiliary.valid ? vector(aux.gravity) : '--');
-    reading('aux-quaternion', auxiliary.valid ? aux.quaternion_wxyz.map(value => value.toFixed(3)).join('  /  ') : '--');
-    const auxNotice = auxiliary.valid || auxiliary.kind === 'pending' ? '' : auxiliary.detail !== auxiliary.label
-      ? `${auxiliary.label}：${auxiliary.detail}` : auxiliary.label;
-    const transientAux = transientHandoff && ['starting', 'waiting', 'stale'].includes(auxiliary.kind);
-    if (!transientAux && auxNotice !== lastAuxNotice) {
-      lastAuxNotice = auxNotice;
-      if (auxNotice) toast(`头部 IMU：${auxNotice}`, !['starting', 'waiting'].includes(auxiliary.kind));
-    }
-    get('aux-imu-caption').hidden = !auxiliary.valid;
     const servos = new Map((state.servos || []).map(servo => [servo.id, servo]));
     const statuses = new Map();
     for (const joint of joints) {

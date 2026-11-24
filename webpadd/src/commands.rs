@@ -178,6 +178,9 @@ pub(super) async fn dispatch_delete_color(request_id: u64, name: String, state: 
 
 pub(super) async fn dispatch_maze(session: u64, params: proto::MazeParams, state: &AppState) -> ServerMessage {
     let response = |accepted, reason| ServerMessage::MazeResult { action: params.action, accepted, reason };
+    if !state.capabilities.tof_enabled {
+        return response(false, Some("ToF 已停用，避障行走不可用".into()));
+    }
     if !params.valid() { return response(false, Some("迷宫参数无效".into())); }
     let (reply, receiver) = oneshot::channel();
     {
@@ -292,6 +295,9 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
     let action = params.action;
     let person_follow = params.stop_area_px.is_some();
     let response = |accepted, reason| ServerMessage::CoordinatedTrackingResult { action, accepted, reason };
+    if !state.capabilities.tof_enabled && (params.stop_distance_mm.is_some() || params.stop_distance_deadzone_mm != 0) {
+        return response(false, Some("ToF 已停用，行人跟随使用图像面积".into()));
+    }
     if !params.valid() { return response(false, Some("目标、相机或联合追踪参数无效".into())); }
     let (reply, receiver) = oneshot::channel();
     let (was_dirty, human_generation, tracking_generation, desired_params) = {
@@ -414,6 +420,9 @@ pub(super) async fn dispatch_obstacle(
     params: proto::ObstacleParams,
     state: &AppState,
 ) -> ServerMessage {
+    if !state.capabilities.tof_enabled {
+        return ServerMessage::Error { message: "ToF 已停用，自动避障不可用".into() };
+    }
     if !(proto::OBSTACLE_MIN_THRESHOLD_MM..=proto::OBSTACLE_MAX_THRESHOLD_MM)
         .contains(&params.threshold_mm)
         || params.clear_delay_ms > proto::OBSTACLE_MAX_CLEAR_DELAY_MS

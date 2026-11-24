@@ -13,8 +13,13 @@ const SERVO_DIRECTIONS = {
 };
 const DIRECTION_LABELS = { up: '上', down: '下', left: '左', right: '右' };
 const ACCESSORY_SERVO_IDS = [35, 36];
+export const ACTION_POSITION_LIMITS = {
+  35: { min: 683, max: 2048 },
+  36: { min: 2048, max: 3413 },
+};
 
 function encoderLimits(joint) {
+  if (Object.hasOwn(ACTION_POSITION_LIMITS, joint.id)) return ACTION_POSITION_LIMITS[joint.id];
   if (joint.encoder_limits) return { min: joint.encoder_limits[0], max: joint.encoder_limits[1] };
   return {
     min: Math.max(0, Math.ceil((180 - joint.limits[1]) * 4096 / 360)),
@@ -29,6 +34,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
   const scaleInput = document.getElementById('servo-scale');
   const targets = new Map();
   const rows = new Map();
+  const hidden = new Set();
   const locked = new Set();
   const sliderTrack = createSliderTrack();
   let activeTarget = null, activeOffset = null, offsetWriting = false, operation = 0;
@@ -40,8 +46,9 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     restoreButton: document.getElementById('servo-restore'),
     defaultLayout: defaultServoLayout,
     onSelect: select, toast, getState: () => ({
-      hidden: [...rows].filter(([, row]) => row.element.hidden).map(([id]) => id), locked: [...locked],
+      hidden: [...hidden], locked: [...locked],
     }) });
+  for (const id of cardLayout.hidden()) hidden.add(id);
   for (const id of cardLayout.locked()) locked.add(id);
 
   function servo(id) { return context().state?.servos?.find(item => item.id === id); }
@@ -224,17 +231,16 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     cancel();
     generation++;
     lastPlaybackUpdate = null;
-    const hidden = new Set(rows.size ? [...rows].filter(([, row]) => row.element.hidden).map(([id]) => id) : cardLayout.hidden());
     const previousOrder = new Map([...container.children].map((element, index) => [Number(element.dataset.id), index]));
     rows.clear();
     container.replaceChildren();
     visibility.replaceChildren();
     const register = context().info?.registers.find(item => item.address === 31);
     const ordered = [...joints];
-    for (const id of ACCESSORY_SERVO_IDS) {
-      const joint = ordered.find(item => item.id === id);
-      if (!joint) ordered.push({ id, label: '舵机', limits: [-180, 180], disconnected: true });
-      else if (joint.discovered) ordered[ordered.indexOf(joint)] = { ...joint, label: '舵机' };
+    for (const [index, joint] of ordered.entries()) {
+      if (joint.discovered && ACCESSORY_SERVO_IDS.includes(joint.id)) {
+        ordered[index] = { ...joint, label: '舵机' };
+      }
     }
     if (previousOrder.size) ordered.sort((a, b) => (previousOrder.get(a.id) ?? Infinity) - (previousOrder.get(b.id) ?? Infinity) || a.id - b.id);
     for (const joint of ordered) {
@@ -245,7 +251,12 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox'; checkbox.checked = !hidden.has(joint.id);
       row.element.hidden = !checkbox.checked;
-      checkbox.addEventListener('change', () => { row.element.hidden = !checkbox.checked; cardLayout.visibilityChanged(); update(); });
+      checkbox.addEventListener('change', () => {
+        row.element.hidden = !checkbox.checked;
+        if (row.element.hidden) hidden.add(joint.id); else hidden.delete(joint.id);
+        cardLayout.visibilityChanged();
+        update();
+      });
       row.visibility = checkbox;
       const name = document.createElement('span');
       setLocalizedText(name, joint.label);
@@ -323,7 +334,8 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     center.disabled = !centerReady || offsetWriting;
     center.classList.toggle('is-offset-pending', centerReady && offsetWriting);
     const home = document.getElementById('home-all');
-    const homeJoints = info?.joints.filter(joint => !joint.discovered && !excluded(joint.id)) || [];
+    const homeJoints = info?.joints.filter(joint =>
+      (!joint.discovered || ACCESSORY_SERVO_IDS.includes(joint.id)) && !excluded(joint.id)) || [];
     const homeReady = readyBeforeOffset && !!info?.supports_home_targets && homeJoints.length > 0 &&
       homeJoints.every(joint => servo(joint.id)?.valid);
     home.disabled = !homeReady || offsetWriting;
@@ -334,12 +346,14 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     for (const [id, row] of rows) {
       row.lock.disabled = row.visibility.disabled = !!operation || playbackPending || playbackActive;
       const current = servo(id);
-      const presentation = row.joint.disconnected && state?.online && !connectionError
-        ? { kind: 'offline', label: '未连接', title: '未连接', valid: false, fresh: false }
-        : holdPresentation && row.lastPresentation
+      const presentation = holdPresentation && row.lastPresentation
         ? row.lastPresentation : servoStatus(current, state, elapsed, connectionError, SERVO_STATUS_MAX_AGE_MS);
       if (!holdPresentation) row.lastPresentation = presentation;
-      if (!targets.has(id) && Number.isInteger(state?.pose_targets?.[id])) targets.set(id, state.pose_targets[id]);
+      const reportedTarget = state?.pose_targets?.[id];
+      if (!targets.has(id) && Number.isInteger(reportedTarget) &&
+          (!Object.hasOwn(ACTION_POSITION_LIMITS, id) || (reportedTarget >= row.limits.min && reportedTarget <= row.limits.max))) {
+        targets.set(id, reportedTarget);
+      }
       if (row.initialTarget === null && !targets.has(id) && !holdPresentation && presentation.fresh) {
         row.initialTarget = readbackPosition(row, current);
       }
@@ -363,7 +377,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
         ? '重启控制台服务后启用滑杆直接发送' : `${row.joint.label} · ${status} · ${row.offsetError || presentation.title}`);
       row.element.classList.toggle('servo-row-error', !presentation.valid || !!row.offsetError);
     }
-    if (active && !offsetRead && !offsetWriting && !operation && info && !info.readonly && fresh &&
+    if (active && !liveTarget.busy() && !offsetRead && !offsetWriting && !operation && info && !info.readonly && fresh &&
         !state?.calibration?.active && !playbackPending && state?.action_playback?.state !== 'playing') {
       const next = [...rows.values()].find(row => row.offsetValue === null && servo(row.joint.id)?.valid && performance.now() >= row.nextRead);
       if (next) readOffset(next);
@@ -515,7 +529,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
 
   function holdForFrame(until) { frameGraceUntil = until; }
 
-  return { reset, update, cancel, positions, setTargets, setPlaybackPending, holdForFrame, layout: cardLayout.layout, setLayout: cardLayout.setLayout, readOffsets, applyOffsets, offsetValues,
+  return { reset, update, cancel, flushTarget: liveTarget.flush, positions, setTargets, setPlaybackPending, holdForFrame, layout: cardLayout.layout, setLayout: cardLayout.setLayout, readOffsets, applyOffsets, offsetValues,
     lockedIds: () => (context().info?.joints || []).map(joint => joint.id)
       .filter(id => locked.has(id) || rows.get(id)?.element.hidden || !servo(id)?.valid),
     scale: cardLayout.scale };

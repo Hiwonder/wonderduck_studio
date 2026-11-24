@@ -8,6 +8,7 @@ pub(super) async fn robotd_worker(
     control: Arc<Mutex<ControlState>>,
     settings: Arc<Mutex<settings::Store>>,
     feedback: broadcast::Sender<ServerMessage>,
+    tof_enabled: bool,
 ) {
     let mut connection: Option<RobotConnection> = None;
     let mut last_connect_attempt = None;
@@ -50,7 +51,7 @@ pub(super) async fn robotd_worker(
                         continue;
                     }
                     let saved = settings.lock().await.value.clone();
-                    if let Some(saved) = saved {
+                    if tof_enabled && let Some(saved) = saved {
                         let result = send_request::<proto::IntentResult>(
                             &mut candidate.0, &mut candidate.1, next_id,
                             &proto::Call::RobotSetObstacle(saved.obstacle),

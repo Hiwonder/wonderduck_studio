@@ -17,7 +17,8 @@ use uyvy::{Turn, letterbox_rect_from_uyvy_with_pad};
 use crate::AppState;
 use duck_detect::{onnx, rknn};
 use crate::frame_prefetch::{CameraFrames, camera_recoverable, media_socket, source_root};
-use crate::person_models::PersonDecoder;
+use crate::object_detection_ncnn;
+use crate::person_models::{PersonDecoder, Yolov6nDecoder};
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -44,12 +45,14 @@ pub(super) struct Object {
     pub(super) bounds: [f32; 4],
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) enum PersonModel {
     #[serde(rename = "yolov5s-relu-640x384")]
     Yolov5sReluWide,
     #[serde(rename = "yolo26n")]
     Yolo26n,
+    #[serde(rename = "yolov6n-512")]
+    Yolov6n512,
 }
 
 fn board_compatible(compatible: &[u8]) -> bool {
@@ -59,7 +62,29 @@ fn board_compatible(compatible: &[u8]) -> bool {
 }
 
 impl PersonModel {
-    const ALL: [Self; 2] = [Self::Yolov5sReluWide, Self::Yolo26n];
+    const ALL: [Self; 3] = [Self::Yolov5sReluWide, Self::Yolo26n, Self::Yolov6n512];
+
+    fn supported(uno_q: bool) -> &'static [Self] {
+        if uno_q {
+            &[Self::Yolov6n512]
+        } else {
+            &[Self::Yolov5sReluWide, Self::Yolo26n]
+        }
+    }
+
+    fn select(uno_q: bool, requested: Option<Self>, installed: impl Fn(Self) -> bool) -> Option<Self> {
+        Self::supported(uno_q).iter().copied().find(|&model| {
+            requested.is_none_or(|requested| model == requested) && installed(model)
+        })
+    }
+
+    pub(super) fn input(self) -> (usize, usize, usize) {
+        match self {
+            Self::Yolov5sReluWide => (384, 640, 3),
+            Self::Yolo26n => (640, 640, 3),
+            Self::Yolov6n512 => (512, 512, 3),
+        }
+    }
 
     fn path(self, executable: &Path) -> Result<PathBuf> {
         let stem = match self {
@@ -70,8 +95,12 @@ impl PersonModel {
                 "object-detection"
             }
             Self::Yolov5sReluWide => "person-yolov5s-relu-640x384",
+            Self::Yolov6n512 => "person-yolov6n-512",
         };
         let path = source_root(executable)?.join("models").join(stem);
+        if self == Self::Yolov6n512 {
+            return Ok(path.with_extension("param"));
+        }
         let rk_model = path.with_extension("rknn");
         if board_compatible(b"rockchip,rk3566") && rk_model.is_file() && rk_model.with_file_name("librknnrt.so").is_file() {
             return Ok(rk_model);
@@ -81,6 +110,9 @@ impl PersonModel {
 
     fn installed(self, executable: &Path) -> bool {
         self.path(executable).is_ok_and(|path| {
+            if object_detection_ncnn::configured_runner(&path).is_some() {
+                return true;
+            }
             path.is_file() && match path.extension().and_then(|extension| extension.to_str()) {
                 Some("onnx") => true,
                 Some("rknn") => board_compatible(b"rockchip,rk3566") && path.with_file_name("librknnrt.so").is_file(),
@@ -113,6 +145,7 @@ impl Detectors {
         let index = match model {
             PersonModel::Yolov5sReluWide => 0,
             PersonModel::Yolo26n => 1,
+            PersonModel::Yolov6n512 => 2,
         };
         &self.0[index]
     }
@@ -171,7 +204,8 @@ impl Drop for Subscription {
 
 pub(super) async fn available_models() -> Json<Vec<PersonModel>> {
     let executable = std::env::current_exe();
-    Json(PersonModel::ALL.into_iter().filter(|model| {
+    let uno_q = board_compatible(b"arduino,imola");
+    Json(PersonModel::supported(uno_q).iter().copied().filter(|model| {
         executable.as_ref().is_ok_and(|exe| model.installed(exe))
     }).collect())
 }
@@ -193,11 +227,8 @@ pub(super) async fn upgrade(
     let Ok(executable) = std::env::current_exe() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let installed = |model: &PersonModel| model.installed(&executable);
-    let model = match requested {
-        Some(model) => Some(model).filter(installed),
-        None => PersonModel::ALL.into_iter().find(installed),
-    };
+    let uno_q = board_compatible(b"arduino,imola");
+    let model = PersonModel::select(uno_q, requested, |model| model.installed(&executable));
     let Some(model) = model else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -264,10 +295,15 @@ fn worker(Detector { model, shared, events, recorder }: Detector) {
 enum Model {
     Rockchip(rknn::Model),
     Onnx(onnx::Model),
+    Ncnn(object_detection_ncnn::Model),
 }
 
 impl Model {
     fn open(path: &Path, kind: PersonModel) -> Result<Self> {
+        if let Some(runner) = object_detection_ncnn::configured_runner(path) {
+            return Ok(Self::Ncnn(object_detection_ncnn::Model::open(&runner, path, kind)?));
+        }
+        ensure!(kind != PersonModel::Yolov6n512, "YOLOv6n requires the ncnn runner and both model files");
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("onnx") => {
                 let model = onnx::Model::open(path)?;
@@ -276,10 +312,7 @@ impl Model {
             }
             Some("rknn") => {
                 let runtime = path.with_file_name("librknnrt.so");
-                let outputs = match kind {
-                    PersonModel::Yolov5sReluWide => 3,
-                    PersonModel::Yolo26n => 2,
-                };
+                let outputs = if kind == PersonModel::Yolov5sReluWide { 3 } else { 2 };
                 let model = rknn::Model::open_outputs_with_library(path, outputs, Some(&runtime))?;
                 tracing::info!(?kind, api = %model.api_version, driver = %model.driver_version, "RKNN object detector started");
                 Ok(Self::Rockchip(model))
@@ -292,6 +325,7 @@ impl Model {
         match self {
             Self::Rockchip(model) => model.infer_with(rgb, decode),
             Self::Onnx(model) => model.infer_with(rgb, decode),
+            Self::Ncnn(model) => model.infer_with(rgb, decode),
         }
     }
 }
@@ -306,15 +340,13 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
             shape.iter().map(|&dimension| dimension as i64).collect::<Vec<_>>()
         }).collect::<Vec<_>>()),
         Model::Onnx(model) => (model.input, model.output_shapes.clone()),
+        Model::Ncnn(model) => (kind.input(), model.output_shapes()),
     };
-    let model_height = match kind {
-        PersonModel::Yolov5sReluWide => 384,
-        PersonModel::Yolo26n => 640,
-    };
-    let model_size = (640, model_height);
+    let (model_height, model_width, _) = kind.input();
+    let model_size = (model_width, model_height);
     ensure!(
-        input == (model_height, 640, 3),
-        "model input is not 640×{model_height} RGB"
+        input == kind.input(),
+        "model input is not {model_width}×{model_height} RGB"
     );
     let decoder = match kind {
         PersonModel::Yolo26n => {
@@ -327,6 +359,7 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
         PersonModel::Yolov5sReluWide => {
             DetectionDecoder::Person(PersonDecoder::yolov5s_relu(&outputs, model_size)?)
         }
+        PersonModel::Yolov6n512 => DetectionDecoder::Yolov6n(Yolov6nDecoder::new(&outputs)?),
     };
     let mut rgb = Vec::new();
     let mut rga = if matches!(&model, Model::Rockchip(_)) {
@@ -340,10 +373,7 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
     } else {
         None
     };
-    // UNO Q converts every requested NV12 frame to UYVY on the CPU. Request the next
-    // capture when ONNX can use it, so inference leaves the motor loop its CPU time.
-    let on_demand = matches!(&model, Model::Onnx(_)) && board_compatible(b"arduino,imola");
-    let mut frames = CameraFrames::camera(&socket, on_demand)?;
+    let mut frames = CameraFrames::camera(&socket, false)?;
     let mut recovering = false;
     loop {
         if shared
@@ -385,7 +415,7 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
                     return Ok(());
                 }
                 drop(state);
-                frames = CameraFrames::camera(&socket, on_demand)?;
+                frames = CameraFrames::camera(&socket, false)?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -416,6 +446,7 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
                         duck_detect::objects::decode(outputs[*scores], outputs[*boxes], fit, width, height, 0.25)
                     }
                     DetectionDecoder::Person(decoder) => decoder.decode(outputs, fit, width, height),
+                    DetectionDecoder::Yolov6n(decoder) => decoder.decode(outputs, fit, width, height),
                 }
             })?
             .into_iter()
@@ -445,4 +476,22 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
 enum DetectionDecoder {
     Objects { scores: usize, boxes: usize },
     Person(PersonDecoder),
+    Yolov6n(Yolov6nDecoder),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PersonModel::{self, Yolo26n, Yolov5sReluWide, Yolov6n512};
+
+    #[test]
+    fn uno_q_advertises_and_selects_only_yolov6n() {
+        assert_eq!(PersonModel::supported(true), &[Yolov6n512]);
+        assert_eq!(PersonModel::select(true, None, |_| true), Some(Yolov6n512));
+        assert_eq!(PersonModel::select(true, Some(Yolov6n512), |_| true), Some(Yolov6n512));
+        assert_eq!(PersonModel::select(true, Some(Yolo26n), |_| true), None);
+        assert_eq!(PersonModel::select(true, Some(Yolov5sReluWide), |_| true), None);
+        assert_eq!(PersonModel::select(true, None, |model| model != Yolov6n512), None);
+        assert_eq!(PersonModel::select(false, None, |_| true), Some(Yolov5sReluWide));
+        assert_eq!(PersonModel::select(false, Some(Yolov6n512), |_| true), None);
+    }
 }

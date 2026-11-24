@@ -46,6 +46,7 @@ const fontFamily = getComputedStyle(document.documentElement).fontFamily;
 const client = sessionStorage.getItem('console-client') || crypto.randomUUID?.() || `client-${Date.now()}-${Math.random()}`;
 sessionStorage.setItem('console-client', client);
 let info, state, selected = [], armed = false;
+const headImuEnabled = () => info?.head_imu_enabled !== false;
 let workspace = 'action';
 let token = '', lastImuKey = '', lastGood = 0, responseSequence = 0, lastAuxSequence = -1;
 let auxValid = false;
@@ -64,6 +65,7 @@ const savedHeadSubscriptionRevision = Number(sessionStorage.getItem('head-subscr
 let headSubscriptionRevision = Number.isSafeInteger(savedHeadSubscriptionRevision) && savedHeadSubscriptionRevision >= 0
   ? savedHeadSubscriptionRevision : 0;
 function advanceHeadSubscription() {
+  if (!headImuEnabled()) return;
   headSubscriptionRevision++;
   sessionStorage.setItem('head-subscription-revision', String(headSubscriptionRevision));
 }
@@ -101,8 +103,8 @@ async function confirmAction(title, text) {
 
 const requestHeaders = () => ({ 'Content-Type': 'application/json', 'X-Console-Token': token, 'X-Console-Client': client,
   'X-Studio-Workspace': workspace,
-  'X-Head-Subscription-Revision': String(headSubscriptionRevision),
-  ...(workspace === 'calibration' ? { 'X-Calibration-Source': calibrationControls.source() } : {}) });
+  ...(headImuEnabled() ? { 'X-Head-Subscription-Revision': String(headSubscriptionRevision) } : {}),
+  ...(headImuEnabled() && workspace === 'calibration' ? { 'X-Calibration-Source': calibrationControls.source() } : {}) });
 let cameraPreview;
 function updateCameraPreview(page = workspace) {
   const available = page === 'status';
@@ -295,7 +297,7 @@ const calibrationCharts = createCalibrationCharts({ request, context: () => ({ i
 document.addEventListener('calibration-source-change', event => {
   calibrationCharts.setSource(event.detail);
   advanceHeadSubscription();
-  if (info?.studio && workspace === 'calibration' && token) {
+  if (headImuEnabled() && info?.studio && workspace === 'calibration' && token) {
     request('state').catch(error => console.debug('头部 IMU 采集切换失败', error.message));
   }
 });
@@ -936,6 +938,7 @@ function queueWorkspace(page) {
 }
 
 async function selectWorkspace(next) {
+  if (next === 'maze' && info?.tof_enabled === false) return;
   if (switchingWorkspace || servoDebugMode.busy() || controlActionStarting) { queueWorkspace(next); return; }
   if (next === workspace && (!info?.studio || document.body.dataset.studioReady) && !statusReleaseUnconfirmed) return;
   switchingWorkspace = true;
@@ -953,6 +956,7 @@ async function selectWorkspace(next) {
   let releaseUnconfirmed = false;
   let initialPreview;
   if (info?.studio) {
+    if (previous === 'action' && previous !== next && wasReady) await servoPanel.flushTarget();
     delete document.body.dataset.studioReady;
     controlGeneration++;
     setArmed(false);
@@ -1059,11 +1063,13 @@ async function selectWorkspace(next) {
     calibrationView.setActive(workspace === 'calibration');
     updateReferenceView();
     if (workspace === 'action') {
+      servoPanel.reset(info.joints);
+      actionEditor.render();
       renewControl();
       if (info?.studio && !info.readonly) actionEditor.refreshGroups().catch(error => toast(error.message, true));
     }
     if (window.matchMedia('(max-width:720px)').matches) setSidebarOpen(false);
-    if (state && info) renderState();
+    if (state && info && (workspace !== 'action' || state.workspace === 'action' || !info.studio)) renderState();
     drawChart();
   } catch (error) {
     console.warn('页面切换失败', error);
@@ -1145,6 +1151,7 @@ window.addEventListener('pagehide', () => {
 });
 
 function renderTof() {
+  if (info?.tof_enabled === false) return;
   const tof = tofStatus(state?.tof, sampleElapsed(), connectionError, info?.studio === true);
   $('tof-reading').dataset.status = tof.kind;
   $('tof-reading').title = [tof.detail, tof.raw].filter(Boolean).join(' · ');
@@ -1203,7 +1210,7 @@ function renderState() {
     }
     lowVoltageActive = warning;
     const imuWorkspace = workspace === 'calibration';
-    const imuOnline = calibrating || valid || auxImuStatus(state.aux_imu, sampleElapsed(), connectionError).valid;
+    const imuOnline = calibrating || valid || headImuEnabled() && auxImuStatus(state.aux_imu, sampleElapsed(), connectionError).valid;
     const connectionStatus = connectionError ? '连接中断' : imuWorkspace ? (imuOnline ? '设备在线' : '等待采样')
       : !sidebarState.online ? '采集异常' : !sidebarFresh ? '数据过期'
       : faults ? '舵机故障' : communication ? '总线通信异常' : timeout ? '舵机读取超时'
@@ -1239,7 +1246,7 @@ function renderState() {
   setText('failures', state.failures);
   renderImuComparison();
   const auxiliary = auxImuStatus(state.aux_imu, sampleElapsed(), connectionError);
-  if (!document.hidden && (workspace === 'status' || workspace === 'calibration' && calibrationControls.source() === 'head') &&
+  if (headImuEnabled() && !document.hidden && (workspace === 'status' || workspace === 'calibration' && calibrationControls.source() === 'head') &&
       ['stale', 'pending'].includes(auxiliary.kind) && performance.now() - lastHeadDiagnostic >= 10000) {
     lastHeadDiagnostic = performance.now();
     console.warn('头部 IMU 过期诊断', { backend_status: state.aux_imu?.status, backend_age_ms: state.aux_imu?.age_ms,
@@ -1268,7 +1275,7 @@ function renderState() {
     lastImuKey = imuKey;
     while (samples.length && samples[0].time < performance.now() - 20000) samples.shift();
   }
-  if (workspace === 'status' && responseSequence !== lastAuxSequence) {
+  if (headImuEnabled() && workspace === 'status' && responseSequence !== lastAuxSequence) {
     auxSamples.push({ time: performance.now(),
       angles: auxiliary.valid ? state.aux_imu.rpy_deg.map(value => Number(value.toFixed(1))) : null,
       reset_count: auxiliary.valid ? state.aux_imu.reset_count : null });
@@ -1292,9 +1299,11 @@ function renderState() {
 
 async function poll() {
   const started = performance.now();
+  const requestedWorkspace = workspace;
+  const requestedGeneration = controlGeneration;
   statePollInterval = previousStateStarted ? started - previousStateStarted : 0;
   previousStateStarted = started;
-  if (!document.hidden && (workspace === 'status' || workspace === 'calibration' && calibrationControls.source() === 'head') &&
+  if (headImuEnabled() && !document.hidden && (workspace === 'status' || workspace === 'calibration' && calibrationControls.source() === 'head') &&
       statePollInterval > 500 && started - lastHeadDiagnostic >= 10000) {
     lastHeadDiagnostic = started;
     console.warn('头部 IMU 页面请求间断', { poll_interval_ms: Math.round(statePollInterval),
@@ -1311,9 +1320,11 @@ async function poll() {
   stateRequestPending = true;
   stateRequestStarted = started;
   try {
-    state = await request('state');
+    const snapshot = await request('state');
     stateRequestDuration = performance.now() - started;
     stateRequestPending = false;
+    if (requestedWorkspace !== workspace || requestedGeneration !== controlGeneration) return;
+    state = snapshot;
     lastGood = performance.now();
     responseSequence++;
     connectionError = '';
@@ -1327,6 +1338,7 @@ async function poll() {
     stateRenderDuration = performance.now() - renderStarted;
   } catch (e) {
     stateRequestPending = false;
+    if (requestedWorkspace !== workspace || requestedGeneration !== controlGeneration) return;
     sidebarTransitionPending = false;
     connectionError = e.message;
     if (state) renderState(); else renderTof();
@@ -1347,7 +1359,7 @@ setInterval(() => {
 
 function drawChart() {
   drawTrace($('chart'), samples);
-  drawTrace($('aux-chart'), auxValid ? auxSamples : []);
+  if (headImuEnabled()) drawTrace($('aux-chart'), auxValid ? auxSamples : []);
 }
 
 function drawTrace(canvas, history) {
@@ -1707,7 +1719,14 @@ function applyMode() {
   updateSidebarShutdown();
   updateSidebarRestart();
   $('demo-badge').hidden = !info.demo;
+  $('tof-reading').hidden = info.tof_enabled === false;
+  const headChannel = $('head-imu-channel');
+  headChannel.hidden = !headImuEnabled();
+  headChannel.parentElement.classList.toggle('body-only', headChannel.hidden);
+  $('calibration-source-row').hidden = headChannel.hidden;
+  calibrationControls.setHeadAvailable(!headChannel.hidden);
   for (const element of document.querySelectorAll('.studio-only')) element.hidden = !info.studio;
+  document.querySelector('[data-workspace="maze"]').hidden = !info.studio || info.tof_enabled === false;
   for (const page of ['pickup', 'line']) {
     document.querySelector(`[data-workspace="${page}"]`).hidden = !info.studio || !info.workspaces?.includes(page);
   }

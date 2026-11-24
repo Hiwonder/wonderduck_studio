@@ -203,7 +203,7 @@
                   <div class="chart-section"><div class="chart-layout"><div class="chart-labels"><div class="curve-label c1"><span>X / Roll</span><output id="curve-roll">--</output></div><div class="curve-label c2"><span>Y / Pitch</span><output id="curve-pitch">--</output></div><div class="curve-label c3"><span>Z / Yaw</span><output id="curve-yaw">--</output></div></div><canvas id="chart" aria-label="躯体 IMU 三轴姿态角实时曲线"></canvas></div></div>
                   <dl class="imu-readings"><div><dt>角速度 XYZ</dt><dd id="status-gyro">--</dd></div><div><dt>重力方向 XYZ</dt><dd id="status-gravity">--</dd></div><div><dt>四元数 WXYZ</dt><dd id="status-quaternion">--</dd></div></dl>
                 </section>
-                <section class="imu-channel" aria-label="头部 IMU 姿态">
+                <section id="head-imu-channel" class="imu-channel" aria-label="头部 IMU 姿态">
                   <div class="section-title"><h2>头部 IMU 姿态</h2><span id="aux-imu-caption" class="muted">I²C3 · 传感器坐标</span></div>
                   <div class="chart-section"><div class="chart-layout"><div class="chart-labels"><div class="curve-label c1"><span>X / Roll</span><output id="aux-curve-roll">--</output></div><div class="curve-label c2"><span>Y / Pitch</span><output id="aux-curve-pitch">--</output></div><div class="curve-label c3"><span>Z / Yaw</span><output id="aux-curve-yaw">--</output></div></div><canvas id="aux-chart" aria-label="头部 IMU 三轴姿态角实时曲线"></canvas></div></div>
                   <dl class="imu-readings"><div><dt>角速度 XYZ</dt><dd id="aux-gyro">--</dd></div><div><dt>重力方向 XYZ</dt><dd id="aux-gravity">--</dd></div><div><dt>四元数 WXYZ</dt><dd id="aux-quaternion">--</dd></div></dl>
@@ -228,7 +228,7 @@
           <section id="calibration-workspace" class="workspace-content" data-workspace-panel="calibration" hidden>
             <div class="workspace-heading"><div><h1>IMU 校准</h1></div></div>
             <section class="calibration-panel" aria-label="IMU 标定">
-              <div class="calibration-source-row"><div class="calibration-source" role="group" aria-label="选择校准的 IMU"><button type="button" data-calibration-source="body" aria-pressed="true">躯体 IMU</button><button type="button" data-calibration-source="head" aria-pressed="false">头部 IMU</button></div></div>
+              <div id="calibration-source-row" class="calibration-source-row"><div class="calibration-source" role="group" aria-label="选择校准的 IMU"><button type="button" data-calibration-source="body" aria-pressed="true">躯体 IMU</button><button type="button" data-calibration-source="head" aria-pressed="false">头部 IMU</button></div></div>
               <div class="calibration-primary"><div class="calibration-mode"><button id="calibration-accel" class="primary">加速度六面</button><button id="calibration-accel-default" title="恢复默认加速度标定">恢复默认</button></div><div class="calibration-mode"><button id="calibration-gyro" class="primary">陀螺仪静置</button><button id="calibration-gyro-default" title="恢复默认陀螺仪标定">恢复默认</button></div><button id="calibration-next" disabled>继续</button><button id="calibration-cancel" disabled>取消</button><span id="calibration-status" role="status">未开始</span><a id="calibration-download" href="/api/calibration/report" download hidden>下载记录</a></div>
               <p id="calibration-profile-status" hidden></p><p id="calibration-faces"></p><p id="calibration-check"></p>
               <p id="calibration-stream-status" role="status" hidden></p>
