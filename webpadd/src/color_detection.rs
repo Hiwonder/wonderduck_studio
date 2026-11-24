@@ -84,11 +84,15 @@ enum Settings {
         generation: u64,
         point: [f64; 2],
         threshold: f64,
+        #[serde(default)]
+        line: bool,
     },
     Configure {
         generation: u64,
         reference: ColorReference,
         threshold: f64,
+        #[serde(default)]
+        line: bool,
     },
 }
 

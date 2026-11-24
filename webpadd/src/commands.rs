@@ -4,27 +4,30 @@ use super::*;
 
 pub(super) async fn leave_studio_workspace(session: u64, request_id: u64, return_tracking_head_home: bool, state: &AppState) -> ServerMessage {
     let failure = |reason| ServerMessage::StudioLeaveResult { request_id, accepted: false, reason: Some(reason) };
-    {
+    let generation = {
         let mut control = state.control.lock().await;
         if control.owner != Some(session) {
-            return failure("页面已失去控制连接".into());
+            return ServerMessage::StudioLeaveResult { request_id, accepted: true, reason: None };
         }
+        control.owner_closing = true;
         control.active = false;
         control.last_input = None;
-        control.lose_human_control();
-        control.mode = MotionMode::Drive;
-    }
+        control.head_position = None;
+        control.coordinated_tracking_started = false;
+        control.vision_pending = None;
+        control.human_generation
+    };
     let mut return_error = None;
     if return_tracking_head_home && state.status.borrow().motion_enabled != Some(false)
         && state.status.borrow().limp != Some(true) && state.status.borrow().fallen != Some(true)
     {
         // The existing wire action stops either coordinated tracking mode before homing.
-        match lease_request(state, proto::HumanControlAction::PersonFollowHome, vec![]).await {
+        match lease_request(state, session, generation, proto::HumanControlAction::PersonFollowHome).await {
             Ok(result) if result.accepted => {
                 let home = duck_control::hx::PHYSICAL_HOME_ENCODER_TARGETS[6];
                 {
                     let mut control = state.control.lock().await;
-                    if control.owner == Some(session) {
+                    if control.owner == Some(session) && control.human_generation == generation {
                         control.head_position = Some(home);
                         control.head_tracking_started = true;
                     }
@@ -60,20 +63,19 @@ pub(super) async fn leave_studio_workspace(session: u64, request_id: u64, return
             Err(error) => return_error = Some(error),
         }
     }
-    match lease_request(state, proto::HumanControlAction::Abandon, vec![]).await {
+    let result = lease_request(state, session, generation, proto::HumanControlAction::Abandon).await;
+    {
+        let mut control = state.control.lock().await;
+        if control.owner == Some(session) && control.human_generation == generation {
+            control.lose_human_control();
+        }
+    }
+    match result {
         Ok(result) if result.accepted || result.reason.as_deref() == Some("not_owner") => {
-            let mut control = state.control.lock().await;
-            if control.owner == Some(session) {
-                control.head_tracking_started = false;
-                control.head_tracking_dirty = false;
-                control.head_tracking_closing = false;
-                control.coordinated_tracking_started = false;
-                control.coordinated_tracking_dirty = false;
-                control.coordinated_tracking_closing = false;
-                control.head_position = None;
+            match return_error {
+                Some(reason) => failure(reason),
+                None => ServerMessage::StudioLeaveResult { request_id, accepted: true, reason: None },
             }
-            match return_error { Some(reason) => failure(reason),
-                None => ServerMessage::StudioLeaveResult { request_id, accepted: true, reason: None } }
         }
         Ok(result) => failure(result.reason.unwrap_or_else(|| "无法停止当前页面的控制".into())),
         Err(error) => failure(error),
@@ -113,7 +115,8 @@ pub(super) async fn dispatch_save_coordinated_settings(request_id: u64, scope: s
     let error = |reason| ServerMessage::SettingsResult { request_id, accepted: false, reason: Some(reason) };
     if !requested.valid() { return error("联合追踪参数无效，未保存".into()); }
     let store = match scope { settings::TrackingScope::Target => &state.coordinated_settings,
-        settings::TrackingScope::Person => &state.person_coordinated_settings };
+        settings::TrackingScope::Person => &state.person_coordinated_settings,
+        settings::TrackingScope::PickupAfter => &state.pickup_after_settings };
     let mut guard = store.lock().await;
     let mut pending = guard.clone();
     match tokio::task::spawn_blocking(move || pending.save(requested).map(|()| pending)).await {
@@ -126,7 +129,8 @@ pub(super) async fn dispatch_save_coordinated_settings(request_id: u64, scope: s
 pub(super) async fn dispatch_save_tracking_phases(request_id: u64, scope: settings::TrackingScope, requested: settings::TrackingPhaseSettings, state: &AppState) -> ServerMessage {
     let error = |reason| ServerMessage::SettingsResult { request_id, accepted: false, reason: Some(reason) };
     let store = match scope { settings::TrackingScope::Target => &state.tracking_phases,
-        settings::TrackingScope::Person => &state.person_tracking_phases };
+        settings::TrackingScope::Person => &state.person_tracking_phases,
+        settings::TrackingScope::PickupAfter => &state.pickup_after_phases };
     let mut guard = store.lock().await;
     let mut pending = guard.clone();
     match tokio::task::spawn_blocking(move || pending.save(requested).map(|()| pending)).await {
@@ -177,30 +181,50 @@ pub(super) async fn dispatch_delete_color(request_id: u64, name: String, state: 
 pub(super) async fn dispatch_maze(session: u64, params: proto::MazeParams, state: &AppState) -> ServerMessage {
     let response = |accepted, reason| ServerMessage::MazeResult { action: params.action, accepted, reason };
     if !params.valid() { return response(false, Some("迷宫参数无效".into())); }
+    if params.action == proto::MotionTrackingAction::Start
+        && let Err(reason) = acquire_human(session, state).await
+    { return response(false, Some(reason)); }
     let (reply, receiver) = oneshot::channel();
-    {
-        let control = state.control.lock().await;
-        if control.owner != Some(session) || !control.connected {
+    let generation = {
+        let mut control = state.control.lock().await;
+        if control.owner != Some(session) || !control.human_held || !control.connected || control.owner_closing {
             return response(false, Some("控制连接不可用".into()));
+        }
+        if params.action != proto::MotionTrackingAction::Stop
+            && (control.autonomous_deactivated || !control.active)
+        {
+            return response(false, Some("控制连接不可用".into()));
+        }
+        if params.action == proto::MotionTrackingAction::Update
+            && control.autonomous_stop_reason(Instant::now()).is_some()
+        {
+            return response(false, Some("避障行走更新超时".into()));
         }
         if state.commands.try_send(RobotCommand::Request {
             calls: vec![proto::Call::RobotMaze(params)], sit_on_loss: false,
-            generation: None, created: Instant::now(), reply,
+            generation: Some(control.human_generation), created: Instant::now(), reply,
         }).is_err() { return response(false, Some("迷宫指令发送失败".into())); }
-    }
+        control.human_actions += 1;
+        control.human_generation
+    };
     let (accepted, reason) = match timeout(ACTION_TIMEOUT, receiver).await {
         Ok(Ok(Ok(result))) => (result.accepted, result.reason),
         Ok(Ok(Err(error))) => (false, Some(error)),
         _ => (false, Some("迷宫指令超时".into())),
     };
     let mut control = state.control.lock().await;
-    if control.owner == Some(session) {
+    control.human_actions -= 1;
+    if control.owner == Some(session) && control.human_generation == generation {
         match params.action {
             proto::MotionTrackingAction::Start => control.maze_active = accepted,
             proto::MotionTrackingAction::Stop => control.maze_active = false,
             proto::MotionTrackingAction::Update if !accepted => control.maze_active = false,
             _ => {}
         }
+    }
+    if control.owner == Some(session) && control.human_generation == generation {
+        control.autonomous_updated = control.maze_active.then(Instant::now);
+        if !control.maze_active { control.owner_idle_since = Some(Instant::now()); }
     }
     response(accepted, reason)
 }
@@ -210,72 +234,89 @@ pub(super) async fn dispatch_motion_tracking(session: u64, params: proto::Motion
     if !params.valid() {
         return response(false, Some("目标坐标或 PID 参数无效".into()));
     }
+    if params.action == proto::MotionTrackingAction::Start
+        && let Err(reason) = acquire_human(session, state).await
+    { return response(false, Some(reason)); }
     let (reply, receiver) = oneshot::channel();
-    {
-        let control = state.control.lock().await;
-        if control.owner != Some(session) || !control.connected {
+    let generation = {
+        let mut control = state.control.lock().await;
+        if control.owner != Some(session) || !control.human_held || !control.connected || control.owner_closing {
+            return response(false, Some("控制连接不可用".into()));
+        }
+        if params.action != proto::MotionTrackingAction::Stop
+            && (control.autonomous_deactivated || !control.active)
+        {
             return response(false, Some("控制连接不可用".into()));
         }
         if state.commands.try_send(RobotCommand::Request {
             calls: vec![proto::Call::RobotMotionTracking(params)], sit_on_loss: false,
-            generation: None, created: Instant::now(), reply,
+            generation: Some(control.human_generation), created: Instant::now(), reply,
         }).is_err() {
             return response(false, Some("追踪指令发送失败".into()));
         }
+        control.human_actions += 1;
+        control.human_generation
+    };
+    let (accepted, reason) = match timeout(ACTION_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(result))) => (result.accepted, result.reason),
+        Ok(Ok(Err(error))) => (false, Some(error)),
+        _ => (false, Some("追踪指令超时".into())),
+    };
+    let mut control = state.control.lock().await;
+    control.human_actions -= 1;
+    if control.owner == Some(session) && control.human_generation == generation {
+        control.motion_tracking_active = accepted && params.action != proto::MotionTrackingAction::Stop;
+        if !control.motion_tracking_active { control.owner_idle_since = Some(Instant::now()); }
     }
-    match timeout(ACTION_TIMEOUT, receiver).await {
-        Ok(Ok(Ok(result))) => response(result.accepted, result.reason),
-        Ok(Ok(Err(error))) => response(false, Some(error)),
-        _ => response(false, Some("追踪指令超时".into())),
-    }
+    response(accepted, reason)
 }
 
 pub(super) async fn dispatch_head_tracking(session: u64, params: proto::HeadTrackingParams, state: &AppState) -> ServerMessage {
     let response = |accepted, reason| ServerMessage::HeadTrackingResult { action: params.action, accepted, reason };
     if !params.valid() { return response(false, Some("目标坐标或头部 PID 参数无效".into())); }
+    if params.action == proto::MotionTrackingAction::Start
+        && let Err(reason) = acquire_human(session, state).await
+    { return response(false, Some(reason)); }
     let (reply, receiver) = oneshot::channel();
-    let was_dirty = {
+    let generation = {
         let mut control = state.control.lock().await;
-        if control.owner != Some(session) || !control.connected || control.head_tracking_closing {
+        if control.owner != Some(session) || !control.human_held || !control.connected || control.owner_closing {
+            return response(false, Some("控制连接不可用".into()));
+        }
+        if params.action != proto::MotionTrackingAction::Stop
+            && (control.autonomous_deactivated || !control.active)
+        {
             return response(false, Some("控制连接不可用".into()));
         }
         if params.action == proto::MotionTrackingAction::Update && !control.head_tracking_started {
             return response(false, Some("本网页尚未启动头部追踪".into()));
         }
-        let was_dirty = control.head_tracking_dirty;
         if state.commands.try_send(RobotCommand::Request {
             calls: vec![proto::Call::RobotHeadTracking(params)], sit_on_loss: false,
-            generation: None, created: Instant::now(), reply,
+            generation: Some(control.human_generation), created: Instant::now(), reply,
         }).is_err() { return response(false, Some("头部追踪指令发送失败".into())); }
-        if params.action == proto::MotionTrackingAction::Start {
-            control.head_tracking_dirty = true;
-        } else if params.action == proto::MotionTrackingAction::Stop {
+        if params.action == proto::MotionTrackingAction::Stop {
             control.head_tracking_started = false;
             control.head_position = None;
         } else if params.pitch_position.is_some() && control.head_position.is_some() {
             control.head_position = params.pitch_position;
         }
-        was_dirty
+        control.human_actions += 1;
+        control.human_generation
     };
-    let (accepted, reason, refused) = match timeout(ACTION_TIMEOUT, receiver).await {
-        Ok(Ok(Ok(result))) => (result.accepted, result.reason, !result.accepted),
-        Ok(Ok(Err(error))) => (false, Some(error), false),
-        _ => (false, Some("头部追踪指令超时".into()), false),
+    let (accepted, reason) = match timeout(ACTION_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(result))) => (result.accepted, result.reason),
+        Ok(Ok(Err(error))) => (false, Some(error)),
+        _ => (false, Some("头部追踪指令超时".into())),
     };
     let mut control = state.control.lock().await;
-    if control.owner == Some(session) {
-        if params.action == proto::MotionTrackingAction::Start && refused && !was_dirty {
-            control.head_tracking_dirty = false;
-        }
-        if control.head_tracking_closing {
-            return response(accepted, reason);
-        }
+    control.human_actions -= 1;
+    if control.owner == Some(session) && control.human_generation == generation {
         match params.action {
             proto::MotionTrackingAction::Start => {
                 control.head_tracking_started = accepted;
                 control.head_position = if accepted { params.pitch_position } else { None };
             }
-            proto::MotionTrackingAction::Stop if accepted => control.head_tracking_dirty = false,
             proto::MotionTrackingAction::Update if !accepted => {
                 control.head_tracking_started = false;
                 control.head_position = None;
@@ -291,10 +332,18 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
     let person_follow = params.stop_area_px.is_some();
     let response = |accepted, reason| ServerMessage::CoordinatedTrackingResult { action, accepted, reason };
     if !params.valid() { return response(false, Some("目标、相机或联合追踪参数无效".into())); }
+    if params.action == proto::MotionTrackingAction::Start
+        && let Err(reason) = acquire_human(session, state).await
+    { return response(false, Some(reason)); }
     let (reply, receiver) = oneshot::channel();
-    let (was_dirty, human_generation, tracking_generation, desired_params) = {
+    let (human_generation, tracking_generation, desired_params) = {
         let mut control = state.control.lock().await;
-        if control.owner != Some(session) || !control.connected || control.coordinated_tracking_closing {
+        if control.owner != Some(session) || !control.human_held || !control.connected || control.owner_closing {
+            return response(false, Some("控制连接不可用".into()));
+        }
+        if params.action != proto::MotionTrackingAction::Stop
+            && (control.autonomous_deactivated || !control.active)
+        {
             return response(false, Some("控制连接不可用".into()));
         }
         if action == proto::MotionTrackingAction::Update && !control.coordinated_tracking_started {
@@ -303,16 +352,17 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
         let mut desired_params = params.clone();
         // Once a native recognition stream is bound, browser samples are never
         // allowed to overwrite a newer locally captured frame.
-        if control.vision_token.is_some() && action != proto::MotionTrackingAction::Stop {
+        if action != proto::MotionTrackingAction::Stop {
             desired_params.target = None;
-            if let Some(frame) = crate::vision_relay::current_frame(&control, &params) {
+            if control.tracking_input_fresh(Instant::now())
+                && let Some(frame) = crate::vision_relay::current_frame(&control, &params)
+            {
                 params.target = frame.target;
             } else {
                 params.target = None;
                 params.camera = None;
             }
         }
-        let was_dirty = control.coordinated_tracking_dirty;
         if matches!(action, proto::MotionTrackingAction::Start | proto::MotionTrackingAction::Stop) {
             control.coordinated_tracking_generation = control.coordinated_tracking_generation.wrapping_add(1);
             control.vision_pending = None;
@@ -327,31 +377,27 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
         let tracking_generation = control.coordinated_tracking_generation;
         if state.commands.try_send(RobotCommand::Request {
             calls: vec![proto::Call::RobotCoordinatedTracking(params.clone())], sit_on_loss: false,
-            generation: None, created: Instant::now(), reply,
+            generation: Some(control.human_generation), created: Instant::now(), reply,
         }).is_err() { return response(false, Some("联合追踪指令发送失败".into())); }
-        if action == proto::MotionTrackingAction::Start {
-            control.coordinated_tracking_dirty = true;
-        } else if action == proto::MotionTrackingAction::Update {
+        if action == proto::MotionTrackingAction::Update {
             control.coordinated_params = Some(desired_params.clone());
         } else if action == proto::MotionTrackingAction::Stop {
             control.coordinated_tracking_started = false;
             control.coordinated_params = None;
         }
-        (was_dirty, human_generation, tracking_generation, desired_params)
+        control.human_actions += 1;
+        (human_generation, tracking_generation, desired_params)
     };
-    let (accepted, reason, refused) = match timeout(ACTION_TIMEOUT, receiver).await {
-        Ok(Ok(Ok(result))) => (result.accepted, result.reason, !result.accepted),
-        Ok(Ok(Err(error))) => (false, Some(error), false),
-        _ => (false, Some("联合追踪指令超时".into()), false),
+    let (accepted, reason) = match timeout(ACTION_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(result))) => (result.accepted, result.reason),
+        Ok(Ok(Err(error))) => (false, Some(error)),
+        _ => (false, Some("联合追踪指令超时".into())),
     };
     let mut control = state.control.lock().await;
+    control.human_actions -= 1;
     if control.owner == Some(session) && control.human_generation == human_generation
         && control.coordinated_tracking_generation == tracking_generation
     {
-        if action == proto::MotionTrackingAction::Start && refused && !was_dirty {
-            control.coordinated_tracking_dirty = false;
-        }
-        if control.coordinated_tracking_closing { return response(accepted, reason); }
         match action {
             proto::MotionTrackingAction::Start => {
                 control.coordinated_tracking_started = accepted;
@@ -363,7 +409,6 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
                     recorder.set_following(accepted && !person_follow);
                 }
             },
-            proto::MotionTrackingAction::Stop if accepted => control.coordinated_tracking_dirty = false,
             proto::MotionTrackingAction::Update if !accepted => {
                 control.coordinated_tracking_started = false;
                 if let Some(recorder) = &control.person_vision_record { recorder.set_following(false); }
@@ -395,15 +440,13 @@ pub(super) async fn dispatch_speed(
         };
     }
     let mut control = state.control.lock().await;
-    if control.owner != Some(session) {
-        return ServerMessage::Error {
-            message: "control lease lost".into(),
-        };
+    if control.owner.is_some_and(|owner| owner != session) {
+        return ServerMessage::Error { message: "控制权已被其他设备占用".into() };
     }
     control.linear_speed = linear_speed;
     control.turn_speed = turn_speed;
     ServerMessage::Controls {
-        controls: control.view(Instant::now()),
+        controls: control.view_for(Some(session), Instant::now()),
     }
 }
 
@@ -424,7 +467,7 @@ pub(super) async fn dispatch_obstacle(
     let (reply, receiver) = oneshot::channel();
     {
         let control = state.control.lock().await;
-        if control.owner != Some(session) || !control.connected || !control.fresh(Instant::now()) || control.obstacle.is_none() {
+        if control.owner.is_some_and(|owner| owner != session) || !control.connected || control.obstacle.is_none() {
             return ServerMessage::Error {
                 message: "控制连接不可用，避障设置未生效".into(),
             };
@@ -467,8 +510,8 @@ pub(super) async fn dispatch_obstacle(
 
 pub(super) async fn dispatch_action(session: u64, action: Action, state: &AppState) -> ServerMessage {
     if action == Action::Shutdown {
-        if state.control.lock().await.owner != Some(session) {
-            return ServerMessage::Error { message: "control lease lost".into() };
+        if let Err(reason) = acquire_human(session, state).await {
+            return action_result(action, Err(reason));
         }
         let result = timeout(Duration::from_millis(400), async {
             let stream = UnixStream::connect(&state.socket).await.map_err(|error| error.to_string())?;
@@ -479,26 +522,26 @@ pub(super) async fn dispatch_action(session: u64, action: Action, state: &AppSta
         return action_result(action, result);
     }
     if action == Action::Stop {
-        if state.control.lock().await.owner != Some(session) {
-            return ServerMessage::Error { message: "control lease lost".into() };
-        }
+        state.control.lock().await.stops_pending += 1;
         let result = timeout(Duration::from_millis(400), async {
             let stream = UnixStream::connect(&state.socket).await.map_err(|error| error.to_string())?;
             let (read, mut write) = stream.into_split();
             let mut reader = BufReader::new(read);
             send_request::<proto::IntentResult>(&mut reader, &mut write, 1, &proto::Call::RobotStop).await
         }).await.unwrap_or_else(|_| Err("停止请求超时".into()));
+        let mut control = state.control.lock().await;
+        control.stops_pending -= 1;
         if result.as_ref().is_ok_and(|response| response.accepted) {
-            let mut control = state.control.lock().await;
             control.lose_human_control();
             control.human_owner = None;
+            for peer in control.peers.values_mut() {
+                peer.require_neutral();
+            }
         }
         return action_result(action, result);
     }
-    if action != Action::Stop {
-        if let Err(reason) = acquire_human(session, state).await {
-            return action_result(action, Err(reason));
-        }
+    if let Err(reason) = acquire_human(session, state).await {
+        return action_result(action, Err(reason));
     }
     let generation = {
         let mut control = state.control.lock().await;
@@ -507,14 +550,24 @@ pub(super) async fn dispatch_action(session: u64, action: Action, state: &AppSta
                 message: "control lease lost".into(),
             };
         }
-        if !control.connected || (!control.armed && action != Action::Stop) {
+        if !control.connected || !control.armed || control.owner_closing || control.stops_pending != 0 {
             return action_result(action, Err("请等待机器人连接并松开所有控制，再操作".into()));
+        }
+        if action == Action::CenterHead {
+            let now = Instant::now();
+            let result = if control.center_head(&state.status.borrow(), now) {
+                control.owner_idle_since = Some(now);
+                Ok(proto::IntentResult::accepted())
+            } else {
+                Err("当前无法回中，请松开头部摇杆并确认运动控制已就绪".into())
+            };
+            return action_result(action, result);
         }
         if let Some(mode) = action.mode() {
             let calls = control.set_mode(mode);
             enqueue_notifications(&state.commands, calls, Some(control.human_generation));
             return ServerMessage::Controls {
-                controls: control.view(Instant::now()),
+                controls: control.view_for(Some(session), Instant::now()),
             };
         }
         if matches!(action, Action::PrepareDrive | Action::ManualPrepareDrive) {
@@ -539,43 +592,39 @@ pub(super) async fn dispatch_action(session: u64, action: Action, state: &AppSta
         control.human_generation
     };
     let result = perform_action(action, generation, state).await;
-    state.control.lock().await.human_actions -= 1;
+    let mut control = state.control.lock().await;
+    control.human_actions -= 1;
+    if control.owner == Some(session) && control.human_generation == generation && control.input.neutral() {
+        control.owner_idle_since = Some(Instant::now());
+    }
     result
 }
 
 pub(super) async fn acquire_human(session: u64, state: &AppState) -> Result<(), String> {
-    {
+    let generation = {
         let mut control = state.control.lock().await;
-        if control.owner != Some(session)
-            || !control.connected
-            || !control.armed
-            || !control.fresh(Instant::now())
-        {
-            return Err("请等待连接并松开所有控制后重新操作".into());
-        }
-        if control.human_held {
+        if !control.claim(session, Instant::now())? {
             return Ok(());
         }
-        if control.human_blocked || control.human_acquiring {
-            return Err("控制权繁忙或已失效，请松开所有控制后重新操作".into());
-        }
-        control.human_acquiring = true;
-    }
-    let result = lease_request(state, proto::HumanControlAction::Acquire, vec![]).await;
+        control.human_generation
+    };
+    let result = lease_request(state, session, generation, proto::HumanControlAction::AcquireIfFree).await;
     let mut control = state.control.lock().await;
+    if control.owner != Some(session) || control.human_generation != generation {
+        return Err("操作已失效，请重新操作".into());
+    }
     control.human_acquiring = false;
-    if control.owner != Some(session) {
-        return Err("操作已失效，请重新操作".into());
-    }
-    if !control.fresh(Instant::now()) {
-        control.lose_human_control();
-        return Err("操作已失效，请重新操作".into());
-    }
     match result {
         Ok(result) if result.accepted && control.human_held => Ok(()),
-        Ok(result) => Err(result
-            .reason
-            .unwrap_or_else(|| "控制权繁忙，请松开所有控制后重新操作".into())),
+        Ok(result) => {
+            control.lose_human_control();
+            Err(match result.reason.as_deref() {
+                Some("busy") => "控制权已被其他设备占用".into(),
+                Some("robot_busy") => "机器人正在执行动作或尚未准备好".into(),
+                Some("tracking_active") => "自主追踪或避障行走正在控制机器人。".into(),
+                _ => result.reason.unwrap_or_else(|| "控制权繁忙，请松开所有控制后重新操作".into()),
+            })
+        }
         Err(error) => {
             control.lose_human_control();
             Err(error)
@@ -585,15 +634,17 @@ pub(super) async fn acquire_human(session: u64, state: &AppState) -> Result<(), 
 
 pub(super) async fn lease_request(
     state: &AppState,
+    session: u64,
+    generation: u64,
     action: proto::HumanControlAction,
-    final_calls: Vec<proto::Call>,
 ) -> Result<HumanControlResult, String> {
     let (reply, receiver) = oneshot::channel();
     state
         .commands
         .send(RobotCommand::Lease {
+            session,
+            generation,
             action,
-            final_calls,
             reply,
         })
         .await
@@ -710,124 +761,22 @@ pub(super) async fn perform_action(action: Action, generation: u64, state: &AppS
     action_result(action, result)
 }
 
-pub(super) async fn finish_head_tracking(session: u64, state: &AppState) {
-    {
-        let mut control = state.control.lock().await;
-        if control.owner != Some(session) {
-            return;
-        }
-        control.head_tracking_closing = true;
-        control.head_tracking_started = false;
-        control.head_position = None;
-        if !control.head_tracking_dirty {
-            return;
-        }
-    }
-
-    // Queue the stop before a new browser can start tracking. A refused stop means
-    // ownership or the old intent has already expired; it must not block handoff.
-    let result = match timeout(ACTION_TIMEOUT, state.commands.reserve()).await {
-        Ok(Ok(permit)) => {
-            let (reply, receiver) = oneshot::channel();
-            permit.send(RobotCommand::Request {
-                calls: vec![proto::Call::RobotHeadTracking(proto::HeadTrackingParams { pitch_position: None,
-                    action: proto::MotionTrackingAction::Stop,
-                    target: None,
-                    deadzone: [0.0; 2],
-                    gains: [[0.0; 3]; 2],
-                })],
-                sit_on_loss: false,
-                generation: None,
-                created: Instant::now(),
-                reply,
-            });
-            timeout(ACTION_TIMEOUT, receiver).await
-        }
-        _ => {
-            tracing::warn!(session, "head tracking cleanup could not be queued");
-            let mut control = state.control.lock().await;
-            if control.owner == Some(session) { control.head_tracking_dirty = false; }
-            return;
-        }
-    };
-    if !matches!(result, Ok(Ok(Ok(_)))) {
-        tracing::warn!(session, ?result, "head tracking cleanup was not acknowledged");
-    }
-    let mut control = state.control.lock().await;
-    if control.owner == Some(session) { control.head_tracking_dirty = false; }
-}
-
-pub(super) async fn finish_coordinated_tracking(session: u64, state: &AppState) {
-    {
-        let mut control = state.control.lock().await;
-        if control.owner != Some(session) { return; }
-        control.coordinated_tracking_closing = true;
-        control.coordinated_tracking_started = false;
-        control.vision_pending = None;
-        control.coordinated_params = None;
-        if let Some(recorder) = &control.person_vision_record { recorder.set_following(false); }
-        if let Some(recorder) = &control.target_vision_record { recorder.set_following(false); }
-        if !control.coordinated_tracking_dirty { return; }
-    }
-    let result = match timeout(ACTION_TIMEOUT, state.commands.reserve()).await {
-        Ok(Ok(permit)) => {
-            let (reply, receiver) = oneshot::channel();
-            permit.send(RobotCommand::Request {
-                calls: vec![proto::Call::RobotCoordinatedTracking(proto::CoordinatedTrackingParams {
-                    action: proto::MotionTrackingAction::Stop, initial_pitch: None, target: None, camera: None,
-                    head_deadzone: [0.0; 2], head_gains: [[0.0; 3]; 2], body_gains: [0.0; 3],
-                    final_body_gains: [0.0; 3], approach_linear_limit: None,
-                    final_linear_limit: proto::COORDINATED_TRACKING_DEFAULT_FINAL_LINEAR_LIMIT,
-                    final_lateral_limit: proto::COORDINATED_TRACKING_DEFAULT_FINAL_LINEAR_LIMIT,
-                    final_point: proto::COORDINATED_TRACKING_DEFAULT_FINAL_POINT,
-                    final_tolerance: proto::COORDINATED_TRACKING_DEFAULT_FINAL_TOLERANCE,
-                    stop_area_px: None,
-                    stop_area_deadzone_px: 0,
-                    stop_distance_mm: None,
-                    stop_distance_deadzone_mm: 0,
-                    arrival_delay_s: proto::COORDINATED_TRACKING_DEFAULT_ARRIVAL_DELAY_S,
-                    arrival_skill: String::new(),
-                    mouth_before: proto::TimedMouthPosition::default(),
-                    mouth_after: proto::TimedMouthPosition::default(),
-                })],
-                sit_on_loss: false, generation: None, created: Instant::now(), reply,
-            });
-            timeout(ACTION_TIMEOUT, receiver).await
-        }
-        _ => {
-            tracing::warn!(session, "coordinated tracking cleanup could not be queued");
-            let mut control = state.control.lock().await;
-            if control.owner == Some(session) { control.coordinated_tracking_dirty = false; }
-            return;
-        }
-    };
-    if !matches!(result, Ok(Ok(Ok(_)))) {
-        tracing::warn!(session, ?result, "coordinated tracking cleanup was not acknowledged");
-    }
-    let mut control = state.control.lock().await;
-    if control.owner == Some(session) { control.coordinated_tracking_dirty = false; }
-}
-
 pub(super) async fn release_session(session: u64, state: &AppState) {
-    {
+    let generation = {
         let mut control = state.control.lock().await;
-        if control.owner == Some(session) {
-            control.coordinated_tracking_started = false;
-            control.vision_pending = None;
-            control.vision_token = None;
-            control.vision_binding = None;
-            control.vision_latest = None;
-        }
-    }
-    finish_head_tracking(session, state).await;
-    finish_coordinated_tracking(session, state).await;
+        control.peers.remove(&session);
+        if control.owner != Some(session) { return; }
+        control.owner_closing = true;
+        control.active = false;
+        control.last_input = None;
+        control.head_position = None;
+        control.vision_pending = None;
+        control.human_generation
+    };
+    let result = lease_request(state, session, generation, proto::HumanControlAction::Abandon).await;
     let mut control = state.control.lock().await;
-    if control.owner != Some(session) {
-        return;
+    if control.owner == Some(session) && control.human_generation == generation {
+        control.lose_human_control();
     }
-    control.owner = None;
-    control.last_input = None;
-    control.maze_active = false;
-    // The next tick releases held sound and schedules a sitting-state check after input loss.
-    tracing::info!(session, "browser control lease released");
+    if let Err(error) = result { tracing::warn!(session, %error, "control disconnect cleanup failed"); }
 }

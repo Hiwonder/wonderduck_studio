@@ -17,6 +17,9 @@ import numpy as np
 
 
 COLOR_BOUNDARY_MARGIN = 1e-6
+LINE_REGIONS = ((0.90, 0.92, 0.7), (0.78, 0.80, 0.2), (0.66, 0.68, 0.1))
+DISPLAY_ROTATIONS = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
+                     270: cv2.ROTATE_90_COUNTERCLOCKWISE}
 
 
 def _integer(value, name):
@@ -62,6 +65,21 @@ def _upper_median(values):
     return np.partition(values, middle, axis=0)[middle]
 
 
+def _upright_strip(uyvy, rotation, first, last):
+    """Convert only the raw pixels that map to an upright horizontal strip."""
+    if rotation in (0, 180):
+        height = uyvy.shape[0]
+        raw = uyvy[first:last] if rotation == 0 else uyvy[height-last:height-first]
+        rgb = cv2.cvtColor(raw, cv2.COLOR_YUV2RGB_UYVY)
+    else:
+        width = uyvy.shape[1]
+        left, right = (first, last) if rotation == 90 else (width-last, width-first)
+        aligned_left, aligned_right = left & ~1, (right + 1) & ~1
+        aligned = cv2.cvtColor(uyvy[:, aligned_left:aligned_right], cv2.COLOR_YUV2RGB_UYVY)
+        rgb = aligned[:, left-aligned_left:right-aligned_left]
+    return cv2.rotate(rgb, DISPLAY_ROTATIONS[rotation]) if rotation else rgb
+
+
 class ColorDetectionEngine:
     """One independent sampling/detection session, reused across requests."""
 
@@ -74,6 +92,7 @@ class ColorDetectionEngine:
         self.samples_lab = []
         self.sample_timestamps = set()
         self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        self.line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         self.lookup_key = None
         self.lookup = None
         self.precise_lookup = None
@@ -189,13 +208,50 @@ class ColorDetectionEngine:
                  box_width * scale_x, box_height * scale_y],
                 selected_area / (detection_width * detection_height))
 
+    def _detect_line(self, uyvy, rotation, threshold):
+        height, width = uyvy.shape[:2]
+        if rotation in (90, 270):
+            width, height = height, width
+        detection_width = min(640, width)
+        detection_height = max(1, round(height * detection_width / width))
+        minimum_area = 30 * detection_width * detection_height / (640 * 360)
+        regions = []
+        weighted_center = weight_sum = 0.0
+        for top, bottom, weight in LINE_REGIONS:
+            center = None
+            box = None
+            rows = int(bottom * detection_height) - int(top * detection_height)
+            if rows >= 3:
+                first, last = int(top * height), int(bottom * height)
+                rgb = _upright_strip(uyvy, rotation, first, last)
+                strip = cv2.resize(rgb, (detection_width, rows), interpolation=cv2.INTER_AREA)
+                lab = cv2.cvtColor(strip, cv2.COLOR_RGB2Lab)
+                blurred = cv2.GaussianBlur(lab, (3, 3), 0.8)
+                mask = self._color_mask(blurred, threshold)
+                opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.line_kernel)
+                contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                contour = max(contours, key=cv2.contourArea, default=None)
+                if contour is not None and cv2.contourArea(contour) > minimum_area:
+                    rectangle = cv2.minAreaRect(contour)
+                    (x, _), _, _ = rectangle
+                    center = max(0.0, min(1.0, (x + 0.5) / detection_width))
+                    corners = cv2.boxPoints(rectangle).astype(np.float64) + 0.5
+                    corners[:, 0] /= detection_width
+                    corners[:, 1] = (first + corners[:, 1] * (last - first) / rows) / height
+                    box = corners.clip(0, 1).tolist()
+                    weighted_center += center * weight
+                    weight_sum += weight
+            regions.append({"top": top, "bottom": bottom, "center": center, "box": box})
+        center = weighted_center / weight_sum if weight_sum else None
+        return {"center": center, "aspect": width / height, "regions": regions}
+
     def process_frame(self, header, data, settings):
         """Consume one raw frame and return one JSON-serializable event.
 
         Sampling requests with the same generation retain progress, even when
         threshold changes. A duplicate capture timestamp never counts twice.
         After sample ten, subsequent sample requests detect with that reference.
-        Header.rotate is validated but never applied to pixels or coordinates.
+        Line following uses the upright image. Object bounds remain in raw coordinates.
         """
         started = time.perf_counter()
         width, height, size = _frame_geometry(header)
@@ -211,14 +267,20 @@ class ColorDetectionEngine:
                     "width": width, "height": height,
                     "point": self.point, "count": len(self.samples_rgb),
                 }
-        rgb = cv2.cvtColor(uyvy, cv2.COLOR_YUV2RGB_UYVY)
-        bounds, area = self._detect(rgb, threshold)
+        line = None
+        if settings.get("line"):
+            line = self._detect_line(uyvy, header["rotate"], threshold)
+            bounds, area = None, None
+        else:
+            rgb = cv2.cvtColor(uyvy, cv2.COLOR_YUV2RGB_UYVY)
+            bounds, area = self._detect(rgb, threshold)
         return {
             "type": "frame", "generation": self.generation,
             "width": width, "height": height,
             "captured_at_unix_us": header["captured_at_unix_us"],
             "took_ms": (time.perf_counter() - started) * 1000,
             "reference": self.reference, "bounds": bounds, "area": area,
+            **({"line": line} if line is not None else {}),
         }
 
 

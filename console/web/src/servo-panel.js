@@ -12,6 +12,7 @@ const SERVO_DIRECTIONS = {
   30: 'down', 31: 'up', 32: 'left', 33: 'left', 34: 'up',
 };
 const DIRECTION_LABELS = { up: '上', down: '下', left: '左', right: '右' };
+const ACCESSORY_SERVO_IDS = [35, 36];
 
 function encoderLimits(joint) {
   if (joint.encoder_limits) return { min: joint.encoder_limits[0], max: joint.encoder_limits[1] };
@@ -145,7 +146,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     const element = document.createElement('article');
     element.className = 'servo-row';
     element.dataset.id = joint.id;
-    element.setAttribute('aria-label', `ID ${joint.id} ${joint.label}`);
+    element.setAttribute('aria-label', `${joint.label} ID ${joint.id}`);
     const direction = SERVO_DIRECTIONS[joint.id];
     const directionHint = direction ? `滑杆向右时的方向：${DIRECTION_LABELS[direction]}` : '';
     const directionIcon = direction ? `<span class="servo-direction" title="${directionHint}" aria-hidden="true"><i data-lucide="chevron-${direction}"></i></span>` : '';
@@ -167,7 +168,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       input.setAttribute('aria-label', `ID ${joint.id} ${joint.label} ${label}`);
       if (directionHint && (input === targetSlider || input === targetInput)) input.setAttribute('aria-description', directionHint);
     }
-    const row = { joint, element, limits, targetSlider, targetInput, offsetSlider, offsetInput,
+    const row = { joint, element, limits, targetSlider, targetInput, offsetSlider, offsetInput, initialTarget: null,
       status: element.querySelector('.servo-status'), offsetValue: null, revision: 0, nextRead: 0, offsetError: '' };
     const lock = element.querySelector('.servo-lock');
     row.lock = lock;
@@ -230,6 +231,11 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     visibility.replaceChildren();
     const register = context().info?.registers.find(item => item.address === 31);
     const ordered = [...joints];
+    for (const id of ACCESSORY_SERVO_IDS) {
+      const joint = ordered.find(item => item.id === id);
+      if (!joint) ordered.push({ id, label: '舵机', limits: [-180, 180], disconnected: true });
+      else if (joint.discovered) ordered[ordered.indexOf(joint)] = { ...joint, label: '舵机' };
+    }
     if (previousOrder.size) ordered.sort((a, b) => (previousOrder.get(a.id) ?? Infinity) - (previousOrder.get(b.id) ?? Infinity) || a.id - b.id);
     for (const joint of ordered) {
       const row = makeRow(joint, register);
@@ -241,7 +247,9 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       row.element.hidden = !checkbox.checked;
       checkbox.addEventListener('change', () => { row.element.hidden = !checkbox.checked; cardLayout.visibilityChanged(); update(); });
       row.visibility = checkbox;
-      label.append(checkbox, document.createTextNode(`ID ${joint.id} ${joint.label}`));
+      const name = document.createElement('span');
+      setLocalizedText(name, joint.label);
+      label.append(checkbox, document.createTextNode(`ID ${joint.id} `), name);
       visibility.append(label);
     }
     cardLayout.setItems([...rows].map(([id, row]) => [id, row.element]));
@@ -326,11 +334,16 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     for (const [id, row] of rows) {
       row.lock.disabled = row.visibility.disabled = !!operation || playbackPending || playbackActive;
       const current = servo(id);
-      const presentation = holdPresentation && row.lastPresentation
+      const presentation = row.joint.disconnected && state?.online && !connectionError
+        ? { kind: 'offline', label: '未连接', title: '未连接', valid: false, fresh: false }
+        : holdPresentation && row.lastPresentation
         ? row.lastPresentation : servoStatus(current, state, elapsed, connectionError, SERVO_STATUS_MAX_AGE_MS);
       if (!holdPresentation) row.lastPresentation = presentation;
       if (!targets.has(id) && Number.isInteger(state?.pose_targets?.[id])) targets.set(id, state.pose_targets[id]);
-      const target = targets.get(id) ?? (presentation.valid ? current.raw : null);
+      if (row.initialTarget === null && !targets.has(id) && !holdPresentation && presentation.fresh) {
+        row.initialTarget = readbackPosition(row, current);
+      }
+      const target = targets.get(id) ?? row.initialTarget;
       if (Number.isInteger(target)) syncInputs(row.targetSlider, row.targetInput, target);
       else if (document.activeElement !== row.targetInput) row.targetInput.value = '';
       row.targetSlider.disabled = row.targetInput.disabled = !canControl(id) || offsetWriting;
@@ -409,7 +422,8 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     for (const [id, row] of rows) {
       if (row.element.hidden || locked.has(id) || !servo(id)?.valid) continue;
       const current = servo(id);
-      const value = actual ? readbackPosition(row, current) : targets.get(id) ?? (current?.valid ? current.raw : null);
+      const value = actual ? readbackPosition(row, current)
+        : targets.get(id) ?? row.initialTarget ?? readbackPosition(row, current);
       if (Number.isInteger(value)) values[id] = value;
     }
     if (!Object.keys(values).length) throw new Error('没有可用的舵机位置');
@@ -502,6 +516,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
   function holdForFrame(until) { frameGraceUntil = until; }
 
   return { reset, update, cancel, positions, setTargets, setPlaybackPending, holdForFrame, layout: cardLayout.layout, setLayout: cardLayout.setLayout, readOffsets, applyOffsets, offsetValues,
-    lockedIds: () => [...rows].filter(([id, row]) => locked.has(id) || row.element.hidden || !servo(id)?.valid).map(([id]) => id),
+    lockedIds: () => (context().info?.joints || []).map(joint => joint.id)
+      .filter(id => locked.has(id) || rows.get(id)?.element.hidden || !servo(id)?.valid),
     scale: cardLayout.scale };
 }

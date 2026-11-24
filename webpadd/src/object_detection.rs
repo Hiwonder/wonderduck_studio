@@ -6,17 +6,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use axum::extract::{
-    State, WebSocketUpgrade,
+    RawQuery, State, WebSocketUpgrade,
     ws::{Message, WebSocket},
 };
-use axum::response::IntoResponse;
-use serde::Serialize;
+use axum::{Json, http::StatusCode, response::IntoResponse};
+use serde::{Deserialize, Serialize, de::IntoDeserializer};
 use tokio::sync::watch;
-use uyvy::{Turn, letterbox_from_uyvy_with_pad};
+use uyvy::{Turn, letterbox_rect_from_uyvy_with_pad};
 
 use crate::AppState;
 use duck_detect::{onnx, rknn};
 use crate::frame_prefetch::{FramePrefetch, camera_recoverable, media_socket, source_root};
+use crate::person_models::PersonDecoder;
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -31,6 +32,7 @@ pub(super) enum Event {
         height: usize,
         captured_at_unix_us: u128,
         took_ms: f64,
+        processing_ms: f64,
         objects: Vec<Object>,
     },
 }
@@ -42,8 +44,66 @@ pub(super) struct Object {
     pub(super) bounds: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub(super) enum PersonModel {
+    #[serde(rename = "yolov5s-relu-640x384")]
+    Yolov5sReluWide,
+    #[serde(rename = "yolo26n")]
+    Yolo26n,
+}
+
+impl PersonModel {
+    const ALL: [Self; 2] = [Self::Yolov5sReluWide, Self::Yolo26n];
+
+    fn path(self, executable: &Path) -> Result<PathBuf> {
+        let filename = match self {
+            Self::Yolo26n => {
+                if let Some(path) = std::env::var_os("WONDERDUCK_OBJECT_MODEL") {
+                    return Ok(PathBuf::from(path));
+                }
+                "object-detection.rknn"
+            }
+            Self::Yolov5sReluWide => "person-yolov5s-relu-640x384.rknn",
+        };
+        Ok(source_root(executable)?.join("models").join(filename))
+    }
+
+    fn installed(self, executable: &Path) -> bool {
+        self.path(executable).is_ok_and(|path| path.is_file())
+    }
+}
+
 #[derive(Clone)]
-pub struct Detector {
+pub(super) struct Detectors(Arc<[Detector; PersonModel::ALL.len()]>);
+
+impl Detectors {
+    pub(super) fn new(record_path: Option<PathBuf>) -> Self {
+        let recorder = record_path.and_then(|path| match crate::vision_record::Recorder::start(&path) {
+            Ok(recorder) => Some(recorder),
+            Err(error) => {
+                tracing::error!(path = %path.display(), %error, "cannot start person vision recording");
+                None
+            }
+        });
+        Self(Arc::new(PersonModel::ALL.map(|model| Detector::new(model, recorder.clone()))))
+    }
+
+    pub(super) fn recorder(&self) -> Option<crate::vision_record::Recorder> {
+        self.0[0].recorder.clone()
+    }
+
+    fn get(&self, model: PersonModel) -> &Detector {
+        let index = match model {
+            PersonModel::Yolov5sReluWide => 0,
+            PersonModel::Yolo26n => 1,
+        };
+        &self.0[index]
+    }
+}
+
+#[derive(Clone)]
+struct Detector {
+    model: PersonModel,
     shared: Arc<(Mutex<Subscribers>, Condvar)>,
     events: watch::Sender<Event>,
     recorder: Option<crate::vision_record::Recorder>,
@@ -56,21 +116,10 @@ struct Subscribers {
 }
 
 impl Detector {
-    pub fn new(record_path: Option<PathBuf>) -> Self {
+    fn new(model: PersonModel, recorder: Option<crate::vision_record::Recorder>) -> Self {
         let shared = Arc::new((Mutex::new(Subscribers::default()), Condvar::new()));
         let (events, _) = watch::channel(Event::Waiting);
-        let recorder = record_path.and_then(|path| match crate::vision_record::Recorder::start(&path) {
-            Ok(recorder) => Some(recorder),
-            Err(error) => {
-                tracing::error!(path = %path.display(), %error, "cannot start person vision recording");
-                None
-            }
-        });
-        Self { shared, events, recorder }
-    }
-
-    pub(super) fn recorder(&self) -> Option<crate::vision_record::Recorder> {
-        self.recorder.clone()
+        Self { model, shared, events, recorder }
     }
 
     fn subscribe(&self) -> Subscription {
@@ -80,13 +129,11 @@ impl Detector {
         if !state.running {
             state.running = true;
             self.events.send_replace(Event::Waiting);
-            let shared = self.shared.clone();
-            let events = self.events.clone();
-            let recorder = self.recorder.clone();
+            let detector = self.clone();
             std::thread::Builder::new()
                 .name("object-detection".into())
                 .spawn(move || {
-                    worker(shared, events, recorder);
+                    worker(detector);
                 })
                 .expect("cannot start object detection worker");
         }
@@ -105,16 +152,44 @@ impl Drop for Subscription {
     }
 }
 
-pub async fn upgrade(
-    upgrade: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| session(socket, state))
+pub(super) async fn available_models() -> Json<Vec<PersonModel>> {
+    let executable = std::env::current_exe();
+    Json(PersonModel::ALL.into_iter().filter(|model| {
+        executable.as_ref().is_ok_and(|exe| model.installed(exe))
+    }).collect())
 }
 
-async fn session(mut socket: WebSocket, state: AppState) {
+pub(super) async fn upgrade(
+    upgrade: WebSocketUpgrade,
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+) -> impl IntoResponse {
+    let requested = match query.as_deref().into_iter().flat_map(|query| query.split('&'))
+        .find_map(|pair| pair.strip_prefix("model="))
+        .map(|value| PersonModel::deserialize(
+            IntoDeserializer::<serde::de::value::Error>::into_deserializer(value)
+        )).transpose()
+    {
+        Ok(model) => model,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let Ok(executable) = std::env::current_exe() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let installed = |model: &PersonModel| model.installed(&executable);
+    let model = match requested {
+        Some(model) => Some(model).filter(installed),
+        None => PersonModel::ALL.into_iter().find(installed),
+    };
+    let Some(model) = model else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    upgrade.on_upgrade(move |socket| session(socket, state, model))
+}
+
+async fn session(mut socket: WebSocket, state: AppState, model: PersonModel) {
     let id = state.next_session.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let detector = state.objects.clone();
+    let detector = state.objects.get(model);
     let _subscription = detector.subscribe();
     let mut events = detector.events.subscribe();
     let relay = tokio::spawn(crate::vision_relay::relay_objects(state.clone(), id, detector.events.subscribe()));
@@ -144,28 +219,14 @@ async fn session(mut socket: WebSocket, state: AppState) {
     relay.abort();
 }
 
-fn paths() -> Result<(PathBuf, PathBuf)> {
-    let executable = std::env::current_exe()?;
-    Ok((media_socket()?, model_path_from(&executable)?))
-}
-
-fn model_path_from(executable: &Path) -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("WONDERDUCK_OBJECT_MODEL") {
-        return Ok(PathBuf::from(path));
-    }
-    Ok(source_root(executable)?.join("models/object-detection.rknn"))
-}
-
-
-fn worker(shared: Arc<(Mutex<Subscribers>, Condvar)>, events: watch::Sender<Event>,
-    recorder: Option<crate::vision_record::Recorder>) {
+fn worker(Detector { model, shared, events, recorder }: Detector) {
     let (lock, wake) = &*shared;
     if let Some(recorder) = &recorder { recorder.status("started", None); }
     loop {
-        let result = run(&shared, &events, recorder.as_ref());
+        let result = run(model, &shared, &events, recorder.as_ref());
         let mut state = lock.lock().expect("object subscriber lock poisoned");
         if let Err(error) = result {
-            tracing::warn!(error = %format!("{error:#}"), "object detection stopped");
+            tracing::warn!(?model, error = %format!("{error:#}"), "object detection stopped");
             if let Some(recorder) = &recorder { recorder.status("error", Some(format!("{error:#}"))); }
             events.send_replace(Event::Error {
                 message: format!("物体检测不可用：{error:#}"),
@@ -189,7 +250,7 @@ enum Model {
 }
 
 impl Model {
-    fn open(path: &Path) -> Result<Self> {
+    fn open(path: &Path, kind: PersonModel) -> Result<Self> {
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("onnx") => {
                 let model = onnx::Model::open(path)?;
@@ -198,8 +259,12 @@ impl Model {
             }
             Some("rknn") => {
                 let runtime = path.with_file_name("librknnrt.so");
-                let model = rknn::Model::open_outputs_with_library(path, 2, Some(&runtime))?;
-                tracing::info!(api = %model.api_version, driver = %model.driver_version, "RKNN object detector started");
+                let outputs = match kind {
+                    PersonModel::Yolov5sReluWide => 3,
+                    PersonModel::Yolo26n => 2,
+                };
+                let model = rknn::Model::open_outputs_with_library(path, outputs, Some(&runtime))?;
+                tracing::info!(?kind, api = %model.api_version, driver = %model.driver_version, "RKNN object detector started");
                 Ok(Self::Rockchip(model))
             }
             _ => anyhow::bail!("expected an .onnx or .rknn object model: {}", path.display()),
@@ -214,21 +279,38 @@ impl Model {
     }
 }
 
-fn run(shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &watch::Sender<Event>,
+fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &watch::Sender<Event>,
     recorder: Option<&crate::vision_record::Recorder>) -> Result<()> {
-    let (socket, path) = paths()?;
-    let mut model = Model::open(&path)?;
+    let socket = media_socket()?;
+    let path = kind.path(&std::env::current_exe()?)?;
+    let mut model = Model::open(&path, kind)?;
     let (input, outputs) = match &model {
         Model::Rockchip(model) => (model.input, model.output_shapes.iter().map(|shape| {
             shape.iter().map(|&dimension| dimension as i64).collect::<Vec<_>>()
         }).collect::<Vec<_>>()),
         Model::Onnx(model) => (model.input, model.output_shapes.clone()),
     };
-    ensure!(input == (640, 640, 3), "model input is not 640×640 RGB");
-    let score_index = outputs.iter().position(|shape| shape == &[1, 80, 8400])
-        .context("missing class score tensor [1,80,8400]")?;
-    let box_index = outputs.iter().position(|shape| shape == &[1, 4, 8400])
-        .context("missing box tensor [1,4,8400]")?;
+    let model_height = match kind {
+        PersonModel::Yolov5sReluWide => 384,
+        PersonModel::Yolo26n => 640,
+    };
+    let model_size = (640, model_height);
+    ensure!(
+        input == (model_height, 640, 3),
+        "model input is not 640×{model_height} RGB"
+    );
+    let decoder = match kind {
+        PersonModel::Yolo26n => {
+            let scores = outputs.iter().position(|shape| shape == &[1, 80, 8400])
+                .context("missing class score tensor [1,80,8400]")?;
+            let boxes = outputs.iter().position(|shape| shape == &[1, 4, 8400])
+                .context("missing box tensor [1,4,8400]")?;
+            DetectionDecoder::Objects { scores, boxes }
+        }
+        PersonModel::Yolov5sReluWide => {
+            DetectionDecoder::Person(PersonDecoder::yolov5s_relu(&outputs, model_size)?)
+        }
+    };
     let mut rgb = Vec::new();
     let mut rga = if matches!(&model, Model::Rockchip(_)) {
         match duck_detect::rga::Converter::open() {
@@ -288,34 +370,33 @@ fn run(shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &watch::Sender<Event
             }
             Err(error) => return Err(error),
         };
+        let processing_start = Instant::now();
         let turn = Turn::from_degrees(header.rotate).context("invalid camera rotation")?;
         let (width, height) = turn.upright(header.width as usize, header.height as usize);
         let width_raw = header.width as usize;
         let height_raw = header.height as usize;
         let fit = if let Some(converter) = &mut rga {
-            match converter.convert(&data, width_raw, height_raw, 640, turn, &mut rgb) {
+            match converter.convert_rect(&data, width_raw, height_raw, model_size, turn, &mut rgb) {
                 Ok(fit) => fit,
                 Err(error) => {
                     tracing::warn!(error = %format!("{error:#}"), "RGA conversion failed; using CPU frame conversion");
                     rga = None;
-                    letterbox_from_uyvy_with_pad(
-                        &data, width_raw, height_raw, 640, turn, 0, &mut rgb,
+                    letterbox_rect_from_uyvy_with_pad(
+                        &data, width_raw, height_raw, model_size, turn, 0, &mut rgb,
                     )
                 }
             }
         } else {
-            letterbox_from_uyvy_with_pad(&data, width_raw, height_raw, 640, turn, 0, &mut rgb)
+            letterbox_rect_from_uyvy_with_pad(&data, width_raw, height_raw, model_size, turn, 0, &mut rgb)
         };
         let objects = model
             .infer_with(&rgb, |outputs| {
-                duck_detect::objects::decode(
-                    outputs[score_index],
-                    outputs[box_index],
-                    fit,
-                    width,
-                    height,
-                    0.25,
-                )
+                match &decoder {
+                    DetectionDecoder::Objects { scores, boxes } => {
+                        duck_detect::objects::decode(outputs[*scores], outputs[*boxes], fit, width, height, 0.25)
+                    }
+                    DetectionDecoder::Person(decoder) => decoder.decode(outputs, fit, width, height),
+                }
             })?
             .into_iter()
             .map(|object| Object {
@@ -329,13 +410,19 @@ fn run(shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &watch::Sender<Event
             height,
             captured_at_unix_us: header.captured_at_unix_us,
             took_ms: start.elapsed().as_secs_f64() * 1000.0,
+            processing_ms: processing_start.elapsed().as_secs_f64() * 1000.0,
             objects,
         };
-        if let (Some(recorder), Event::Frame { width, height, captured_at_unix_us, took_ms, objects }) =
+        if let (Some(recorder), Event::Frame { width, height, captured_at_unix_us, took_ms, objects, .. }) =
             (recorder, &event)
         {
             recorder.frame(*captured_at_unix_us, *width, *height, *took_ms, objects);
         }
         events.send_replace(event);
     }
+}
+
+enum DetectionDecoder {
+    Objects { scores: usize, boxes: usize },
+    Person(PersonDecoder),
 }

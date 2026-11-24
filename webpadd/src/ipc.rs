@@ -4,10 +4,11 @@ use super::*;
 pub(super) async fn robotd_worker(
     socket: PathBuf,
     mut commands: mpsc::Receiver<RobotCommand>,
+    mut frames: watch::Receiver<Option<RealtimeFrame>>,
     connected: watch::Sender<bool>,
     control: Arc<Mutex<ControlState>>,
     settings: Arc<Mutex<settings::Store>>,
-    feedback: broadcast::Sender<ServerMessage>,
+    feedback: broadcast::Sender<(u64, ServerMessage)>,
 ) {
     let mut connection: Option<RobotConnection> = None;
     let mut last_connect_attempt = None;
@@ -18,6 +19,13 @@ pub(super) async fn robotd_worker(
     loop {
         let command = tokio::select! {
             command = commands.recv() => match command { Some(command) => Some(command), None => break },
+            changed = frames.changed() => {
+                if changed.is_err() { break; }
+                let Some(frame) = frames.borrow_and_update().clone() else { continue; };
+                Some(RobotCommand::Notify {
+                    calls: frame.calls, generation: Some(frame.generation), created: frame.created,
+                })
+            }
             _ = ticker.tick() => None,
         };
         if connection.is_none() {
@@ -109,11 +117,11 @@ pub(super) async fn robotd_worker(
                     {
                         state.head_position = None;
                         state.head_tracking_started = false;
-                        let _ = feedback.send(ServerMessage::HeadPositionResult {
+                        let _ = feedback.send((session, ServerMessage::HeadPositionResult {
                             action: proto::MotionTrackingAction::Update,
                             accepted: false,
                             reason: Some(reason),
-                        });
+                        }));
                     }
                     if transport_failed { state.lose_human_control(); }
                 }
@@ -208,9 +216,9 @@ pub(super) async fn robotd_worker(
                                 state.vision_pending = None;
                                 if let Some(recorder) = &state.person_vision_record { recorder.set_following(false); }
                                 if let Some(recorder) = &state.target_vision_record { recorder.set_following(false); }
-                                let _ = feedback.send(ServerMessage::CoordinatedTrackingResult {
+                                let _ = feedback.send((session, ServerMessage::CoordinatedTrackingResult {
                                     action: proto::MotionTrackingAction::Update, accepted: false, reason: result.reason,
-                                });
+                                }));
                             }
                             false
                         }
@@ -254,7 +262,7 @@ pub(super) async fn robotd_worker(
                 let stop = calls
                     .iter()
                     .any(|call| matches!(call, proto::Call::RobotStop));
-                let allowed = !sit_on_loss
+                let allowed = request_generation.is_none() && !sit_on_loss
                     && calls.iter().all(|call| {
                         matches!(
                             call,
@@ -300,23 +308,21 @@ pub(super) async fn robotd_worker(
                 failed
             }
             RobotCommand::Lease {
+                session,
+                generation,
                 action,
-                final_calls,
                 reply,
             } => {
                 let mut state = control.lock().await;
-                if reply.is_closed()
-                    || (action == proto::HumanControlAction::Acquire
-                        && (!state.human_acquiring || !state.fresh(Instant::now())))
+                if reply.is_closed() || state.owner != Some(session) || state.human_generation != generation
+                    || (action == proto::HumanControlAction::AcquireIfFree
+                        && (!state.human_acquiring || state.owner_closing || !state.fresh(Instant::now())))
                 {
                     let _ = reply.send(Err("控制权请求已过期".into()));
                     continue;
                 }
                 if action == proto::HumanControlAction::Release
-                    && (!state.human_held
-                        || state.human_acquiring
-                        || state.human_actions != 0
-                        || (!state.input.neutral() && state.fresh(Instant::now())))
+                    && !state.release_due(Instant::now())
                 {
                     let _ = reply.send(Ok(HumanControlResult {
                         accepted: false,
@@ -329,7 +335,7 @@ pub(super) async fn robotd_worker(
                     }));
                     continue;
                 }
-                if action == proto::HumanControlAction::Acquire {
+                if action == proto::HumanControlAction::AcquireIfFree {
                     let generation = state.human_generation;
                     let owner = state.owner;
                     // The network round trip must not prevent fresh browser input
@@ -355,6 +361,7 @@ pub(super) async fn robotd_worker(
                     let mut state = control.lock().await;
                     let valid = state.owner == owner && state.human_generation == generation
                         && state.human_acquiring && state.connected && state.armed
+                        && !state.owner_closing && state.stops_pending == 0
                         && state.fresh(Instant::now()) && !reply.is_closed();
                     let acquired = result.as_ref().is_ok_and(|value| {
                         value.accepted && value.owner == Some(proto::HumanControlSource::Web)
@@ -376,8 +383,6 @@ pub(super) async fn robotd_worker(
                             if acquired {
                                 state.human_held = true;
                                 state.up = homed.expect("successful acquisition checked HOME");
-                            } else {
-                                state.lose_human_control();
                             }
                         }
                         drop(state);
@@ -386,7 +391,14 @@ pub(super) async fn robotd_worker(
                     }
                 } else {
                     let result = if action == proto::HumanControlAction::Release {
-                        match timeout(INPUT_TTL, write_notifications(writer, &final_calls)).await {
+                        let mut zero = vec![
+                            proto::Call::RobotMove(proto::MoveParams::default()),
+                            proto::Call::RobotMouth(proto::MouthParams::default()),
+                        ];
+                        if state.active && !state.fresh(Instant::now()) {
+                            zero.push(proto::Call::RobotHead(proto::HeadParams::default()));
+                        }
+                        match timeout(INPUT_TTL, write_notifications(writer, &zero)).await {
                             Ok(Ok(())) => human_request(reader, writer, &mut next_id, action).await,
                             _ => Err("final zero could not be sent".into()),
                         }
@@ -399,7 +411,11 @@ pub(super) async fn robotd_worker(
                         if action == proto::HumanControlAction::Release
                             && (value.accepted || value.owner != Some(proto::HumanControlSource::Web))
                         {
-                            state.lose_human_control();
+                            if value.accepted {
+                                state.finish_idle_release(Instant::now());
+                            } else {
+                                state.lose_human_control();
+                            }
                         }
                     }
                     drop(state);

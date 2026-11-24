@@ -5,14 +5,8 @@
   const workspace = video.closest('.workspace');
   const status = document.querySelector('#camera-status');
   const placeholder = document.querySelector('#camera-placeholder');
-  const mode = document.querySelector('#performance-mode');
-  const trackingPages = new Set(['target', 'person']);
-  const performancePages = new Set();
-  let metadataRequest = null;
-  let metadataRetry = null;
   const page = () => document.body.dataset.consolePage;
-  const performanceMode = () => performancePages.has(page());
-  const wantsPreview = () => !stopped && page() !== 'system' && !performanceMode();
+  const wantsPreview = () => !stopped && page() !== 'system';
   const endpoint = new URL(location.href);
   endpoint.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   endpoint.port = location.protocol === 'https:' ? '9445' : document.body.dataset.mediaPort;
@@ -78,7 +72,7 @@
     if (current !== session) return;
     if (session.id) send(session, {type: 'endSession', sessionId: session.id});
     current = null;
-    if (!performanceMode()) window.dispatchEvent(new CustomEvent('camera-metadata', {detail: null}));
+    window.dispatchEvent(new CustomEvent('camera-metadata', {detail: null}));
     clearTimeout(session.timeout);
     clearTimeout(session.listTimer);
     clearTimeout(session.disconnectedTimer);
@@ -116,23 +110,6 @@
     window.dispatchEvent(new CustomEvent('camera-metadata', {detail: camera}));
     if (!info || ![0, 90, 180, 270].includes(info.rotate)) return;
     video.className = info.rotate ? `turn${info.rotate}` : '';
-  }
-
-  async function refreshMetadata() {
-    const request = new AbortController();
-    metadataRequest = request;
-    try {
-      const response = await fetch('/camera-metadata', {
-        cache: 'no-store', signal: AbortSignal.any([request.signal, AbortSignal.timeout(3000)]),
-      });
-      if (!response.ok) throw new Error(String(response.status));
-      const geometry = await response.json();
-      if (metadataRequest === request) applyVideoInfo(geometry);
-    } catch {
-      if (metadataRequest === request) metadataRetry = setTimeout(refreshMetadata, 2000);
-    } finally {
-      if (metadataRequest === request) metadataRequest = null;
-    }
   }
 
   function updateAspectRatio() {
@@ -319,13 +296,7 @@
     if (video.srcObject) video.play().catch((error) => console.warn('Camera playback failed:', error));
   });
   function updatePreview() {
-    metadataRequest?.abort();
-    metadataRequest = null;
-    clearTimeout(metadataRetry);
     clearTimeout(retryTimer);
-    const paused = performanceMode();
-    mode.checked = paused;
-    window.dispatchEvent(new CustomEvent('camera-preview-paused', {detail: paused}));
     if (wantsPreview()) {
       retryDelay = 1000;
       connect();
@@ -333,26 +304,13 @@
     }
     if (current) disconnect(current, '图传已暂停');
     stopCounting();
-    if (paused) {
-      show('实时画面已关闭');
-      refreshMetadata();
-    }
   }
-  mode.addEventListener('change', () => {
-    if (!trackingPages.has(page())) return;
-    if (mode.checked) performancePages.add(page());
-    else performancePages.delete(page());
-    updatePreview();
-  });
   window.addEventListener('console-page-changed', updatePreview);
   window.addEventListener('pagehide', () => {
     stopped = true;
     clearInterval(fpsTimer);
     stopCounting();
     clearTimeout(retryTimer);
-    clearTimeout(metadataRetry);
-    metadataRequest?.abort();
-    metadataRequest = null;
     if (current) disconnect(current, '图传已关闭');
   });
   updatePreview();

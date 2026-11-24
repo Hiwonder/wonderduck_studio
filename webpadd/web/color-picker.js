@@ -5,6 +5,7 @@
   const output = overlay.getContext('2d');
   const button = document.querySelector('#color-pick');
   const result = document.querySelector('#color-result');
+  const lineResult = document.querySelector('#line-result');
   const swatch = document.querySelector('#color-swatch');
   const threshold = document.querySelector('#color-threshold');
   const thresholdValue = document.querySelector('#color-threshold-value');
@@ -29,7 +30,9 @@
   let fpsTime = performance.now();
   let disposed = false;
   let fpsTimer = null;
-  const visionPageActive = () => !document.body.dataset.consolePage || document.body.dataset.consolePage === 'target';
+  const visionPageActive = () => document.body.hasAttribute('data-color-vision');
+  const lineFollowing = () => document.body.dataset.consolePage === 'line';
+  let lineMode = lineFollowing();
   let suspendedByPage = false;
 
   function setRecognitionActive(active) {
@@ -62,8 +65,8 @@
   }
   startFps();
 
-  function publishTarget(ready, point = null, area = null, captured = null) {
-    const detail = {ready, point, area};
+  function publishTarget(ready, point = null, area = null, captured = null, line = null) {
+    const detail = {ready, point, area, line};
     if (captured !== null) detail.captured_at_unix_us = captured;
     window.dispatchEvent(new CustomEvent('color-target', {detail}));
   }
@@ -71,6 +74,7 @@
   function clearTarget() {
     clearTimeout(expiry);
     output.clearRect(0, 0, overlay.width, overlay.height);
+    lineResult.hidden = true;
     publishTarget(false);
   }
 
@@ -145,10 +149,10 @@
       return {type: 'prepare', generation};
     }
     if (phase === 'sampling') {
-      return {type: 'sample', generation, point: sample.point, threshold: Number(threshold.value)};
+      return {type: 'sample', generation, point: sample.point, threshold: Number(threshold.value), line: lineMode};
     }
     if (phase === 'tracking') {
-      return {type: 'configure', generation, reference, threshold: Number(threshold.value)};
+      return {type: 'configure', generation, reference, threshold: Number(threshold.value), line: lineMode};
     }
     return null;
   }
@@ -192,6 +196,38 @@
     output.clearRect(0, 0, overlay.width, overlay.height);
   }
 
+  function drawLineResult(data) {
+    const toRaw = (x, y) => {
+      if (data.rotate === 90) [x, y] = [y, 1 - x];
+      else if (data.rotate === 180) [x, y] = [1 - x, 1 - y];
+      else if (data.rotate === 270) [x, y] = [1 - y, x];
+      return [x * data.width, y * data.height];
+    };
+    output.beginPath();
+    for (const {top, bottom, center, box} of data.line.regions) {
+      if (box) {
+        output.moveTo(...toRaw(...box[0]));
+        for (const point of box.slice(1)) output.lineTo(...toRaw(...point));
+        output.closePath();
+      }
+      if (center !== null) {
+        const [x, y] = toRaw(center, (top + bottom) / 2);
+        output.moveTo(x + 6, y);
+        output.arc(x, y, 6, 0, 2 * Math.PI);
+      }
+    }
+    output.strokeStyle = 'rgb(255,255,0)';
+    output.lineWidth = 3;
+    output.stroke();
+    if (data.line.center !== null) {
+      output.strokeStyle = '#ff604b';
+      output.lineWidth = 4;
+      output.beginPath();
+      output.arc(...toRaw(data.line.center, 0.84), 9, 0, 2 * Math.PI);
+      output.stroke();
+    }
+  }
+
   function drawSample(data) {
     if (phase !== 'sampling') return;
     if (!validDimensions(data) || !Array.isArray(data.point) || data.point.length !== 2
@@ -229,6 +265,17 @@
         : !Number.isFinite(data.area) || data.area < 0 || data.area > 1)) {
       throw new Error('识别帧格式无效');
     }
+    const normalized = value => Number.isFinite(value) && value >= 0 && value <= 1;
+    const line = data.line;
+    if (lineMode && (!line || (line.center !== null && !normalized(line.center))
+      || !Number.isFinite(line.aspect) || line.aspect <= 0
+      || !Array.isArray(line.regions) || line.regions.length !== 3
+      || !line.regions.every(region => normalized(region.top) && normalized(region.bottom)
+        && region.top < region.bottom && (region.center === null || normalized(region.center))
+        && (region.box == null || (Array.isArray(region.box) && region.box.length === 4
+          && region.box.every(point => Array.isArray(point) && point.length === 2 && point.every(normalized))))))) {
+      throw new Error('识别帧格式无效');
+    }
     if (data.captured_at_unix_us <= lastCaptured) return;
     lastCaptured = data.captured_at_unix_us;
     const completed = phase === 'sampling';
@@ -240,10 +287,17 @@
     button.setAttribute('aria-pressed', 'true');
     frame.classList.remove('picking');
     showReference();
+    if (lineMode) {
+      const message = line.center === null ? '识别区域内未找到巡线' : '已识别巡线';
+      if (window.WonderduckLanguage) window.WonderduckLanguage.setLocalizedText(lineResult, message);
+      else if (lineResult.textContent !== message) lineResult.textContent = message;
+      lineResult.hidden = false;
+    }
     if (completed) window.dispatchEvent(new CustomEvent('color-reference-changed', {detail: reference}));
     recordFrame('color');
     const drawOverlay = video.srcObject && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
     if (drawOverlay) sizeOverlay(data);
+    if (lineMode && drawOverlay) drawLineResult(data);
     let point = null;
     if (data.bounds) {
       const [x, y, width, height] = data.bounds;
@@ -259,7 +313,7 @@
       point = [Math.max(-1, Math.min(1, 2 * u - 1)), Math.max(-1, Math.min(1, 2 * v - 1))];
     }
     // A selected reference is ready even when no matching contour is present.
-    publishTarget(true, point, data.area, data.captured_at_unix_us);
+    publishTarget(true, point, data.area, data.captured_at_unix_us, lineMode ? line : null);
     clearTimeout(expiry);
     expiry = setTimeout(clearTarget, 2000);
   }
@@ -388,16 +442,6 @@
     }
     if (activeSource === 'object') { suspend(); disconnect(); }
   });
-  window.addEventListener('vision-recognition-start', event => {
-    if (event.detail !== 'color' || activeSource !== 'color' || !visionPageActive()) return;
-    suspendedByPage = false;
-    if (!reference || !explicitlySelected || phase === 'choose' || phase === 'sampling') return;
-    if (phase === 'tracking' && socket) return;
-    phase = 'tracking';
-    lastCaptured = -1;
-    button.setAttribute('aria-pressed', 'true');
-    sendSettings();
-  });
   window.addEventListener('vision-recognition-stop', () => { suspend(); disconnect(); });
   window.addEventListener('object-detection-frame', () => recordFrame('object'));
   window.addEventListener('object-detection-reset', () => resetFps('object'));
@@ -432,19 +476,20 @@
     thresholdValue.textContent = Number(threshold.value).toFixed(2);
     sendSettings();
   });
-  window.addEventListener('camera-preview-paused', event => {
-    const paused = event.detail;
-    if (paused && (phase === 'choose' || phase === 'sampling')) clear();
-    if (paused) output.clearRect(0, 0, overlay.width, overlay.height);
-    button.disabled = paused;
-    button.title = paused ? '请关闭性能模式后取色' : '';
-  });
   window.addEventListener('console-page-changed', () => {
+    const lineChanged = lineMode !== lineFollowing();
+    lineMode = lineFollowing();
     if (!visionPageActive()) {
       suspendedByPage = true;
       explicitlySelected = false;
       suspend();
       disconnect();
+    } else if (lineChanged) {
+      generation++;
+      lastCaptured = -1;
+      if (sample) sample.count = 0;
+      clearTarget();
+      sendSettings();
     }
   });
   window.addEventListener('studio-leave', () => {
