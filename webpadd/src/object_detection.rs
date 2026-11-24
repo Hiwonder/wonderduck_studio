@@ -101,9 +101,8 @@ impl PersonModel {
         if self == Self::Yolov6n512 {
             return Ok(path.with_extension("param"));
         }
-        let rk_model = path.with_extension("rknn");
-        if board_compatible(b"rockchip,rk3566") && rk_model.is_file() && rk_model.with_file_name("librknnrt.so").is_file() {
-            return Ok(rk_model);
+        if board_compatible(b"rockchip,rk3566") {
+            return Ok(path.with_extension("rknn"));
         }
         Ok(path.with_extension("onnx"))
     }

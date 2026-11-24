@@ -296,15 +296,15 @@
     if (window.parent === window || event.source !== window.parent || !document.referrer) return;
     const parent = new URL(document.referrer);
     if (parent.protocol !== location.protocol || parent.hostname !== location.hostname || event.origin !== parent.origin) return;
-    if (event.data?.type === 'studio-workspace-preview' || event.data?.type === 'studio-workspace') {
-      const page = event.data.page;
-      const button = typeof page === 'string' && document.querySelector(`button[data-page="${CSS.escape(page)}"]`);
-      if (!button || (body.dataset.tofEnabled === 'false' && button.hasAttribute('data-requires-tof'))) return;
-      if (event.data.type === 'studio-workspace-preview') {
-        window.dispatchEvent(new Event('studio-preview'));
-        button.click();
-        return;
-      }
+    const page = event.data?.page;
+    const button = typeof page === 'string' && document.querySelector(`button[data-page="${CSS.escape(page)}"]`);
+    const pageAvailable = button && (body.dataset.tofEnabled !== 'false' || !button.hasAttribute('data-requires-tof'));
+    if (event.data?.type === 'studio-workspace-preview') {
+      if (!pageAvailable) return;
+      if (page !== 'system') cancelNetworkAnnouncement();
+      button.click();
+    } else if (event.data?.type === 'studio-workspace') {
+      if (!pageAvailable) return;
       if (document.documentElement.dataset.studioEmbedded === 'true') {
         const firstHandshake = studioOrigin === null;
         studioOrigin = event.origin;
@@ -318,16 +318,16 @@
           pendingErrors.length = 0;
         }
       }
-      const enabled = event.data.enabled !== false;
-      if (!enabled) window.dispatchEvent(new Event('studio-preview'));
       button.click();
-      if (enabled) window.dispatchEvent(new Event('studio-enter'));
-      if (Number.isSafeInteger(event.data.requestId)) {
+      window.dispatchEvent(new Event('studio-enter'));
+      if (button && Number.isSafeInteger(event.data.requestId)) {
         window.parent.postMessage({ type: 'studio-workspace-ready', page: event.data.page,
           requestId: event.data.requestId }, event.origin);
       }
     } else if (event.data?.type === 'studio-leave' && Number.isSafeInteger(event.data.requestId)) {
       window.dispatchEvent(new CustomEvent('studio-leave', { detail: event.data.requestId }));
+    } else if (event.data?.type === 'studio-disconnect') {
+      window.dispatchEvent(new Event('studio-disconnect'));
     } else if (event.data?.type === 'studio-debug-mode' && typeof event.data.enabled === 'boolean') {
       if (!event.data.enabled && document.documentElement.dataset.debugMode !== 'off'
           && colorPages.has(body.dataset.consolePage)) notify();

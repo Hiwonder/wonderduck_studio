@@ -11,6 +11,8 @@ pub(super) async fn policy_status_worker(socket: PathBuf, status_tx: watch::Send
             status.rest_phase = None;
             status.motion_enabled = None;
             status.motion_homed = None;
+            status.active_skill = None;
+            status.last_skill_timeout = None;
         });
         tokio::time::sleep(CONNECT_RETRY).await;
     }
@@ -31,6 +33,8 @@ async fn run_policy_status_stream(socket: &Path, status_tx: &watch::Sender<Brows
             status.rest_phase = policies.rest_phase;
             status.motion_enabled = policies.motion_enabled;
             status.motion_homed = policies.homed;
+            status.active_skill = policies.active_skill;
+            status.last_skill_timeout = policies.last_skill_timeout;
             status.power_status_sequence = status.power_status_sequence.wrapping_add(1);
         });
         tokio::time::sleep(Duration::from_millis(250)).await;

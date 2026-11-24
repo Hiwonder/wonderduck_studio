@@ -48,28 +48,29 @@ pub(super) async fn bind(state: &AppState, id: u64, source: Source, text: &str) 
     let Ok(request) = serde_json::from_str::<BindRequest>(text) else { return false };
     if request.kind != "bind_tracking" { return false; }
     let mut control = state.control.lock().await;
-    let Some(session) = control.owner else { return false };
-    if control.vision_token.as_deref() != Some(request.token.as_str()) { return false; }
-    control.vision_binding = Some(Binding { session, id, source });
-    control.vision_latest = None;
-    control.vision_pending = None;
+    let Some((&session, peer)) = control.peers.iter_mut().find(|(_, peer)| peer.token == request.token) else { return false; };
+    peer.vision_binding = Some(Binding { session, id, source });
+    peer.vision_latest = None;
+    if control.owner == Some(session) { control.vision_pending = None; }
     true
 }
 
 pub(super) async fn unbind(state: &AppState, id: u64) {
     let mut control = state.control.lock().await;
-    if control.vision_binding.is_some_and(|binding| binding.id == id) {
-        control.vision_binding = None;
-        control.vision_latest = None;
-        control.vision_pending = None;
+    for peer in control.peers.values_mut() {
+        if peer.vision_binding.is_some_and(|binding| binding.id == id) {
+            peer.vision_binding = None;
+            peer.vision_latest = None;
+        }
     }
 }
 
 async fn invalidate(state: &AppState, id: u64) {
     let mut control = state.control.lock().await;
-    if control.vision_binding.is_some_and(|binding| binding.id == id) {
-        control.vision_latest = None;
-        control.vision_pending = None;
+    for peer in control.peers.values_mut() {
+        if peer.vision_binding.is_some_and(|binding| binding.id == id) {
+            peer.vision_latest = None;
+        }
     }
 }
 
@@ -100,9 +101,10 @@ fn compatible(frame: &Frame, params: &proto::CoordinatedTrackingParams) -> bool 
 
 pub(super) fn current_frame<'a>(control: &'a ControlState, params: &proto::CoordinatedTrackingParams)
     -> Option<&'a Frame> {
-    let frame = control.vision_latest.as_ref()?;
+    let peer = control.peers.get(&control.owner?)?;
+    let frame = peer.vision_latest.as_ref()?;
     let now = wall_us()?;
-    if control.vision_binding != Some(frame.binding) || !fresh(frame.captured, now)
+    if peer.vision_binding != Some(frame.binding) || !fresh(frame.captured, now)
         || !compatible(frame, params) { return None; }
     Some(frame)
 }
@@ -118,14 +120,16 @@ pub(super) async fn publish(state: &AppState, frame: Frame) {
     let Some(now) = wall_us() else { return };
     if !frame_valid(&frame) || !fresh(frame.captured, now) { return; }
     let mut control = state.control.lock().await;
-    if control.vision_binding != Some(frame.binding) || control.owner != Some(frame.binding.session)
-        || control.vision_latest.as_ref().is_some_and(|old| frame.captured <= old.captured) { return; }
     let binding = frame.binding;
-    control.vision_latest = Some(frame);
-    if !control.coordinated_tracking_started || control.coordinated_tracking_closing
-        || !control.connected || !control.fresh(std::time::Instant::now()) { return; }
+    let Some(peer) = control.peers.get_mut(&binding.session) else { return; };
+    if peer.vision_binding != Some(binding)
+        || peer.vision_latest.as_ref().is_some_and(|old| frame.captured <= old.captured) { return; }
+    peer.vision_latest = Some(frame);
+    if control.owner != Some(binding.session) || control.owner_closing { return; }
+    if !control.coordinated_tracking_started
+        || !control.connected || !control.tracking_input_fresh(std::time::Instant::now()) { return; }
     let Some(params) = &control.coordinated_params else { return };
-    if !compatible(control.vision_latest.as_ref().unwrap(), params) { return; }
+    if current_frame(&control, params).is_none() { return; }
     let marker = (binding.session, binding.id, control.coordinated_tracking_generation);
     if control.vision_pending.is_some() { return; }
     if state.commands.try_send(RobotCommand::VisionUpdate {
@@ -140,14 +144,12 @@ pub(super) fn take_update(control: &mut ControlState, session: u64, binding: u64
     let marker = (session, binding, generation);
     if control.vision_pending != Some(marker) { return None; }
     control.vision_pending = None;
-    if control.owner != Some(session) || !control.connected || !control.fresh(std::time::Instant::now())
-        || !control.coordinated_tracking_started || control.coordinated_tracking_closing
-        || control.coordinated_tracking_generation != generation
-        || !control.vision_binding.is_some_and(|item| item.id == binding && item.session == session) { return None; }
-    let frame = control.vision_latest.as_ref()?;
-    if !fresh(frame.captured, wall_us()?) { return None; }
+    if control.owner != Some(session) || !control.connected || !control.tracking_input_fresh(std::time::Instant::now())
+        || !control.coordinated_tracking_started
+        || control.owner_closing || control.coordinated_tracking_generation != generation { return None; }
     let mut params = control.coordinated_params.clone()?;
-    if !compatible(frame, &params) { return None; }
+    let frame = current_frame(control, &params)?;
+    if frame.binding.id != binding { return None; }
     params.action = proto::MotionTrackingAction::Update;
     params.initial_pitch = None;
     params.target = frame.target;
@@ -168,7 +170,8 @@ pub(super) async fn relay_values(state: AppState, id: u64, source: Source, mut e
 }
 
 pub(super) async fn frame_from_value(state: &AppState, id: u64, source: Source, event: &Value) -> Option<Frame> {
-    let binding = state.control.lock().await.vision_binding.filter(|item| item.id == id && item.source == source)?;
+    let binding = state.control.lock().await.peers.values()
+        .filter_map(|peer| peer.vision_binding).find(|item| item.id == id && item.source == source)?;
     if event.get("type")?.as_str()? != "frame" { return None; }
     let width: u32 = event.get("width")?.as_u64()?.try_into().ok()?;
     let height: u32 = event.get("height")?.as_u64()?.try_into().ok()?;

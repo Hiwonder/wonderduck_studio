@@ -137,7 +137,10 @@ def software_version(root=None, identity_path=Path("/run/robotd/identity.json"))
     local_version = identity.get("version")
     if not isinstance(local_version, str) or not RELEASE_VERSION.fullmatch(local_version):
         local_version = None
+    if release and running == source:
+        return release
+    if local_version:
+        return local_version
     if isinstance(running, str) and REVISION.fullmatch(running):
-        if not release or running != source:
-            return local_version or "本地构建 · " + running[:8]
-    return release or local_version
+        return "本地构建 · " + running[:8]
+    return release

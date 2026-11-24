@@ -1588,6 +1588,7 @@ dependencies = [
  "duck-control",
  "duck-detect",
  "duck-ipc-proto",
+ "futures-util",
  "libc",
  "robotd-params",
  "serde",

@@ -9,8 +9,6 @@ import sys
 import threading
 from pathlib import Path
 
-from app.models.update_control import REST_TIMEOUT as UPDATE_REST_TIMEOUT
-from app.robot.workspace_rest import ensure_rest, rest_status
 from app.system.runtime_config import RELEASE_VERSION, software_version
 from app.system.service_control import _run
 
@@ -83,12 +81,10 @@ def handle(root, socket_path, command, studio_port):
         if active():
             raise RuntimeError("软件更新正在进行")
         run_updater(updater + ["--preflight"], 10)
-        phase, enabled = rest_status(socket_path)
-        if enabled or phase == "resting":
-            ensure_rest(socket_path, timeout=UPDATE_REST_TIMEOUT)
         job_id = secrets.token_hex(8)
         _run(["sudo", "-n", "/usr/bin/systemd-run", f"--unit={UNIT}", "--on-active=2s",
               "--timer-property=RemainAfterElapse=no", "--collect", f"--uid={os.geteuid()}",
-              *updater, "--version", version, "--job-id", job_id, "--studio-port", str(studio_port)],
+              *updater, "--version", version, "--job-id", job_id, "--studio-port", str(studio_port),
+              "--robot-socket", str(socket_path)],
              "无法启动软件更新")
     return {"accepted": True, "job_id": job_id}

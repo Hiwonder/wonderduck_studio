@@ -3,6 +3,7 @@
 use super::*;
 use duck_control::hx::MANUAL_HEAD_POSITION_LIMITS;
 use robotd_params::PadDriveParams;
+use std::collections::HashMap;
 
 const DRIVE_AXIS_LOCK_ANGLE: f64 = 20.0 * std::f64::consts::PI / 180.0;
 const HEAD_STEP_INTERVAL: Duration = Duration::from_millis(5);
@@ -215,6 +216,7 @@ pub(super) enum BrowserMessage {
     },
     Action {
         name: Action,
+        request_id: Option<u64>,
     },
 }
 
@@ -381,6 +383,8 @@ pub(super) struct ControlsView {
     bindings: WebBindings,
     pub obstacle: Option<proto::ObstacleParams>,
     pub human_owner: Option<proto::HumanControlSource>,
+    pub control_owner: Option<ControlOwner>,
+    pub control_owned: bool,
     pub human_busy: bool,
     pub human_connected: bool,
 }
@@ -428,7 +432,7 @@ impl HeadStick {
     }
 }
 
-#[derive(Clone, Copy, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ControlClient {
     App,
@@ -437,9 +441,75 @@ pub(super) enum ControlClient {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ControlOwner {
+    App,
+    Web,
+    Gamepad,
+    Unknown,
+}
+
+pub(super) struct ControlPeer {
+    pub client: ControlClient,
+    pub token: String,
+    pub vision_binding: Option<crate::vision_relay::Binding>,
+    pub vision_latest: Option<crate::vision_relay::Frame>,
+    neutral_at: Option<Instant>,
+    input_at: Option<Instant>,
+    input: Input,
+    mode: MotionMode,
+    reported_ready: bool,
+}
+
+impl ControlPeer {
+    pub fn new(client: ControlClient, token: String) -> Self {
+        Self {
+            client,
+            token,
+            vision_binding: None,
+            vision_latest: None,
+            neutral_at: None,
+            input_at: None,
+            input: Input::default(),
+            mode: MotionMode::Drive,
+            reported_ready: false,
+        }
+    }
+
+    pub fn receive(&mut self, active: bool, input: Input, now: Instant) {
+        if !active || !self.fresh(now) {
+            self.require_neutral();
+        }
+        self.input_at = active.then_some(now);
+        self.input = input;
+        if active && input.neutral() {
+            self.neutral_at = Some(now);
+        }
+    }
+
+    pub fn require_neutral(&mut self) {
+        self.neutral_at = None;
+    }
+
+    fn fresh(&self, now: Instant) -> bool {
+        self.input_at.is_some_and(|at| now.saturating_duration_since(at) <= INPUT_TTL)
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.neutral_at.is_some() && self.fresh(now)
+    }
+}
+
 pub(super) struct ControlState {
     pub owner: Option<u64>,
-    pub owner_client: ControlClient,
+    pub peers: HashMap<u64, ControlPeer>,
+    pub owner_closing: bool,
+    pub owner_idle_since: Option<Instant>,
+    pub motion_tracking_active: bool,
+    pub autonomous_updated: Option<Instant>,
+    pub autonomous_deactivated: bool,
+    pub stops_pending: usize,
     pub input: Input,
     pub last_input: Option<Instant>,
     pub mode: MotionMode,
@@ -461,16 +531,8 @@ pub(super) struct ControlState {
     pub head_tracking_started: bool,
     pub head_position: Option<u16>,
     head_stick: HeadStick,
-    // A sent start needs cleanup even when its response is lost.
-    pub head_tracking_dirty: bool,
-    pub head_tracking_closing: bool,
     pub coordinated_tracking_started: bool,
-    pub coordinated_tracking_dirty: bool,
-    pub coordinated_tracking_closing: bool,
     pub coordinated_tracking_generation: u64,
-    pub vision_token: Option<String>,
-    pub vision_binding: Option<crate::vision_relay::Binding>,
-    pub vision_latest: Option<crate::vision_relay::Frame>,
     pub vision_pending: Option<(u64, u64, u64)>,
     pub coordinated_params: Option<proto::CoordinatedTrackingParams>,
     pub person_vision_record: Option<crate::vision_record::Recorder>,
@@ -490,7 +552,13 @@ impl Default for ControlState {
     fn default() -> Self {
         Self {
             owner: None,
-            owner_client: ControlClient::Unknown,
+            peers: HashMap::new(),
+            owner_closing: false,
+            owner_idle_since: None,
+            motion_tracking_active: false,
+            autonomous_updated: None,
+            autonomous_deactivated: false,
+            stops_pending: 0,
             input: Input::default(),
             last_input: None,
             mode: MotionMode::Drive,
@@ -512,15 +580,8 @@ impl Default for ControlState {
             head_tracking_started: false,
             head_position: None,
             head_stick: HeadStick::default(),
-            head_tracking_dirty: false,
-            head_tracking_closing: false,
             coordinated_tracking_started: false,
-            coordinated_tracking_dirty: false,
-            coordinated_tracking_closing: false,
             coordinated_tracking_generation: 0,
-            vision_token: None,
-            vision_binding: None,
-            vision_latest: None,
             vision_pending: None,
             coordinated_params: None,
             person_vision_record: None,
@@ -546,24 +607,54 @@ impl ControlState {
     /// Preserve short press/release edges between 50 Hz output ticks.
     pub fn receive(&mut self, input: Input, active: bool, now: Instant) {
         self.active = active;
+        if !active && self.autonomous_active() {
+            self.autonomous_deactivated = true;
+        }
+        if active && input.neutral() {
+            self.owner_idle_since.get_or_insert(now);
+        } else {
+            self.owner_idle_since = None;
+        }
         if active {
             self.input = input;
         } else {
             self.cancel();
         }
         self.last_input = Some(now);
-        let (mut calls, actions) = self.tick(now, self.connected);
-        // Continuous intents are emitted only by the periodic control task.
-        calls.truncate(calls.len() - control_frame(self, now).len());
+        let (calls, actions) = self.tick(now, self.connected);
         self.pending_calls = calls;
         self.pending_actions = actions;
     }
-    pub fn view(&self, now: Instant) -> ControlsView {
+    pub fn update_peer_readiness(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        for peer in self.peers.values_mut() {
+            let ready = peer.ready(now);
+            changed |= peer.reported_ready != ready;
+            peer.reported_ready = ready;
+        }
+        changed
+    }
+
+    pub fn view_for(&self, session: Option<u64>, now: Instant) -> ControlsView {
+        let local_owner = session.is_some() && self.owner == session;
+        let ready = session.and_then(|id| self.peers.get(&id)).is_some_and(|peer| peer.ready(now));
+        let control_owner = match self.human_owner {
+            Some(proto::HumanControlSource::Gamepad) => Some(ControlOwner::Gamepad),
+            Some(proto::HumanControlSource::Web) => self.owner.filter(|_| self.human_held)
+                .and_then(|owner| self.peers.get(&owner))
+                .map(|peer| match peer.client {
+                    ControlClient::App => ControlOwner::App,
+                    ControlClient::Web => ControlOwner::Web,
+                    ControlClient::Unknown => ControlOwner::Unknown,
+                })
+                .or(Some(ControlOwner::Unknown)),
+            None => None,
+        };
         ControlsView {
-            mode: self.mode,
+            mode: session.and_then(|id| self.peers.get(&id)).map_or(self.mode, |peer| peer.mode),
             linear_speed: self.linear_speed,
             turn_speed: self.turn_speed,
-            armed: self.armed,
+            armed: if local_owner { self.armed } else { self.connected && ready },
             start_seconds: (self.start.seconds(now) * 10.0).floor() / 10.0,
             select_seconds: (self.select.seconds(now) * 10.0).floor() / 10.0,
             // Retain the older web client's wire fields for a cached page.
@@ -577,10 +668,76 @@ impl ControlState {
             },
             obstacle: self.obstacle,
             human_owner: self.human_owner,
-            human_busy: self.human_blocked,
+            control_owner,
+            control_owned: local_owner && self.human_held,
+            human_busy: self.owner.is_some() && !local_owner || self.human_owner == Some(proto::HumanControlSource::Gamepad)
+                || if local_owner { self.human_blocked } else { !ready },
             human_connected: self.connected,
         }
     }
+
+    pub fn claim(&mut self, session: u64, now: Instant) -> Result<bool, &'static str> {
+        if self.owner.is_some_and(|owner| owner != session) || self.owner_closing || self.stops_pending != 0 {
+            return Err("控制权已被其他设备占用");
+        }
+        let ready = self.peers.get(&session).is_some_and(|peer| peer.ready(now));
+        if !self.connected || !ready || (self.owner == Some(session) && (!self.armed || !self.fresh(now))) {
+            return Err("请等待连接并松开所有控制后重新操作");
+        }
+        if self.human_held {
+            return Ok(false);
+        }
+        if self.human_acquiring {
+            return Err("控制权请求尚未完成");
+        }
+        if self.owner.is_none() {
+            self.owner = Some(session);
+            self.active = true;
+            self.armed = true;
+            self.human_blocked = false;
+            let peer = &self.peers[&session];
+            self.last_input = peer.input_at;
+            self.mode = peer.mode;
+            self.input = if peer.input.neutral() { peer.input } else { Input::default() };
+            self.owner_idle_since = Some(now);
+        }
+        self.human_acquiring = true;
+        Ok(true)
+    }
+
+    pub fn autonomous_active(&self) -> bool {
+        self.maze_active || self.motion_tracking_active || self.head_tracking_started
+            || self.coordinated_tracking_started
+    }
+
+    pub fn release_due(&self, now: Instant) -> bool {
+        self.human_held && !self.owner_closing && !self.human_acquiring
+            && self.human_actions == 0 && !self.autonomous_active()
+            && (!self.fresh(now) || self.owner_idle_since.is_some_and(|since|
+                now.saturating_duration_since(since) >= CONTROL_IDLE_RELEASE))
+    }
+
+    pub fn autonomous_stop_reason(&self, now: Instant) -> Option<&'static str> {
+        if !self.human_held || self.owner_closing || self.human_actions != 0
+            || !self.autonomous_active()
+        {
+            return None;
+        }
+        if self.autonomous_deactivated || !self.active {
+            return Some("client inactive");
+        }
+        if self.maze_active {
+            return self.autonomous_updated
+                .is_none_or(|at| now.saturating_duration_since(at) >= proto::AUTONOMOUS_SESSION_TIMEOUT)
+                .then_some("maze update timed out");
+        }
+        (!self.tracking_input_fresh(now)).then_some("tracking heartbeat timed out")
+    }
+
+    pub fn tracking_input_fresh(&self, now: Instant) -> bool {
+        !self.autonomous_deactivated && self.input_fresh(now, proto::AUTONOMOUS_SESSION_TIMEOUT)
+    }
+
     pub fn cancel(&mut self) {
         self.input = Input::default();
         self.head_stick = HeadStick::default();
@@ -589,14 +746,27 @@ impl ControlState {
         self.armed = false;
     }
     pub fn lose_human_control(&mut self) {
+        if let Some(peer) = self.owner.and_then(|id| self.peers.get_mut(&id)) {
+            peer.neutral_at = None;
+        }
+        self.owner = None;
+        self.owner_closing = false;
+        self.owner_idle_since = None;
+        self.last_input = None;
+        self.human_acquiring = false;
+        self.head_tracking_started = false;
         self.human_generation = self.human_generation.wrapping_add(1);
         self.coordinated_tracking_started = false;
+        self.coordinated_params = None;
+        self.motion_tracking_active = false;
         self.vision_pending = None;
         if let Some(recorder) = &self.person_vision_record { recorder.set_following(false); }
         if let Some(recorder) = &self.target_vision_record { recorder.set_following(false); }
         self.human_held = false;
         self.maze_active = false;
-        if self.head_position.take().is_some() { self.head_tracking_started = false; }
+        self.autonomous_updated = None;
+        self.autonomous_deactivated = false;
+        self.head_position = None;
         self.human_blocked = true;
         self.cancel();
         self.previous = Input::default();
@@ -605,6 +775,16 @@ impl ControlState {
         self.had_input = false;
         self.lost_at = None;
         self.sit_queued = false;
+    }
+
+    pub fn finish_idle_release(&mut self, now: Instant) {
+        let peer = self.owner.zip(self.last_input).filter(|_| self.fresh(now) && self.input.neutral() && self.armed);
+        self.lose_human_control();
+        if let Some((id, last_input)) = peer
+            && let Some(peer) = self.peers.get_mut(&id)
+        {
+            peer.neutral_at = Some(last_input);
+        }
     }
     pub fn set_mode(&mut self, mode: MotionMode) -> Vec<proto::Call> {
         let mut calls = vec![];
@@ -621,14 +801,21 @@ impl ControlState {
             self.head_stick = HeadStick::default();
         }
         self.mode = mode;
+        if let Some(peer) = self.owner.and_then(|id| self.peers.get_mut(&id)) {
+            peer.mode = mode;
+        }
         calls
     }
     pub fn fresh(&self, now: Instant) -> bool {
+        self.input_fresh(now, INPUT_TTL)
+    }
+
+    fn input_fresh(&self, now: Instant, timeout: Duration) -> bool {
         self.owner.is_some()
             && self.active
             && self
                 .last_input
-                .is_some_and(|at| now.saturating_duration_since(at) <= INPUT_TTL)
+                .is_some_and(|at| now.saturating_duration_since(at) <= timeout)
     }
     fn head_stick_input(&self, status: &BrowserStatus, now: Instant) -> Option<[f64; 2]> {
         let other_head_axes = match self.mode {
@@ -696,7 +883,9 @@ impl ControlState {
             }
             self.cancel();
             self.previous = Input::default();
-            calls.extend(self.set_mode(MotionMode::Drive));
+            if self.owner.is_some() {
+                calls.extend(self.set_mode(MotionMode::Drive));
+            }
         } else {
             if !self.armed && self.input.neutral() {
                 self.armed = true;
@@ -759,7 +948,6 @@ impl ControlState {
                 self.previous = self.input;
             }
         }
-        calls.extend(control_frame(self, now));
         (calls, actions)
     }
 }
@@ -767,6 +955,90 @@ impl ControlState {
 fn fresh_head_position(status: &BrowserStatus, now: Instant) -> Option<[u16; 2]> {
     status.head_positions.filter(|_| status.head_positions_at
         .is_some_and(|at| now.saturating_duration_since(at) <= HEAD_FEEDBACK_TTL))
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn tracking_tolerates_input_jitter_and_stops_when_the_client_deactivates() {
+        let now = Instant::now();
+        let mut control = ControlState {
+            owner: Some(1),
+            human_held: true,
+            connected: true,
+            coordinated_tracking_started: true,
+            last_input: Some(now),
+            ..Default::default()
+        };
+        let delayed = now + Duration::from_millis(220);
+        assert!(!control.fresh(delayed));
+        assert!(control.tracking_input_fresh(delayed));
+        assert!(control.autonomous_stop_reason(delayed).is_none());
+        assert!(!control.release_due(delayed));
+        assert_eq!(control.autonomous_stop_reason(now + Duration::from_millis(1001)),
+            Some("tracking heartbeat timed out"));
+
+        control.receive(Input::default(), false, delayed);
+        control.receive(Input::default(), true, delayed);
+        assert_eq!(control.autonomous_stop_reason(delayed), Some("client inactive"));
+        assert!(!control.tracking_input_fresh(delayed));
+    }
+
+    #[test]
+    fn maze_uses_its_own_update_deadline() {
+        let now = Instant::now();
+        let control = ControlState {
+            owner: Some(1),
+            human_held: true,
+            connected: true,
+            maze_active: true,
+            autonomous_updated: Some(now),
+            ..Default::default()
+        };
+        assert!(control.autonomous_stop_reason(now + Duration::from_millis(650)).is_none());
+        assert_eq!(control.autonomous_stop_reason(now + proto::AUTONOMOUS_SESSION_TIMEOUT),
+            Some("maze update timed out"));
+    }
+
+    #[test]
+    fn neutral_peers_share_the_connection_and_keep_their_modes() {
+        let now = Instant::now();
+        let mut control = ControlState { connected: true, ..Default::default() };
+        for (id, client) in [(1, ControlClient::Web), (2, ControlClient::App)] {
+            let mut peer = ControlPeer::new(client, id.to_string());
+            peer.receive(true, Input::default(), now);
+            control.peers.insert(id, peer);
+        }
+        assert!(control.view_for(Some(1), now).armed);
+        assert!(control.view_for(Some(2), now).armed);
+        assert!(control.owner.is_none());
+
+        assert_eq!(control.claim(1, now), Ok(true));
+        control.human_held = true;
+        control.human_acquiring = false;
+        control.human_owner = Some(proto::HumanControlSource::Web);
+        control.set_mode(MotionMode::HeadDrive);
+        assert!(control.claim(2, now).is_err());
+        assert_eq!(control.view_for(Some(2), now).control_owner, Some(ControlOwner::Web));
+        assert!(!control.view_for(Some(2), now).control_owned);
+        assert_eq!(control.view_for(Some(2), now).mode, MotionMode::Drive);
+
+        let idle = now + CONTROL_IDLE_RELEASE;
+        for peer in control.peers.values_mut() {
+            peer.receive(true, Input::default(), idle);
+        }
+        control.receive(Input::default(), true, idle);
+        control.coordinated_tracking_started = true;
+        assert!(!control.release_due(idle));
+        control.coordinated_tracking_started = false;
+        assert!(control.release_due(idle));
+        control.finish_idle_release(idle);
+        assert_eq!(control.claim(2, idle), Ok(true));
+        assert_eq!(control.mode, MotionMode::Drive);
+        assert_eq!(control.view_for(Some(1), idle).mode, MotionMode::HeadDrive);
+    }
 }
 
 #[cfg(test)]

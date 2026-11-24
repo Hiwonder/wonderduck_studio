@@ -265,6 +265,5 @@ export function createCalibrationView({ viewer, renderer, onError, onRelease }) 
     modelReady = true;
     invalidate();
   }
-  document.addEventListener('calibration-source-change', event => setSource(event.detail));
   return { setActive, setSource, update, setRobotModel, invalidate };
 }
