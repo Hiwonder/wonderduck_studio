@@ -161,6 +161,8 @@ pub(super) enum BrowserMessage {
         target: Option<[f64; 2]>,
         #[serde(default)]
         line_speed: Option<f64>,
+        #[serde(default)]
+        line_target_x: Option<f64>,
         reference_area: f64,
         deadzone: [f64; 2],
         gains: [[f64; 3]; 2],
@@ -184,6 +186,8 @@ pub(super) enum BrowserMessage {
         camera: Option<proto::TrackingCamera>,
         head_deadzone: [f64; 2],
         head_gains: [[f64; 3]; 2],
+        #[serde(default)]
+        head_target_point: Option<[f64; 2]>,
         body_gains: [f64; 3],
         final_body_gains: [f64; 3],
         approach_linear_limit: Option<f64>,

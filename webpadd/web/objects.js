@@ -7,6 +7,7 @@
   const modelPicker = document.querySelector('#person-model');
   const modelSwitch = modelPicker.labels[0];
   const context = canvas.getContext('2d');
+  const recognitionColor = getComputedStyle(canvas).getPropertyValue('--recognition-color').trim();
   const modelStorageKey = 'wonderduck-person-detection-model';
   let preferredModel = null;
   try { preferredModel = localStorage.getItem(modelStorageKey); } catch {}
@@ -84,7 +85,7 @@
       if (selected) {
         const [left, top, right, bottom] = selected.bounds;
         context.lineWidth = Math.max(2, frame.width / 400);
-        context.strokeStyle = '#8fc7e7';
+        context.strokeStyle = recognitionColor;
         context.strokeRect(left, top, right - left, bottom - top);
       }
     }

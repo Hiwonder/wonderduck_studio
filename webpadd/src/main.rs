@@ -594,6 +594,8 @@ fn router(state: AppState, media_port: u16) -> Router {
             get(move || async move {
                 Html(PAGE.replace("{{MEDIA_PORT}}", &media_port.to_string())
                     .replace("{{APP_VERSION}}", env!("CARGO_PKG_VERSION"))
+                    .replace("{{HEAD_PITCH_MIN}}", &proto::HEAD_PITCH_POSITION_RANGE.start().to_string())
+                    .replace("{{HEAD_PITCH_MAX}}", &proto::HEAD_PITCH_POSITION_RANGE.end().to_string())
                     .replace("{{TOF_ENABLED}}", if capabilities.tof_enabled { "true" } else { "false" }))
             }),
         )

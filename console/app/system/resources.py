@@ -1,4 +1,4 @@
-"""Read storage and memory usage without querying robot hardware."""
+"""Read system resource usage without querying robot hardware."""
 
 from pathlib import Path
 import math
@@ -27,6 +27,21 @@ def cpu_temperature(thermal_root=Path("/sys/class/thermal")):
     return max(cpu_readings or soc_readings, default=None)
 
 
+def cpu_ticks(stat_path=Path("/proc/stat")):
+    try:
+        with stat_path.open(encoding="ascii") as stat:
+            name, *fields = stat.readline().split()
+        ticks = [int(field) for field in fields[:8]]
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if name != "cpu" or len(ticks) < 5 or min(ticks) < 0:
+        return None
+    total = sum(ticks)
+    # Guest time is already included in user and nice. Idle and I/O wait
+    # are time the CPU did not spend executing work.
+    return {"busy_ticks": total - ticks[3] - ticks[4], "total_ticks": total}
+
+
 def snapshot():
     storage = shutil.disk_usage("/")
     memory = {}
@@ -45,4 +60,5 @@ def snapshot():
         "storage": {"used_bytes": storage.used, "total_bytes": storage.total},
         "memory": {"used_bytes": total - available, "total_bytes": total},
         "cpu_temp_c": cpu_temperature(),
+        "cpu": cpu_ticks(),
     }

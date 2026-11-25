@@ -182,7 +182,7 @@ export function createWorkspaceController({
           await leaving.catch(error => console.warn('退出操控页面时继续交接', error));
         }
         abort.signal.throwIfAborted();
-        if (restBefore) toast('正在准备进入页面，请稍候', false, { routine: true });
+        if (restBefore && visible === next) toast('正在准备进入页面，请稍候', false, { routine: true, source: 'workspace-transition', workspace: next });
         await pageRelease;
         abort.signal.throwIfAborted();
         // A switch can already be moving the robot. Keep its completion serialized;
@@ -219,8 +219,9 @@ export function createWorkspaceController({
       queued = null;
       phase = 'ready';
       show(next, readiness.warning, true, !!readiness.warning);
+      if (restFallback || readiness.warning) toast.clearSource('workspace-transition', next);
       if (restFallback) toast('休息未完成，已关闭策略并卸力');
-      else if (restBefore && !readiness.warning) toast('页面已就绪', false, { routine: true });
+      else if (restBefore && !readiness.warning) toast('页面已就绪', false, { routine: true, source: 'workspace-transition', workspace: next });
       onReady(next, restoring);
     } catch (error) {
       if (abort.signal.aborted) {
@@ -228,6 +229,7 @@ export function createWorkspaceController({
         return;
       }
       console.warn('页面切换失败', error);
+      toast.clearSource('workspace-transition', next);
       phase = 'failed';
       if (next === 'debug' || previous === 'debug') frames.clearDebug();
       frames.disconnect();

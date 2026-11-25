@@ -161,12 +161,12 @@ class ColorDetectionEngine:
                 "lab": _upper_median(self.samples_lab).tolist(),
             }
 
-    def _color_mask(self, lab, threshold):
-        lookup_key = (tuple(self.reference["lab"]), threshold)
+    def _color_mask(self, lab, threshold, reference):
+        lookup_key = (tuple(reference["lab"]), threshold)
         if lookup_key != self.lookup_key:
             delta = np.maximum(0.01, np.array([140.0, 60.0, 60.0]) * threshold)
             distance = (np.arange(256, dtype=np.float64)[:, None]
-                        - self.reference["lab"]) / delta
+                        - reference["lab"]) / delta
             self.precise_lookup = (distance * distance).reshape(256, 1, 3)
             self.lookup = self.precise_lookup.astype(np.float32)
             self.lookup_key = lookup_key
@@ -180,7 +180,7 @@ class ColorDetectionEngine:
             distance = cv2.transform(squared, self.sum_channels)
         return cv2.compare(distance, 1.0, cv2.CMP_LE)
 
-    def _detect(self, rgb, threshold):
+    def _detect(self, rgb, threshold, reference):
         height, width = rgb.shape[:2]
         detection_width = 320
         # JavaScript Math.round rounds a positive half upward, unlike round().
@@ -189,7 +189,7 @@ class ColorDetectionEngine:
                              interpolation=cv2.INTER_LINEAR)
         lab = cv2.cvtColor(resized, cv2.COLOR_RGB2Lab)
         blurred = cv2.GaussianBlur(lab, (3, 3), 0.8)
-        mask = self._color_mask(blurred, threshold)
+        mask = self._color_mask(blurred, threshold, reference)
         opened = cv2.dilate(cv2.erode(mask, self.kernel), self.kernel)
         contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL,
                                       cv2.CHAIN_APPROX_SIMPLE)
@@ -208,7 +208,7 @@ class ColorDetectionEngine:
                  box_width * scale_x, box_height * scale_y],
                 selected_area / (detection_width * detection_height))
 
-    def _detect_line(self, uyvy, rotation, threshold):
+    def _detect_line(self, uyvy, rotation, threshold, reference):
         height, width = uyvy.shape[:2]
         if rotation in (90, 270):
             width, height = height, width
@@ -227,7 +227,7 @@ class ColorDetectionEngine:
                 strip = cv2.resize(rgb, (detection_width, rows), interpolation=cv2.INTER_AREA)
                 lab = cv2.cvtColor(strip, cv2.COLOR_RGB2Lab)
                 blurred = cv2.GaussianBlur(lab, (3, 3), 0.8)
-                mask = self._color_mask(blurred, threshold)
+                mask = self._color_mask(blurred, threshold, reference)
                 opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.line_kernel)
                 contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 contour = max(contours, key=cv2.contourArea, default=None)
@@ -259,27 +259,33 @@ class ColorDetectionEngine:
             raise ValueError("raw frame byte length does not match header.bytes")
         threshold = self._configure(settings)
         uyvy = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 2)
+        progress = None
         if self.reference is None:
             self._sample(uyvy, header["captured_at_unix_us"])
             if self.reference is None:
-                return {
-                    "type": "sampling", "generation": self.generation,
-                    "width": width, "height": height,
-                    "point": self.point, "count": len(self.samples_rgb),
-                }
+                progress = {"point": self.point, "count": len(self.samples_rgb)}
+        # While replacing a color, publish a fresh detection for every sample
+        # using the existing reference until the new one is ready.
+        reference = self.reference or settings.get("previous_reference")
+        if reference is None:
+            return {
+                "type": "sampling", "generation": self.generation,
+                "width": width, "height": height, **progress,
+            }
         line = None
         if settings.get("line"):
-            line = self._detect_line(uyvy, header["rotate"], threshold)
+            line = self._detect_line(uyvy, header["rotate"], threshold, reference)
             bounds, area = None, None
         else:
             rgb = cv2.cvtColor(uyvy, cv2.COLOR_YUV2RGB_UYVY)
-            bounds, area = self._detect(rgb, threshold)
+            bounds, area = self._detect(rgb, threshold, reference)
         return {
             "type": "frame", "generation": self.generation,
             "width": width, "height": height,
             "captured_at_unix_us": header["captured_at_unix_us"],
             "took_ms": (time.perf_counter() - started) * 1000,
-            "reference": self.reference, "bounds": bounds, "area": area,
+            "reference": reference, "bounds": bounds, "area": area,
+            **({"sampling": progress} if progress is not None else {}),
             **({"line": line} if line is not None else {}),
         }
 

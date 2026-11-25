@@ -70,7 +70,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       const result = await request('command', {
         action: 'move_direct', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
       });
-      if (result.sent) document.getElementById('last-command').textContent = `ID ${data.id} · 目标编码器 ${data.raw} 步 · 已发送`;
+      if (result.sent) toast(`ID ${data.id} · 目标编码器 ${data.raw} 步 · 已发送`, false, { routine: true, source: 'servo-target' });
       return result;
     },
     onError: error => toast(error.message, true),
@@ -96,7 +96,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     onSent: data => {
       const row = rows.get(data.id);
       if (row) row.offsetError = '';
-      document.getElementById('last-command').textContent = `ID ${data.id} · 位置校正 ${data.value} · 已发送`;
+      toast(`ID ${data.id} · 位置校正 ${data.value} · 已发送`, false, { routine: true, source: 'servo-offset' });
     },
     onError: error => {
       const row = rows.get(activeOffset);
@@ -412,7 +412,6 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
         ? 'Home 目标已下发并读回' : command.action === 'release_unlocked'
           ? lockedIds.length === joints.length ? '全部舵机均已上锁，未执行卸力' : '未锁定舵机已卸力并读回'
           : '全部卸力已读回';
-      document.getElementById('last-command').textContent = message;
       toast(message);
       if (action !== 'release_all') onPose(result.targets);
     } catch (error) { toast(error.message, true); }

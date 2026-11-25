@@ -5,6 +5,13 @@
   const notify = () => window.dispatchEvent(new CustomEvent('console-view-change'));
   const colorPages = new Set(['target', 'pickup', 'line']);
   const isVisionPage = page => colorPages.has(page) || page === 'person';
+  const visionActions = {
+    target: ['开始追踪', '停止追踪'],
+    pickup: ['开始搬运', '停止搬运'],
+    line: ['开始巡线', '停止巡线'],
+    person: ['开始跟随', '停止跟随'],
+  };
+  const trackingButtons = [document.querySelector('#tracking-start'), document.querySelector('#tracking-stop')];
   fetch('/licenses/source-info').then(response => response.ok ? response.json() : null).then(data => {
     if (!/^[0-9a-f]{40}$/.test(data?.revision || '')) return;
     document.querySelectorAll('[data-studio-source]').forEach(link => {
@@ -121,8 +128,7 @@
   function placeSticks() {
     if (isVisionPage(body.dataset.consolePage) || (expanded.matches && body.dataset.consolePage === 'control')) {
       document.querySelector('.camera-column').append(sticks);
-      sticks.hidden = body.dataset.consolePage === 'person'
-        || (colorPages.has(body.dataset.consolePage) && document.documentElement.dataset.debugMode === 'off');
+      sticks.hidden = false;
     } else {
       sticksHome.before(sticks);
       sticks.hidden = !expanded.matches && body.dataset.operatorTab !== 'sticks';
@@ -147,6 +153,11 @@
     if (panelAttribute === 'data-console-panel' && isVisionPage(value)) {
       const button = document.querySelector(`button[data-page="${value}"]`);
       const title = button.querySelector('span').textContent;
+      trackingButtons.forEach((action, index) => {
+        const label = visionActions[value][index];
+        if (window.WonderduckLanguage) window.WonderduckLanguage.setLocalizedText(action, label);
+        else action.textContent = label;
+      });
       document.querySelector('#vision-heading').textContent = title;
       document.querySelector('#console-page-vision').setAttribute('aria-label', `${title}参数`);
       document.querySelector('#console-page-vision .section-icon use')
@@ -181,39 +192,45 @@
         window.dispatchEvent(new CustomEvent('console-page-changed'));
       }
     };
-    buttons.forEach((button, index) => {
+    buttons.forEach(button => {
       button.addEventListener('click', () => select(button));
       button.addEventListener('keydown', event => {
         const forward = attribute === 'data-page' ? 'ArrowDown' : 'ArrowRight';
         const backward = attribute === 'data-page' ? 'ArrowUp' : 'ArrowLeft';
         if (![backward, forward, 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
-          : (index + (event.key === forward ? 1 : -1) + buttons.length) % buttons.length;
-        buttons[next].focus();
-        select(buttons[next]);
+        const visibleButtons = buttons.filter(candidate => !candidate.hidden);
+        const index = visibleButtons.indexOf(button);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? visibleButtons.length - 1
+          : (index + (event.key === forward ? 1 : -1) + visibleButtons.length) % visibleButtons.length;
+        visibleButtons[next].focus();
+        select(visibleButtons[next]);
       });
     });
     selectGroup(attribute, panelAttribute, body.dataset[property]);
   }
   placeSticks();
-  let studioOrigin = null, latestFeedback = null;
+  let studioOrigin = null, activeStudioPage = null;
   const softwareUpdate = document.querySelector('#check-software-update');
   softwareUpdate.addEventListener('click', () => {
     if (!studioOrigin || body.dataset.consolePage !== 'system') return;
     softwareUpdate.disabled = true;
     window.parent.postMessage({ type: 'studio-software-update-request' }, studioOrigin);
   });
-  const pendingErrors = [];
   const feedbackNodes = ['notice', 'settings-status', 'connection', 'coordinated-status', 'maze-status', 'camera-status']
     .map(id => document.getElementById(id));
   const routineNodes = new Set(['connection', 'coordinated-status', 'maze-status', 'camera-status']);
   const previousStates = new Map();
   const previousErrors = new Map();
   function sendFeedback(text, error, node = null, routine = false) {
-    latestFeedback = { node, message: { type: 'studio-feedback', text, error, routine, source: node?.id || null } };
-    if (studioOrigin) window.parent.postMessage(latestFeedback.message, studioOrigin);
-    else if (error) pendingErrors.push(latestFeedback.message);
+    if (!activeStudioPage || activeStudioPage !== body.dataset.consolePage) return;
+    window.parent.postMessage({ type: 'studio-feedback', page: activeStudioPage, text, error,
+      routine, source: node?.id || null }, studioOrigin);
+  }
+  function pauseFeedback() {
+    activeStudioPage = null;
+    previousStates.clear();
+    previousErrors.clear();
   }
   const networkAnnouncement = document.querySelector('#network-announcement-enabled');
   let announcementRequestId = 0, announcementConfirmed = null, announcementTimer = null;
@@ -242,24 +259,22 @@
   });
   window.addEventListener('studio-preview', cancelNetworkAnnouncement);
   window.addEventListener('studio-leave', cancelNetworkAnnouncement);
+  window.addEventListener('studio-disconnect', cancelNetworkAnnouncement);
   function forwardFeedback(node) {
-    if (!node) return;
+    if (!node || !activeStudioPage || activeStudioPage !== body.dataset.consolePage) return;
+    if (node.id === 'camera-status' && activeStudioPage === 'system') return;
+    if (node.id === 'maze-status' && activeStudioPage !== 'maze') return;
+    if (node.id === 'coordinated-status' && !isVisionPage(activeStudioPage)) return;
     const visibleText = node.textContent.trim();
     const sourceText = (window.WonderduckLanguage?.sourceText(node) || visibleText).trim();
-    // This observer can run before the language observer, so translate from
-    // the source when forwarding feedback to the parent.
-    const text = window.WonderduckLanguage?.translate(sourceText) || visibleText;
-    if (!text) {
-      previousStates.delete(node);
-      previousErrors.delete(node);
-      if (latestFeedback?.node === node) latestFeedback = null;
-      if (node.id === 'settings-status' && studioOrigin) {
-        window.parent.postMessage({ type: 'studio-feedback-clear', source: node.id }, studioOrigin);
-      }
-      return;
-    }
     const error = node.classList.contains('error')
       || (node.id !== 'notice' && /失败|无效|不可用|中断|未连接|已断开|超时|错误/.test(sourceText));
+    if (!sourceText || (node.id === 'camera-status' && !error)) {
+      previousStates.delete(node);
+      if (!sourceText) previousErrors.delete(node);
+      window.parent.postMessage({ type: 'studio-feedback-clear', page: activeStudioPage, source: node.id }, studioOrigin);
+      return;
+    }
     const routine = routineNodes.has(node.id) || (node.id === 'settings-status' && !error
       && ['参数已修改，等待保存…', '正在自动保存…', '参数已自动保存'].includes(sourceText));
     const state = `${error}:${sourceText}`;
@@ -270,24 +285,25 @@
       if (error) previousErrors.set(node, sourceText);
       else if (node.id !== 'camera-status' && (node.id !== 'connection' || sourceText.includes('已连接'))) previousErrors.delete(node);
     }
-    sendFeedback(text, error, node, routine);
+    sendFeedback(sourceText, error, node, routine);
   }
   if (document.documentElement.dataset.studioEmbedded === 'true' && window.parent !== window) {
     for (const node of feedbackNodes) {
       if (node) {
-        forwardFeedback(node);
         new MutationObserver(() => forwardFeedback(node)).observe(node, {
           childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['class'],
         });
       }
     }
     window.addEventListener('console-feedback', event => {
-      if (typeof event.detail?.text === 'string' && event.detail.text && typeof event.detail.error === 'boolean') {
+      if (event.detail?.page === activeStudioPage && typeof event.detail.text === 'string'
+          && event.detail.text && typeof event.detail.error === 'boolean') {
         sendFeedback(event.detail.text, event.detail.error);
       }
     });
     window.addEventListener('vision-recognition-failed', event => {
-      if (event.detail?.source === 'object' && typeof event.detail.message === 'string' && event.detail.message) {
+      if (activeStudioPage === 'person' && event.detail?.source === 'object'
+          && typeof event.detail.message === 'string' && event.detail.message) {
         sendFeedback(event.detail.message, true);
       }
     });
@@ -301,38 +317,32 @@
     const pageAvailable = button && (body.dataset.tofEnabled !== 'false' || !button.hasAttribute('data-requires-tof'));
     if (event.data?.type === 'studio-workspace-preview') {
       if (!pageAvailable) return;
-      if (page !== 'system') cancelNetworkAnnouncement();
+      pauseFeedback();
       button.click();
+      window.dispatchEvent(new Event('studio-preview'));
     } else if (event.data?.type === 'studio-workspace') {
       if (!pageAvailable) return;
-      if (document.documentElement.dataset.studioEmbedded === 'true') {
-        const firstHandshake = studioOrigin === null;
-        studioOrigin = event.origin;
-        if (latestFeedback && firstHandshake) {
-          window.parent.postMessage(latestFeedback.message, studioOrigin);
-        }
-        if (firstHandshake) {
-          for (const message of pendingErrors) {
-            if (message !== latestFeedback?.message) window.parent.postMessage(message, studioOrigin);
-          }
-          pendingErrors.length = 0;
-        }
-      }
       button.click();
+      if (document.documentElement.dataset.studioEmbedded === 'true') {
+        studioOrigin = event.origin;
+        activeStudioPage = page;
+        forwardFeedback(document.querySelector('#camera-status'));
+      }
       window.dispatchEvent(new Event('studio-enter'));
       if (button && Number.isSafeInteger(event.data.requestId)) {
         window.parent.postMessage({ type: 'studio-workspace-ready', page: event.data.page,
           requestId: event.data.requestId }, event.origin);
       }
     } else if (event.data?.type === 'studio-leave' && Number.isSafeInteger(event.data.requestId)) {
+      pauseFeedback();
       window.dispatchEvent(new CustomEvent('studio-leave', { detail: event.data.requestId }));
     } else if (event.data?.type === 'studio-disconnect') {
+      pauseFeedback();
       window.dispatchEvent(new Event('studio-disconnect'));
     } else if (event.data?.type === 'studio-debug-mode' && typeof event.data.enabled === 'boolean') {
-      if (!event.data.enabled && document.documentElement.dataset.debugMode !== 'off'
-          && colorPages.has(body.dataset.consolePage)) notify();
-      document.documentElement.dataset.debugMode = event.data.enabled ? 'on' : 'off';
-      placeSticks();
+      const debugMode = event.data.enabled ? 'on' : 'off';
+      if (document.documentElement.dataset.debugMode !== debugMode) notify();
+      document.documentElement.dataset.debugMode = debugMode;
     } else if (event.data?.type === 'studio-theme' && ['light', 'dark'].includes(event.data.theme)) {
       document.documentElement.dataset.theme = event.data.theme;
     } else if (event.data?.type === 'studio-device-versions') {

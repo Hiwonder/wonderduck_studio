@@ -1,5 +1,5 @@
 export function bindMotionInput({
-  state, headStickAxes, isVisionPage, headStickAvailable, displayMode, sticksBlocked,
+  state, headStickAxes, headStickAvailable, displayMode, sticksBlocked,
   motionUnavailable, remindMotion, sendInput, triggerRanges,
 }) {
   const headStickKnob = [0, 0];
@@ -11,7 +11,7 @@ export function bindMotionInput({
     left: ['KeyW', 'KeyS', 'KeyA', 'KeyD'],
     right: ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'],
   };
-  const positionLocked = side => document.body.dataset.consolePage === 'control' && stickLocks.get(side)?.checked === true;
+  const positionLocked = side => stickLocks.get(side)?.checked === true;
   const axisLockTangent = Math.tan(20 * Math.PI / 180);
   const axisLockPad = pads.find(pad => pad.dataset.stick === 'left');
   const clamp = value => Math.max(-1, Math.min(1, value));
@@ -64,8 +64,7 @@ export function bindMotionInput({
     // A finger holding the joystick may prevent a second finger from generating a click.
     label.addEventListener('pointerdown', event => {
       handledTouchId = null;
-      if (document.body.dataset.consolePage !== 'control' || event.pointerType !== 'touch'
-        || event.isPrimary || input.disabled) return;
+      if (event.pointerType !== 'touch' || event.isPrimary || input.disabled) return;
       handledTouchId = event.pointerId;
       event.preventDefault();
       setStickLock(side, !input.checked);
@@ -121,7 +120,7 @@ export function bindMotionInput({
       if (side === 'head') {
         headStickAxes.fill(0);
         headStickKnob.fill(0);
-      } else if (event.type !== 'pointerup' || !(positionLocked(side) || (isVisionPage() && lock.checked))) {
+      } else if (event.type !== 'pointerup' || !positionLocked(side)) {
         lock.checked = false;
         state[`${side}_x`] = state[`${side}_y`] = 0;
       }
@@ -137,9 +136,8 @@ export function bindMotionInput({
   const tracked = new Set(Object.values(stickKeys).flat());
   const updateKeys = () => {
     for (const [side, [up, down, left, right]] of Object.entries(stickKeys)) {
-      if (document.body.dataset.consolePage === 'control' && knobs.get(side).parentElement.dataset.pointer) continue;
-      const holdsPosition = positionLocked(side) || (isVisionPage() && stickLocks.get(side).checked);
-      if (holdsPosition && !stickKeys[side].some(key => keys.has(key))) continue;
+      if (knobs.get(side).parentElement.dataset.pointer) continue;
+      if (positionLocked(side) && !stickKeys[side].some(key => keys.has(key))) continue;
       state[`${side}_y`] = (keys.has(up) ? 1 : 0) - (keys.has(down) ? 1 : 0);
       state[`${side}_x`] = (keys.has(right) ? 1 : 0) - (keys.has(left) ? 1 : 0);
     }
@@ -150,7 +148,7 @@ export function bindMotionInput({
     if (!state.active || sticksBlocked() || event.repeat) return;
     if (/^(INPUT|TEXTAREA|BUTTON|SELECT)$/.test(event.target.tagName)
       && !event.target.matches('[data-stick-lock]')) return;
-    const lockSide = document.body.dataset.consolePage === 'control' && !event.altKey && !event.ctrlKey && !event.metaKey
+    const lockSide = !event.altKey && !event.ctrlKey && !event.metaKey
       ? ({KeyQ: 'left', KeyE: 'right'})[event.code] : null;
     if (!tracked.has(event.code) && !lockSide) return;
     if (motionUnavailable()) { event.preventDefault(); remindMotion(); return; }
@@ -189,7 +187,8 @@ export function bindMotionInput({
   }
 
   function setDisabled(disabled) {
-    pads.forEach(pad => pad.setAttribute('aria-disabled', String(disabled)));
+    pads.forEach(pad => pad.setAttribute('aria-disabled',
+      String(disabled || (pad.dataset.stick === 'head' && !headStickAvailable()))));
     stickLocks.forEach(input => { input.disabled = disabled || motionUnavailable(); });
   }
 

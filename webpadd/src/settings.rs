@@ -51,6 +51,8 @@ pub(super) struct TrackingSettings {
     pub(super) reference_area: Option<f64>,
     #[serde(default = "default_line_speed")]
     pub(super) line_speed: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) line_target_x: Option<f64>,
     pub(super) deadzone: [f64; 2],
     pub(super) gains: [[f64; 3]; 2],
 }
@@ -62,19 +64,25 @@ fn default_line_speed() -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HeadTrackingSettings {
+    #[serde(default = "default_head_target_point")]
+    pub(super) target_point: [f64; 2],
     pub(super) deadzone: [f64; 2],
     pub(super) gains: [[f64; 3]; 2],
 }
 
+fn default_head_target_point() -> [f64; 2] {
+    proto::HEAD_TRACKING_DEFAULT_POINT
+}
+
 impl Default for HeadTrackingSettings {
     fn default() -> Self {
-        Self { deadzone: [0.1, 0.05], gains: [[0.5, 0.04, 0.01]; 2] }
+        Self { target_point: default_head_target_point(), deadzone: [0.1, 0.05], gains: [[0.5, 0.04, 0.01]; 2] }
     }
 }
 
 impl HeadTrackingSettings {
     pub(super) fn valid(&self) -> bool {
-        proto::HeadTrackingParams { pitch_position: None,
+        proto::valid_tracking_image_point(self.target_point) && proto::HeadTrackingParams { pitch_position: None,
             action: proto::MotionTrackingAction::Update,
             target: None,
             deadzone: self.deadzone,
@@ -88,6 +96,8 @@ impl HeadTrackingSettings {
 pub(super) struct CoordinatedTrackingSettings {
     pub(super) head_deadzone: [f64; 2],
     pub(super) head_gains: [[f64; 3]; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) head_target_point: Option<[f64; 2]>,
     pub(super) body_gains: [f64; 3],
     pub(super) final_point: [f64; 2],
     pub(super) final_tolerance: [f64; 2],
@@ -100,6 +110,7 @@ pub(super) struct CoordinatedTrackingSettings {
 impl Default for CoordinatedTrackingSettings {
     fn default() -> Self {
         Self {
+            head_target_point: Some(proto::HEAD_TRACKING_DEFAULT_POINT),
             head_deadzone: [0.1, 0.05],
             head_gains: [[0.5, 0.04, 0.01]; 2],
             body_gains: [0.2, 0.3, 1.0],
@@ -116,6 +127,7 @@ impl Default for CoordinatedTrackingSettings {
 impl CoordinatedTrackingSettings {
     pub(super) fn person_defaults() -> Self {
         Self {
+            head_target_point: None,
             head_deadzone: [0.05, 0.05],
             head_gains: [[2.0, 0.0, 0.1], [2.8, 0.2, 0.5]],
             body_gains: [2.0, 0.2, 1.0],
@@ -136,6 +148,7 @@ impl CoordinatedTrackingSettings {
             camera: None,
             head_deadzone: self.head_deadzone,
             head_gains: self.head_gains,
+            head_target_point: self.head_target_point,
             body_gains: self.body_gains,
             final_body_gains: self.body_gains,
             approach_linear_limit: None,
@@ -288,7 +301,7 @@ impl Default for Settings {
                 turn_initial_ms: 400, turn_final_ms: 600, restore_ms: 1000,
             },
             tracking: TrackingSettings {
-                reference_area: None, line_speed: default_line_speed(), deadzone: [0.1, 0.05],
+                reference_area: None, line_speed: default_line_speed(), line_target_x: Some(160.0), deadzone: [0.1, 0.05],
                 gains: [[0.5, 0.04, 0.01], [0.5, 0.04, 0.01]],
             },
             color_threshold: 0.5, color_reference: None, object_label: None,
@@ -319,6 +332,7 @@ impl Settings {
             action: proto::MotionTrackingAction::Update,
             target: None,
             line_speed: Some(self.tracking.line_speed),
+            line_target_x: self.tracking.line_target_x,
             reference_area: self.tracking.reference_area.unwrap_or(0.01),
             deadzone: self.tracking.deadzone,
             gains: self.tracking.gains,

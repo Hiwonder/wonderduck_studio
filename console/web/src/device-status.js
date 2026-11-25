@@ -28,6 +28,11 @@ export function formatResourceUsage(usage) {
     : `${Math.round(used / mib)} / ${Math.round(total / mib)} MiB`;
 }
 
+function usageFraction(used, total) {
+  return Number.isFinite(used) && Number.isFinite(total) && used >= 0 && total > 0 && used <= total
+    ? used / total : null;
+}
+
 export function hottestServoTemperature(state, elapsed = 0, connectionError = '') {
   if (state?.device_paused || !Array.isArray(state?.servos)) return null;
   const maxAge = state.individual_device_scan || Number.isFinite(state.device_report_age_ms)
@@ -50,6 +55,7 @@ export function createDeviceStatus({ toast }) {
   const get = id => document.getElementById(id);
   const rows = new Map();
   let lastStatusNotice = '', lastAuxNotice = '', resourceCpu = null, resourceCpuAt = 0, healthCpu = null;
+  let previousCpu = null;
   const cpuTemperature = () => resourceCpu !== null && performance.now() - resourceCpuAt < 10000
     ? resourceCpu : healthCpu;
   const number = (value, digits, suffix = '') => Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : '--';
@@ -189,12 +195,38 @@ export function createDeviceStatus({ toast }) {
     }
     return statuses;
   }
+  function renderHealth(health) {
+    const throttle = health?.cpu_throttle;
+    const throttled = throttle?.level > 0 || (throttle?.max_khz > 0 && throttle.khz < throttle.max_khz);
+    get('topbar-cpu-throttled').hidden = !throttled;
+  }
+
   function renderResources(resources) {
     setText('runtime-storage', formatResourceUsage(resources?.storage));
     setText('runtime-memory', formatResourceUsage(resources?.memory));
     resourceCpu = Number.isFinite(resources?.cpu_temp_c) ? resources.cpu_temp_c : null;
-    resourceCpuAt = performance.now();
+    const now = performance.now();
+    resourceCpuAt = now;
     setText('runtime-cpu', number(cpuTemperature(), 0, ' °C'));
+    setText('topbar-cpu-temperature', number(resourceCpu, 0, ' °C'));
+
+    const memory = resources?.memory;
+    const memoryFraction = usageFraction(memory?.used_bytes, memory?.total_bytes);
+    setText('topbar-memory-usage', memoryFraction === null ? '--' : number(memoryFraction * 100, 0, '%'));
+
+    const cpu = resources?.cpu;
+    const busy = cpu?.busy_ticks, total = cpu?.total_ticks;
+    let cpuFraction = null;
+    if (Number.isSafeInteger(busy) && Number.isSafeInteger(total) && usageFraction(busy, total) !== null) {
+      if (previousCpu && now - previousCpu.at <= 15000) {
+        cpuFraction = usageFraction(busy - previousCpu.busy, total - previousCpu.total);
+      }
+      previousCpu = { busy, total, at: now };
+    } else {
+      previousCpu = null;
+    }
+    setText('topbar-cpu-usage', cpuFraction === null ? '--' : number(cpuFraction * 100, 0, '%'));
   }
-  return { render, renderResources };
+
+  return { render, renderHealth, renderResources };
 }

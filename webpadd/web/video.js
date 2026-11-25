@@ -6,7 +6,7 @@
   const status = document.querySelector('#camera-status');
   const placeholder = document.querySelector('#camera-placeholder');
   const page = () => document.body.dataset.consolePage;
-  const wantsPreview = () => !stopped && page() !== 'system';
+  const wantsPreview = () => previewEnabled && !stopped && page() !== 'system';
   const endpoint = new URL(location.href);
   endpoint.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   endpoint.port = location.protocol === 'https:' ? '9445' : document.body.dataset.mediaPort;
@@ -18,6 +18,7 @@
   let retryTimer = null;
   let retryDelay = 1000;
   let stopped = false;
+  let previewEnabled = document.documentElement.dataset.studioEmbedded !== 'true' || window.parent === window;
   const fpsOutput = document.querySelector('#video-fps');
   let frameHandle = null;
   let frames = 0;
@@ -62,8 +63,9 @@
     fpsOutput.textContent = '0';
   }
 
-  function show(text, live = false) {
+  function show(text, live = false, error = false) {
     status.textContent = text;
+    status.classList.toggle('error', error);
     placeholder.textContent = text;
     placeholder.hidden = live;
   }
@@ -80,7 +82,7 @@
     session.socket.close();
     video.srcObject = null;
     if (!wantsPreview()) return;
-    show(reason);
+    show(reason, false, true);
     retryTimer = setTimeout(connect, retryDelay);
     retryDelay = Math.min(retryDelay * 2, 10000);
   }
@@ -304,8 +306,15 @@
     }
     if (current) disconnect(current, '图传已暂停');
     stopCounting();
+    show('');
   }
   window.addEventListener('console-page-changed', updatePreview);
+  const enablePreview = () => { previewEnabled = true; updatePreview(); };
+  const disablePreview = () => { previewEnabled = false; updatePreview(); };
+  window.addEventListener('studio-preview', enablePreview);
+  window.addEventListener('studio-enter', enablePreview);
+  window.addEventListener('studio-leave', disablePreview);
+  window.addEventListener('studio-disconnect', disablePreview);
   window.addEventListener('pagehide', () => {
     stopped = true;
     clearInterval(fpsTimer);

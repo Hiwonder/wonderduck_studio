@@ -10,8 +10,7 @@
 .network-section-heading h2{font-size:var(--heading-section)}.network-section-heading h3{font-size:var(--heading-subsection)}
 .network-direct-content{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-top:12px}
 .network-configuration{display:grid;gap:12px;margin:0;min-width:0}.network-configuration>div{display:grid;grid-template-columns:112px minmax(0,1fr);gap:12px;align-items:center;min-height:24px}
-.network-configuration dt,.network-connected{color:var(--muted)}.network-configuration dd{min-width:0;margin:0;font-weight:500;overflow-wrap:anywhere}.network-connected{min-width:0;text-align:right;overflow-wrap:anywhere}
-.network-connected strong{margin-left:6px;color:inherit;font-weight:600;overflow-wrap:anywhere}
+.network-configuration dt{color:var(--muted)}.network-configuration dd{min-width:0;margin:0;font-weight:500;overflow-wrap:anywhere}
 .network-lan form{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-top:14px}
 .network-form-fields{display:grid;gap:12px;flex:1;max-width:620px;min-width:0}
 .network-field{display:grid;grid-template-columns:112px minmax(0,1fr);align-items:center;gap:12px;color:var(--muted)}

@@ -272,7 +272,7 @@ mod tests {
         control.human_held = true;
         control.motion_tracking = Some(proto::MotionTrackingParams {
                 action: proto::MotionTrackingAction::Start, initial_pitch: Some(1820), target: None,
-                line_speed: Some(0.15), reference_area: 0.01, deadzone: [0.0; 2],
+                line_speed: Some(0.15), line_target_x: None, reference_area: 0.01, deadzone: [0.0; 2],
                 gains: [[0.0; 3]; 2],
         });
         control.receive(Input::default(), false, Instant::now());

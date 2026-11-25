@@ -65,11 +65,8 @@ export function createNetworkControls({ request, confirmAction, iconsRefresh, to
       if (listError && listError !== lastListError) toast(listError, true);
       lastListError = listError;
       element('mode').textContent = ({ station: '局域网模式', ap: '直连模式', disconnected: '未连接', unavailable: '无线网卡不可用' })[status.mode] || '未知';
-      const connectedSsid = status.mode === 'station' && status.ssid;
       const hotspotSsid = status.mode === 'ap' && status.ssid;
-      element('current').toggleAttribute('data-i18n-skip', !!connectedSsid);
       element('ap-name').toggleAttribute('data-i18n-skip', !!hotspotSsid);
-      element('current').textContent = connectedSsid || '未连接';
       element('ap-name').textContent = hotspotSsid || '未读取';
       element('hotspot-state').textContent = status.mode === 'ap' ? '已启用' : status.mode === 'unavailable' ? '状态未知' : '未启用';
       element('wireless-ip').textContent = status.wireless_addresses.join('、') || '未分配';
@@ -87,7 +84,7 @@ export function createNetworkControls({ request, confirmAction, iconsRefresh, to
         if (text !== lastStatusError) toast(text, true);
         lastStatusError = text;
         element('mode').textContent = '状态不可用';
-        for (const id of ['current', 'wireless-ip', 'wired-ip', 'band', 'bluetooth-address', 'ap-name', 'hotspot-state']) element(id).textContent = '--';
+        for (const id of ['wireless-ip', 'wired-ip', 'band', 'bluetooth-address', 'ap-name', 'hotspot-state']) element(id).textContent = '--';
         if (requestListVersion === listVersion) {
           element('empty').textContent = '尚无扫描结果';
           renderNetworks([]);
@@ -184,6 +181,7 @@ export function createNetworkControls({ request, confirmAction, iconsRefresh, to
       active = value;
       clearInterval(timer);
       if (active) {
+        lastStatusError = lastListError = '';
         refresh();
         timer = setInterval(refresh, 10000);
       } else {

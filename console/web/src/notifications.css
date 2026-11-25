@@ -1,18 +1,41 @@
-body #toast {
+#toast {
+  position: fixed;
+  z-index: 20;
   top: 50%;
-  bottom: auto;
   left: 50%;
   transform: translate(-50%, -50%);
+  width: max-content;
+  max-width: min(600px, calc(100vw - 32px));
   max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 4px;
   overflow: auto;
-  pointer-events: auto;
-  text-align: center;
+  pointer-events: none;
+}
+
+.toast-row {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 12px;
+  padding: 9px 12px;
+  border-radius: 5px;
+  background: #253b30;
+  color: #fff;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  box-shadow: 0 3px 12px #0002;
+  pointer-events: auto;
 }
 
-#toast-close, #workspace-notice-close {
+.toast-message { flex: 1; min-width: 0; }
+.toast-row.error { background: #983e38; }
+.toast-row[data-routine] { pointer-events: none; }
+
+.toast-close, #workspace-notice-close {
   flex: none;
   min-height: 24px;
   width: 24px;
@@ -22,15 +45,7 @@ body #toast {
   color: inherit;
   font-size: 20px;
   line-height: 1;
+  pointer-events: auto;
 }
 
-body.studio-shell { --notification-sidebar-width: 176px; }
-body.studio-shell.sidebar-collapsed { --notification-sidebar-width: 52px; }
-body.studio-shell #toast {
-  left: calc(50% + var(--notification-sidebar-width) / 2);
-  max-width: min(600px, calc(100vw - var(--notification-sidebar-width) - 32px));
-}
-
-@media (max-width: 720px) {
-  body.studio-shell { --notification-sidebar-width: 52px; }
-}
+.toast-close:hover { background: #ffffff20; }

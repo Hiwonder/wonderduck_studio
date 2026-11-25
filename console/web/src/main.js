@@ -13,7 +13,8 @@ import './calibration-view.css';
 import './notifications.css';
 import './interaction.css';
 import { createDeviceStatus } from './device-status.js';
-import { createConnectionStatus, createLowVoltageIndicator, createNotifications, createSidebar, displayVoltage, lowVoltageWarning, renderSidebarCpu, renderSidebarVoltage } from './sidebar.js';
+import { createConnectionStatus, createLowVoltageIndicator, createSidebar, displayVoltage, lowVoltageWarning, renderTopbarVoltage } from './sidebar.js';
+import { createNotifications } from './notifications.js';
 import { createServoPanel } from './servo-panel.js';
 import { createServoDebugMode } from './servo-debug-mode.js';
 import { createActionEditor } from './action-editor.js';
@@ -76,7 +77,13 @@ const liveServoFresh = servo => deviceFresh(servo, state, sampleElapsed(), conne
 
 const setConnectionStatus = createConnectionStatus($);
 const setSidebarOpen = createSidebar($, iconsRefresh);
-const toast = createNotifications($);
+const toast = createNotifications($('toast'));
+const workspaceToast = workspace => (message, error, options) => {
+  if (document.body.dataset.workspace === workspace) return toast(message, error, { ...options, workspace });
+};
+const actionToast = workspaceToast('action');
+const statusToast = workspaceToast('status');
+let displayedWorkspace;
 const updateLowVoltage = createLowVoltageIndicator();
 const confirmRelease = createReleaseConfirmation();
 
@@ -100,7 +107,11 @@ function updateCameraPreview(page = workspaces.current) {
   const enabled = available && $('camera-enabled').checked;
   $('camera-preview').hidden = !enabled;
   if (!cameraPreview) return;
-  if (enabled && info) cameraPreview.start(); else cameraPreview.stop();
+  if (enabled && info) cameraPreview.start();
+  else {
+    cameraPreview.stop();
+    toast.clearSource('camera-status', 'status');
+  }
 }
 $('camera-enabled').addEventListener('change', () => updateCameraPreview());
 
@@ -213,7 +224,7 @@ function releaseControl() {
 }
 
 const workspaceVisuals = createWorkspaceVisuals({
-  request, confirmAction, toast,
+  request, confirmAction, toast: workspaceToast('calibration'),
   context: () => ({
     info, state, connectionError, elapsed: sampleElapsed(), selected, joints: info?.joints || [],
     cameraExpanded: cameraPreview?.expanded,
@@ -229,13 +240,13 @@ const workspaceVisuals = createWorkspaceVisuals({
 });
 
 const servoPanel = createServoPanel({
-  request, toast, iconsRefresh, confirmRelease,
+  request, toast: actionToast, iconsRefresh, confirmRelease,
   context: () => ({ info, state, armed, fresh: stateFresh(), elapsed: sampleElapsed(), connectionError,
     active: !info?.studio || (workspaces.current === 'action' && workspaces.ready) }),
   select: ids => { selected = ids; highlightSelectedJoints(); },
   onPose: workspaceVisuals.alignPoseToPlatform,
 });
-const actionEditor = createActionEditor({ request, toast, confirmAction, iconsRefresh, servoPanel,
+const actionEditor = createActionEditor({ request, toast: actionToast, confirmAction, iconsRefresh, servoPanel,
   context: () => ({ info, state, armed, fresh: stateFresh(), connectionError }) });
 setInterval(renewControl, 1000);
 
@@ -276,8 +287,8 @@ function renderImuComparison() {
 }
 
 const deviceStatus = createDeviceStatus({ toast });
-const networkControls = createNetworkControls({ request, confirmAction, iconsRefresh, toast });
-const modelControls = createModelControls({ request, requestHeaders, refreshSession, confirmAction, toast,
+const networkControls = createNetworkControls({ request, confirmAction, iconsRefresh, toast: workspaceToast('network') });
+const modelControls = createModelControls({ request, requestHeaders, refreshSession, confirmAction, toast: workspaceToast('models'),
   supportsUpdates: () => !!info?.supports_model_update_resume,
   supportsOnline: () => !!info?.supports_model_update_resume && !!info?.supports_online_models
     && !!info?.supports_online_model_rest && !!info?.supports_model_version_gate });
@@ -289,7 +300,7 @@ let controlActionActive = false, controlActionStarting = false, controlActionPol
 let controlActionTimer = null;
 let controlActionGeneration = 0, controlActionRunId = null, controlActionPageHidden = false;
 let controlActionStartSent = false, controlActionSettled = Promise.resolve();
-servoDebugMode = createServoDebugMode({ request, toast, confirmAction,
+servoDebugMode = createServoDebugMode({ request, toast: actionToast, confirmAction,
   context: () => ({ info, state, armed, workspace: workspaces.current, switchingWorkspace: workspaces.busy,
     ready: !info?.studio || workspaces.ready }) });
 const servoToolbar = document.querySelector('.servo-section .section-bar');
@@ -609,7 +620,6 @@ $('sidebar-release').addEventListener('click', async () => {
       if (controlActionStarting) settled.then(resumeControl); else resumeControl();
     }
     const message = result.already_released ? '校准前已确认关节卸力' : '关节已卸力并读回确认';
-    $('last-command').textContent = message;
     toast(message);
   } catch (error) {
     if (hadAction && controlActionRunId) {
@@ -630,23 +640,26 @@ $('sidebar-release').addEventListener('click', async () => {
 
 window.addEventListener('message', event => {
   const debug = $('debug-frame'), control = $('control-workspace');
-  if (event.origin === location.origin && event.source === debug.contentWindow && workspaces.current === 'debug') {
+  const page = document.body.dataset.workspace;
+  if (page === 'debug' && event.origin === location.origin && event.source === debug.contentWindow) {
     if (event.data?.type === 'studio-servo-selected' && Number.isInteger(event.data.id)) {
       selected = [event.data.id];
       highlightSelectedJoints();
     } else if (event.data?.type === 'studio-debug-size' && Number.isFinite(event.data.height)
         && window.matchMedia('(max-width:999px)').matches) {
-      debug.style.height = `${Math.ceil(event.data.height)}px`;
+      debug.style.setProperty('--debug-frame-content-height', `${Math.ceil(event.data.height)}px`);
     } else if (event.data?.type === 'studio-feedback' && typeof event.data.text === 'string' && typeof event.data.error === 'boolean') {
-      toast(event.data.text, event.data.error, { routine: event.data.routine === true });
+      toast(event.data.text, event.data.error, { routine: event.data.routine === true,
+        source: typeof event.data.source === 'string' ? event.data.source : null, workspace: 'debug' });
     }
-  } else if (isControlWorkspace(workspaces.current) && control.src && control.src !== 'about:blank'
+  } else if (!control.hidden && isControlWorkspace(page) && workspaces.current === page && control.src && control.src !== 'about:blank'
       && event.source === control.contentWindow && event.origin === new URL(control.src).origin) {
     if (event.data?.type === 'studio-feedback' && typeof event.data.text === 'string' && typeof event.data.error === 'boolean') {
+      if (event.data.page !== page) return;
       toast(event.data.text, event.data.error, { routine: event.data.routine === true,
-        source: event.data.source === 'settings-status' ? 'control:settings-status' : null });
-    } else if (event.data?.type === 'studio-feedback-clear' && event.data.source === 'settings-status') {
-      toast.clearRoutine('control:settings-status');
+        source: typeof event.data.source === 'string' ? event.data.source : null, workspace: page });
+    } else if (event.data?.type === 'studio-feedback-clear' && typeof event.data.source === 'string') {
+      if (event.data.page === page) toast.clearSource(event.data.source, page);
     } else if (event.data?.type === 'studio-action-request') {
       controlAction(event);
     } else if (event.data?.type === 'studio-network-announcement-request') {
@@ -708,6 +721,12 @@ const workspaces = createWorkspaceController({
     }
   },
   onPreview(page) {
+    if (displayedWorkspace !== page) {
+      if (displayedWorkspace) toast.clearWorkspace(displayedWorkspace);
+      displayedWorkspace = page;
+      if (page !== 'network') networkControls.setActive(false);
+      if (page !== 'models') modelControls.setActive(false);
+    }
     updateCameraPreview(page);
     if (info) workspaceVisuals.preview(page);
   },
@@ -724,7 +743,7 @@ const workspaces = createWorkspaceController({
       if (page === 'status') request('state').catch(error => console.debug('设备状态采集恢复失败', error.message));
     } else {
       if (page === 'action' && info?.studio && !info.readonly) {
-        actionEditor.refreshGroups().catch(error => toast(error.message, true));
+        actionEditor.refreshGroups().catch(error => actionToast(error.message, true));
       }
       if (window.matchMedia('(max-width:720px)').matches) setSidebarOpen(false);
     }
@@ -813,12 +832,12 @@ function renderState() {
     ? state.servos.filter(servo => liveServoFresh(servo)).map(servo => servo.voltage)
     : [];
   const lowVoltage = updateLowVoltage(state.robot?.low_voltage, measuredVoltages, performance.now());
-  renderSidebarCpu($, connectionError ? null : state.robot?.health);
+  deviceStatus.renderHealth(connectionError ? null : state.robot?.health);
   if (!(handoff && !connectionError && ((state.online && !fresh) || waitingForFirstSample(state)))) {
     const voltage = displayVoltage(state, sampleElapsed(), connectionError);
     const calibrating = !!state.calibration?.active || !!state.head_calibration?.active;
     const warning = lowVoltageWarning(lowVoltage);
-    renderSidebarVoltage($, { calibrating, voltage, fresh: sidebarFresh, lowVoltage });
+    renderTopbarVoltage($, { calibrating, voltage, fresh: sidebarFresh, lowVoltage });
     if (warning && !lowVoltageActive && performance.now() - lastLowVoltageNotice >= 10000) {
       lastLowVoltageNotice = performance.now();
       toast(lowVoltage?.display_only ? '电压过低，请及时充电'
@@ -918,7 +937,7 @@ async function poll() {
       previous_request_ms: Math.round(stateRequestDuration), previous_render_ms: Math.round(stateRenderDuration),
       backend_status: state?.aux_imu?.status, backend_age_ms: state?.aux_imu?.age_ms });
   }
-  if (workspaces.current === 'status' && !document.hidden && !resourceRequestPending && started >= nextResourceRequest) {
+  if (!document.hidden && !resourceRequestPending && started >= nextResourceRequest) {
     resourceRequestPending = true;
     nextResourceRequest = started + 5000;
     request('resources').then(data => deviceStatus.renderResources(data))
@@ -1037,15 +1056,13 @@ function applyMode() {
   workspaceVisuals.setHeadAvailable(!headChannel.hidden);
   for (const element of document.querySelectorAll('.studio-only')) element.hidden = !info.studio;
   document.querySelector('[data-workspace="maze"]').hidden = !info.studio || info.tof_enabled === false;
-  for (const page of ['pickup', 'line']) {
-    document.querySelector(`[data-workspace="${page}"]`).hidden = !info.studio || !info.workspaces?.includes(page);
-  }
+  document.querySelector('[data-workspace="line"]').hidden = !info.studio || !info.workspaces?.includes('line');
 }
 
 async function init() {
   try {
     info = await request('info'); token = info.token;
-    const onCameraError = message => toast(message, true);
+    const onCameraError = message => statusToast(message, true, { source: 'camera-status' });
     cameraPreview = info.studio ? createMediaPreview({ onError: onCameraError })
       : createCameraPreview({ request, headers: requestHeaders, onError: onCameraError });
     updateCameraPreview();

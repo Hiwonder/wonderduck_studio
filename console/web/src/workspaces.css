@@ -14,16 +14,59 @@
 .sidebar .sidebar-footer #status-dot{position:absolute;right:-1px;bottom:-1px;flex:none;width:8px;height:8px;margin:0;border:1px solid #fff;box-shadow:none}
 html[data-theme=dark] .sidebar .sidebar-footer #status-dot{border-color:#1a2b36}
 .sidebar .sidebar-footer #demo-badge{margin-left:-4px;padding:2px;font-size:10px}
-.sidebar .sidebar-meta{height:54px;min-height:54px;overflow-y:auto;visibility:visible;transition:visibility 0s linear 240ms;-webkit-user-select:none;user-select:none;cursor:default}
-.sidebar-telemetry{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:39px;padding:8px 10px 0;border-top:1px solid var(--line);color:var(--muted);font-size:12px;white-space:nowrap}
-.sidebar-voltage,.sidebar-cpu{display:flex;align-items:center;gap:6px}
-.sidebar-cpu{flex-direction:column;gap:0;font-variant-numeric:tabular-nums}
-#sidebar-cpu-throttled{color:var(--red);font-size:10px;font-weight:600}
-.sidebar-collapsed .sidebar-telemetry{flex-direction:column;justify-content:center;gap:4px;padding:8px 0 0;font-size:10px;line-height:12px}
-.sidebar-voltage svg,.sidebar-footer-button svg{flex:none;width:17px;height:17px}
-.sidebar-voltage output{font-variant-numeric:tabular-nums}
-.sidebar-voltage.low-voltage,#runtime-battery.low-voltage{color:var(--red);font-weight:600}
-.sidebar-collapsed .sidebar-voltage{flex-direction:column;justify-content:center;gap:0}
+.sidebar-footer-button svg{flex:none;width:17px;height:17px}
+.studio-shell {
+  --topbar-inset: max(2px, env(safe-area-inset-top));
+  --topbar-height: 22px;
+}
+.topbar-telemetry {
+  position: fixed;
+  top: var(--topbar-inset);
+  right: max(8px, env(safe-area-inset-right));
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 16px);
+  height: var(--topbar-height);
+  padding-block: 2px;
+  pointer-events: none;
+  white-space: nowrap;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.topbar-battery, .topbar-metric {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  line-height: 1.15;
+}
+.topbar-battery svg { width: 16px; height: 16px; }
+.topbar-metric > span { color: var(--muted); font-size: 11px; }
+.topbar-metric > span:has(> #topbar-cpu-throttled) {
+  position: relative;
+}
+.topbar-telemetry output {
+  inline-size: 5ch;
+}
+#topbar-cpu-temperature { inline-size: 6ch; }
+#topbar-voltage { inline-size: 4.5em; }
+.topbar-battery.low-voltage, #runtime-battery.low-voltage { color: var(--red); font-weight: 600; }
+#topbar-cpu-throttled {
+  position: absolute;
+  inset-inline-end: -2px;
+  top: -2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--red);
+}
+@media (max-width: 420px) {
+  .topbar-telemetry { gap: 6px; font-size: 11px; }
+  .topbar-battery svg { width: 14px; height: 14px; }
+  .topbar-metric > span { font-size: 10px; }
+}
 .sidebar-actions{display:flex;flex-direction:column;gap:4px;padding-top:8px;border-top:1px solid var(--line)}
 .sidebar-footer-button{width:100%;min-height:36px;justify-content:flex-start;gap:10px;padding:8px 10px;border:0;background:transparent;color:var(--muted);font-size:13px}
 .sidebar-footer-button:hover{background:#edf2ef;color:#203b2d}
@@ -34,13 +77,10 @@ html[data-theme=dark] .sidebar-footer-button:hover{background:#344852;color:#f2f
 .sidebar-debug-mode{justify-content:space-between}
 .sidebar-collapsed .sidebar-debug-mode{padding-inline:2px}
 .sidebar-collapsed .sidebar .sidebar-footer .connection{justify-content:center;padding:0}
-.sidebar #last-command.error{color:var(--red)}
-.sidebar-collapsed .sidebar .sidebar-meta{display:grid;visibility:hidden;transition:none}
 .sidebar{min-width:0;overflow-x:hidden;transition:width 240ms ease,padding 240ms ease}
 /* Keep the icon independent of the animated sidebar padding. */
 .sidebar .brand-mark{position:absolute;left:14px;top:24.5px}
 .sidebar .brand-copy{margin-left:38px}
-body.studio-shell #toast{transition:left 240ms ease,max-width 240ms ease}
 @media(min-width:721px){
   body.studio-shell{transition:grid-template-columns 240ms ease}
   .sidebar{width:100%;overflow-x:hidden}
@@ -56,8 +96,12 @@ body.studio-shell #toast{transition:left 240ms ease,max-width 240ms ease}
 #calibration-workspace{background:#f7f9f8;contain:paint}
 html[data-theme=dark] #calibration-workspace{background:#11161b}
 #control-workspace,#debug-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:transparent}
-.workspace-notice{position:fixed;z-index:30;top:12px;right:20px;display:flex;align-items:center;gap:10px;max-width:min(580px,calc(100vw - 40px));padding:9px 13px;border-radius:5px;background:#755d22;color:#fff;font-size:13px;box-shadow:0 2px 8px #0003}
+.workspace-notice{position:fixed;z-index:30;top:32px;right:20px;display:flex;align-items:center;gap:10px;max-width:min(580px,calc(100vw - 40px));padding:9px 13px;border-radius:5px;background:#755d22;color:#fff;font-size:13px;box-shadow:0 2px 8px #0003}
 body:is([data-workspace=control],[data-workspace=target],[data-workspace=pickup],[data-workspace=line],[data-workspace=person],[data-workspace=maze],[data-workspace=system]) main{height:100dvh}
+body[data-workspace=debug] > main {
+  --debug-top: calc(var(--topbar-inset) + var(--topbar-height) + 6px);
+  padding-top: var(--debug-top);
+}
 #debug-workspace{overflow:hidden;padding:0;background:#f7f9f8}
 html[data-theme=dark] #debug-workspace{background:#11161b}
 #control-workspace.frame-clearing,#debug-frame.frame-clearing{visibility:hidden}
@@ -167,6 +211,7 @@ html[data-theme=dark] .calibration-source{background:#27343d}
 html[data-theme=dark] .calibration-source button[aria-pressed=true]{background:#f3a343;color:#24180d}
 html[data-theme=dark] .sensor-chart{--calibration-x:#75b4ff;--calibration-y:#f2cb52;--calibration-z:#65d89a}
 @media(min-width:1000px){
+  body[data-workspace=debug] .telemetry-layout{height:calc(100dvh - var(--debug-top) - 12px)}
   body[data-workspace=action] .telemetry-layout{grid-template-rows:minmax(0,1fr);grid-template-areas:"viewer servos action"}
   body:not([data-workspace=action]) .telemetry-layout{grid-template-columns:minmax(260px,.65fr) minmax(0,1.35fr);grid-template-rows:minmax(0,1fr);grid-template-areas:"viewer workspace"}
   .workspace-content{grid-area:workspace;height:100%}
@@ -242,8 +287,9 @@ html[data-theme=dark] .sensor-chart{--calibration-x:#75b4ff;--calibration-y:#f2c
   html:has(body[data-workspace=status]){scrollbar-width:none}
   html:has(body[data-workspace=status])::-webkit-scrollbar{display:none}
   .workspace-content{overflow:visible}
+  body[data-workspace=debug] > .topbar-telemetry{position:absolute}
   #debug-workspace{overflow:visible}
-  #debug-frame{height:1100px;min-height:0}
+  #debug-frame{height:var(--debug-frame-content-height,1100px)}
   .status-table-scroll{max-height:520px}
 }
 @media(max-width:720px){
@@ -253,15 +299,13 @@ html[data-theme=dark] .sensor-chart{--calibration-x:#75b4ff;--calibration-y:#f2c
   .sidebar .workspace-nav{width:100%}
   .sidebar .workspace-nav button{width:34px;min-height:40px;padding:8px;justify-content:center}
   .sidebar .workspace-nav span{display:none}
-  .sidebar .sidebar-meta{display:grid;visibility:hidden}
   .sidebar-open .sidebar #sidebar-content{align-items:stretch}
   .sidebar-open .sidebar .workspace-nav button{width:100%;padding:8px 10px;justify-content:flex-start}
   .sidebar-open .sidebar .workspace-nav span{display:block}
-  .sidebar-open .sidebar .sidebar-meta{visibility:visible}
   #calibration-workspace .workspace-heading{align-items:flex-start;flex-wrap:wrap}
   .calibration-charts{grid-template-columns:minmax(0,1fr)}
   .sensor-chart canvas{height:280px}
 }
 @media(prefers-reduced-motion:reduce){
-  body.studio-shell,.sidebar,.sidebar .sidebar-meta,body.studio-shell #toast{transition:none}
+  body.studio-shell,.sidebar{transition:none}
 }

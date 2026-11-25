@@ -15,6 +15,7 @@ import { createParameterSave } from '../parameter-save.js';
 import { createServoControls } from '../servo-controls.js';
 import { createReleaseConfirmation } from '../release-confirm.js';
 import { friendlyErrorMessage } from '../user-messages.js';
+import { createNotifications } from '../notifications.js';
 import { setLocalizedAttribute, setLocalizedText, translate } from '../../../../webpadd/web/language.js';
 
 const $ = (id) => document.getElementById(id);
@@ -88,34 +89,17 @@ $('sidebar-scrim').addEventListener('click', () => setSidebarOpen(false));
 document.addEventListener('keydown', event => { if (event.key === 'Escape') setSidebarOpen(false); });
 window.matchMedia('(max-width:720px)').addEventListener('change', () => setSidebarOpen(false));
 
-let forwardedNotice = null, forwardedStatus = null;
-function toast(message, error = false) {
-  if (message === '工作区已切换，请重新操作') return;
-  if (error) message = friendlyErrorMessage(message);
-  if (window.parent !== window) {
-    forwardedNotice = { type: 'studio-feedback', text: message, error };
-    window.parent.postMessage(forwardedNotice, location.origin);
-    return;
-  }
-  $('toast-message').textContent = message;
-  $('toast').classList.toggle('error', error);
-  $('toast').hidden = false;
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => $('toast').hidden = true, error ? 7000 : 3000);
+const showNotification = createNotifications($('toast'));
+let forwardedNotice = null;
+function toast(message, error = false, { routine = false, source = null } = {}) {
+  if (!message || message === '工作区已切换，请重新操作') return;
+  if (window.parent === window) return showNotification(message, error, { routine, source });
+  forwardedNotice = { type: 'studio-feedback', text: message, error, routine, source };
+  window.parent.postMessage(forwardedNotice, location.origin);
 }
-$('toast-close').addEventListener('click', () => { clearTimeout(toast.timer); $('toast').hidden = true; });
-let lastEmbeddedCommand = $('last-command').textContent;
-new MutationObserver(() => {
-  const message = $('last-command').textContent;
-  if (window.parent === window || !message || message === lastEmbeddedCommand) return;
-  lastEmbeddedCommand = message;
-  forwardedStatus = { type: 'studio-feedback', text: message, error: false, routine: true };
-  window.parent.postMessage(forwardedStatus, location.origin);
-}).observe($('last-command'), { childList: true, characterData: true, subtree: true });
 window.addEventListener('message', event => {
   if (event.source !== window.parent || event.origin !== location.origin
       || event.data?.type !== 'studio-workspace' || event.data.page !== 'debug') return;
-  if (forwardedStatus) window.parent.postMessage(forwardedStatus, location.origin);
   if (forwardedNotice) window.parent.postMessage(forwardedNotice, location.origin);
   reportEmbeddedSize();
 });
@@ -176,8 +160,7 @@ async function command(action, data = {}) {
     if (!['registers', 'read_raw'].includes(action)) {
       const pose = action === 'center_all' ? '中位 2048' : action === 'home_all' ? 'Home' : null;
       const message = result.verified ? (pose ? `${pose} 目标已下发并读回` : '寄存器读回一致') : '部分卸力未确认';
-      $('last-command').textContent = `${pose ? `${Object.keys(result.targets).length} 个舵机` : `ID ${id}`} · ${message}`;
-      toast(message, !result.verified);
+      toast(`${pose ? `${Object.keys(result.targets).length} 个舵机` : `ID ${id}`} · ${message}`, !result.verified);
       if (!result.verified) console.warn('部分卸力未确认', result.results);
     }
     return result;
@@ -261,7 +244,7 @@ const liveTarget = createLinkedTarget({
     const result = await request('command', {
       action: 'move_direct', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
     });
-    if (result.sent) $('last-command').textContent = `ID ${data.id} · 目标编码器 ${data.raw} 步 · 已发送`;
+    if (result.sent) toast(`ID ${data.id} · 目标编码器 ${data.raw} 步 · 已发送`, false, { routine: true, source: 'servo-target' });
     return result;
   },
   onError: error => { targetInitialized = false; toast(error.message, true); },
@@ -284,7 +267,7 @@ const liveParameter = createLiveParameter({
       const cell = document.querySelector(`#parameter-rows tr[data-address="${data.address}"]`)?.children[3];
       if (cell) { cell.textContent = data.value; cell.title = cell.textContent; }
     }
-    $('last-command').textContent = `ID ${data.id} · 位置校正 ${data.value} · 已读回`;
+    toast(`ID ${data.id} · 位置校正 ${data.value} · 已读回`, false, { routine: true, source: 'servo-offset' });
   },
   onComplete: () => { parameterDraft = null; queueParameterRead(1200); },
   onError: error => { parameterDraft = null; queueParameterRead(); toast(error.message, true); },

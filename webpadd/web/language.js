@@ -23,7 +23,7 @@ const ENGLISH = new Map(Object.entries({
   '有线 IP': 'Wired IP', '无线频段': 'Wi-Fi band', '蓝牙地址': 'Bluetooth address',
   '当前网络状态': 'Current network status', '直连模式': 'Hotspot mode', '热点名称': 'Hotspot name',
   '热点密码': 'Hotspot password', '不可读取': 'Unavailable', '启用设备热点': 'Enable hotspot',
-  '局域网模式': 'Wi-Fi network', '当前网络': 'Current network', 'Wi-Fi 名称': 'Wi-Fi name',
+  '局域网模式': 'Wi-Fi network', 'Wi-Fi 名称': 'Wi-Fi name',
   'Wi-Fi 密码': 'Wi-Fi password', '输入或选择 Wi-Fi 名称': 'Enter or select a Wi-Fi network',
   '显示密码': 'Show password', '隐藏密码': 'Hide password', '连接网络': 'Connect', '附近 Wi-Fi': 'Nearby Wi-Fi',
   'Wi-Fi 列表': 'Wi-Fi networks', '扫描附近 Wi-Fi': 'Scan for Wi-Fi networks', '扫描': 'Scan',
@@ -38,7 +38,7 @@ const ENGLISH = new Map(Object.entries({
   'I²C3 · 传感器坐标': 'I²C3 · sensor frame', '角速度 XYZ': 'Angular velocity XYZ',
   '重力方向 XYZ': 'Gravity direction XYZ', '重力 XYZ': 'Gravity XYZ', '四元数 WXYZ': 'Quaternion WXYZ',
   '实时设备数据': 'Live device data', '安全状态': 'Safety status', '最高舵机温度': 'Highest servo temperature',
-  'CPU 温度': 'CPU temperature', '已降频': 'Throttled', '存储占用': 'Storage', '内存占用': 'Memory',
+  'CPU 温度': 'CPU temperature', 'CPU 占用': 'CPU load', '已降频': 'Throttled', '存储占用': 'Storage', '内存占用': 'Memory', '内存': 'Memory',
   '系统根分区已用 / 总量': 'Used / total root filesystem storage', '总内存减去可用内存 / 总量': 'Used / total memory',
   '舵机状态': 'Servo status', '编码器': 'Encoder', '角度': 'Angle', '速度': 'Speed', '负载': 'Load',
   '电压': 'Voltage', '温度': 'Temperature', '状态': 'Status', '位置 PID': 'Position PID',
@@ -111,8 +111,8 @@ const ENGLISH = new Map(Object.entries({
   '左摇杆': 'Left joystick', '右摇杆': 'Right joystick', '移动': 'Move', '转向': 'Turn',
   '头部摇杆，上下俯仰，左右转向': 'Head joystick, pitch up/down and turn left/right',
   '拾取搬运': 'Pickup and carry', '自主巡线': 'Autonomous line following',
-  '搬运阶段配置': 'Pickup and carry stages', '动作前': 'Before action', '动作后': 'After action',
-  '开始两段搬运': 'Start both stages', '请先设置动作前的到位动作': 'Set the before-action stage’s arrival action first',
+  '搬运目标': 'Pickup and placement targets', '拾取目标': 'Pickup target', '放置目标': 'Placement target',
+  '开始两段搬运': 'Start both stages', '请先设置拾取目标的到位动作': 'Set the pickup target’s arrival action first',
   '巡线速度': 'Line-following speed', '等待识别巡线': 'Waiting to detect the line',
   '已识别巡线': 'Line detected', '识别区域内未找到巡线': 'No line detected in the scan regions',
   '自主运行已停止，控制权已释放。': 'Autonomous operation stopped and released control.',
@@ -133,8 +133,17 @@ const ENGLISH = new Map(Object.entries({
   '自动避障': 'Automatic obstacle avoidance', '启用': 'Enable', '避障距离': 'Obstacle distance',
   '解除延时': 'Release delay', '目标追踪参数': 'Object tracking settings', '取色': 'Pick color',
   '颜色名称': 'Color name', '保存': 'Save', '选择颜色': 'Select color', '请选择': 'Select',
-  '删除所选颜色': 'Delete selected color', '色差阈值': 'Color tolerance', '头部 ID 31 位置': 'Head ID 31 position',
-  '输入位置': 'Enter position', '开始追踪': 'Start tracking', '停止追踪': 'Stop tracking',
+  '删除所选颜色': 'Delete selected color', '色差阈值': 'Color tolerance',
+  '头部目标': 'Head target', '到位目标': 'Arrival target',
+  '头部目标（320×180）': 'Head target (320×180)', '头部目标误差': 'Head target tolerance',
+  '头部目标 X': 'Head target X', '头部目标 Y': 'Head target Y',
+  '头部目标 X 误差': 'Head target X tolerance', '头部目标 Y 误差': 'Head target Y tolerance',
+  '目标 X（320 px）': 'Target X (320 px)',
+  '目标 X': 'Target X', '目标 Y': 'Target Y', '目标 X 误差': 'Target X tolerance', '目标 Y 误差': 'Target Y tolerance',
+  'ID31 滑杆': 'ID31 slider', '开始追踪': 'Start tracking', '停止追踪': 'Stop tracking',
+  '开始搬运': 'Start carrying', '停止搬运': 'Stop carrying',
+  '开始巡线': 'Start line following', '停止巡线': 'Stop line following',
+  '开始跟随': 'Start following', '停止跟随': 'Stop following',
   '行人检测模型': 'Person detection model', 'YOLO26n（原模型）': 'YOLO26n (original)',
   '无法读取行人检测模型列表': 'Could not load the person detection model list', '没有可用的行人检测模型': 'No person detection model is available',
   '开始避障': 'Start avoidance', '停止避障': 'Stop avoidance', '检测框面积：': 'Detection area: ',
@@ -255,8 +264,7 @@ const ENGLISH = new Map(Object.entries({
   '转动测距': 'Turn and measure', '转向 P': 'Turning P', '转向 PID': 'Turning PID',
   '转头步进 (°/周期)': 'Head step (°/cycle)', '转弯预转 (ms)': 'Initial turn (ms)',
   '追踪参数': 'Tracking settings', '追踪死区': 'Tracking deadband', '采样时间 (ms)': 'Sample time (ms)',
-  '联合追踪到位参数（未启用）': 'Combined tracking arrival settings (inactive)',
-  '联合追踪控制参数（未启用）': 'Combined tracking control settings (inactive)',
+  '恢复参数': 'Restore defaults',
   '预转': 'Initial turn',
   '提高速度': 'Increase speed', '降低速度': 'Decrease speed', '模型跟随 IMU 姿态': 'Model follows IMU orientation',
   'IMU 三轴姿态角实时曲线': 'Live IMU orientation', 'WonderDuck 设备控制台': 'WonderDuck device console',
@@ -1138,6 +1146,7 @@ const DYNAMIC = [
   [/^(中位 2048|Home) 目标已下发并读回$/, (_, pose) => `${translate(pose)} target sent and verified`],
   [/^(\d+) 个舵机(?: · (.+))?$/, (_, count, detail) => `${count} servos${detail ? ` · ${translate(detail)}` : ''}`],
   [/^ID (\d+) · (寄存器读回一致|部分卸力未确认)$/, (_, id, detail) => `ID ${id} · ${translate(detail)}`],
+  [/^(\d+) 个舵机 · ((?:中位 2048|Home) 目标已下发并读回)$/, (_, count, detail) => `${count} servos · ${translate(detail)}`],
   [/^批量保存(已取消|未全部完成)：已确认 (\d+)\/(\d+)；([\s\S]+)；(部分参数可能已写入，请根据校验结果检查|尚未开始写入参数)；(锁状态已恢复|写保护恢复失败，请检查)$/, (_, state, done, total, errors, detail, lock) => `Batch save ${state === '已取消' ? 'cancelled' : 'incomplete'}: confirmed ${done}/${total}; ${errors.split('；').map(translate).join('; ')}; ${translate(detail)}; ${lock === '锁状态已恢复' ? 'lock restored' : 'write protection could not be restored; check the device'}`],
   [/^([\s\S]+)；已发现 (\d+) 个舵机，扫描未完成$/, (_, error, count) => `${translate(error)}; found ${count} servos before the scan stopped`],
   [/^([\s\S]+)；动作停止未确认：([\s\S]+)$/, (_, error, stop) => `${translate(error)}; action stop not confirmed: ${translate(stop)}`],
@@ -1395,7 +1404,7 @@ function excluded(element, value, attribute = false) {
   if (element.closest(USER_CONTENT)) return true;
   if (element.id === 'models-filename' && document.getElementById('models-file')?.files.length) return true;
   if (element.tagName === 'OPTION' && element.closest(USER_OPTIONS) && element.value) return true;
-  if (['network-current', 'network-ap-name'].includes(element.id) && !['--', '未连接', '未读取', 'Disconnected', 'Not read'].includes(value.trim())) return true;
+  if (element.id === 'network-ap-name' && !['--', '未连接', '未读取', 'Disconnected', 'Not read'].includes(value.trim())) return true;
   if (element.id === 'control-action-name' && !['选择动作', 'Select action'].includes(value.trim())) return true;
   return false;
 }

@@ -202,7 +202,7 @@ export function createParameterSave({ context, request, command, toast, setBusy,
       for (const { address, value } of values) { drafts.set(address, value); selectedParameters.add(address); }
       loaded(values[0].address);
       const message = `已加载 ${values.length} 项配置到 ID ${loadId}，并勾选参数；请选择目标舵机后批量保存`;
-      get('last-command').textContent = message; toast(message);
+      toast(message);
     } catch (error) { toast(error instanceof SyntaxError ? '参数文件 JSON 格式无效' : error.message, true); }
     finally { loading = false; setBusy(false); update(); }
   });
@@ -232,14 +232,14 @@ export function createParameterSave({ context, request, command, toast, setBusy,
         send: data => request('parameter-batch', data), active: () => canContinue(),
         onProgress: ({ phase }) => {
           get('batch-save').textContent = '保存中…';
-          get('last-command').textContent = `批量保存 · ${phase}，请等待全部完成`;
+          toast(`批量保存 · ${phase}，请等待全部完成`, false, { routine: true, source: 'parameter-batch' });
         },
       });
       if (ids.includes(sourceId)) for (const register of parameters) drafts.delete(register.address);
       const message = `批量保存完成：${ids.length} 个舵机 × ${parameters.length} 项参数，已确认 ${result.confirmed}/${result.total}`;
-      get('last-command').textContent = message; toast(message);
+      toast(message, false, { source: 'parameter-batch' });
     } catch (error) {
-      get('last-command').textContent = error.message; toast(error.message, true);
+      toast(error.message, true, { source: 'parameter-batch' });
     } finally {
       running = false; cancelReason = ''; get('batch-save').textContent = '批量保存';
       setBusy(false); await refresh(); update();

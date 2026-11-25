@@ -84,17 +84,30 @@ html[data-theme="dark"] .theme-toggle [data-theme-icon="dark"], html[data-theme=
 .page-shortcut .action { min-height: 34px; padding: 5px 13px; font-size: var(--font-body); }
 .camera-panel { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
 .camera-viewport { flex: 1 1 0; min-width: 0; min-height: 0; display: grid; place-items: center; container-type: size; }
-.camera-frame { --video-aspect: 1.777777778; position: relative; box-sizing: content-box; container-type: size; width: min(calc(100cqw - 2px), calc((100cqh - 2px) * var(--video-aspect))); aspect-ratio: var(--video-aspect); flex: none; min-height: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: #000000; }
+.camera-frame { --recognition-color: #ff0; --target-guide-color: #4b96ff; --video-aspect: 1.777777778; position: relative; box-sizing: content-box; container-type: size; width: min(calc(100cqw - 2px), calc((100cqh - 2px) * var(--video-aspect))); aspect-ratio: var(--video-aspect); flex: none; min-height: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: #000000; }
 .camera-frame video, .camera-frame canvas { position: absolute; top: 50%; left: 50%; width: 100%; height: 100%; object-fit: contain; transform: translate(-50%, -50%); }
 .camera-frame canvas { pointer-events: none; }
 .tracking-guide { position: absolute; z-index: 3; inset: 0; pointer-events: none; }
-.tracking-goal { position: absolute; box-sizing: border-box; border: 2px solid #39d9f3; box-shadow: 0 0 0 1px #101820; }
-.tracking-target { position: absolute; width: 9px; height: 9px; border: 2px solid #101820; border-radius: 50%; background: #fff; transform: translate(-50%, -50%); box-sizing: border-box; }
-body[data-vision-page] .camera-frame::after { content: ""; position: absolute; z-index: 2; top: 50%; left: 50%; width: 20px; height: 20px; transform: translate(-50%, -50%); background: linear-gradient(#ff0, #ff0) center / 20px 2px no-repeat, linear-gradient(#ff0, #ff0) center / 2px 20px no-repeat; pointer-events: none; }
+.tracking-goal { position: absolute; box-sizing: border-box; border: 2px solid var(--target-guide-color); box-shadow: 0 0 0 1px #101820; }
+.tracking-goal-label { position: absolute; top: 0; left: 0; padding: 2px 4px; background: #101820dc; color: #fff; font-size: var(--font-meta); white-space: nowrap; }
+#tracking-head-goal { border-style: dashed; }
+#tracking-head-goal .tracking-goal-label { top: auto; bottom: 0; }
+.tracking-line-guides { position: absolute; inset: 0; }
+.tracking-line-guides span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 2px dashed var(--target-guide-color);
+  filter: drop-shadow(0 0 1px #101820);
+  transform: translateX(-50%);
+}
+#tracking-line-target { border-left-style: solid; }
+.tracking-target { position: absolute; width: 9px; height: 9px; border: 2px solid #101820; border-radius: 50%; background: var(--recognition-color); transform: translate(-50%, -50%); box-sizing: border-box; }
+body[data-vision-page] .camera-frame::after { content: ""; position: absolute; z-index: 2; top: 50%; left: 50%; width: 20px; height: 20px; transform: translate(-50%, -50%); background: linear-gradient(var(--target-guide-color), var(--target-guide-color)) center / 20px 2px no-repeat, linear-gradient(var(--target-guide-color), var(--target-guide-color)) center / 2px 20px no-repeat; pointer-events: none; }
 .camera-frame:has(.camera-placeholder:not([hidden]))::after { display: none; }
 .camera-frame:has(.camera-placeholder:not([hidden])) .tracking-guide { display: none; }
 html[data-debug-mode="off"] body[data-vision-page] .camera-frame::after,
-html[data-debug-mode="off"] body[data-vision-page] .tracking-goal { display: none; }
+html[data-debug-mode="off"] body[data-vision-page] :is(.tracking-goal, .tracking-line-guides) { display: none; }
 .camera-frame .turn90, .camera-frame .turn270 { width: 100cqh; height: 100cqw; }
 .camera-frame .turn90 { transform: translate(-50%, -50%) rotate(90deg); }
 .camera-frame .turn180 { transform: translate(-50%, -50%) rotate(180deg); }
@@ -107,13 +120,11 @@ html[data-debug-mode="off"] body[data-vision-page] .tracking-goal { display: non
 html[data-debug-mode="off"] #console-page-control label[for="obstacle-delay"],
 html[data-debug-mode="off"] body[data-console-page="person"] #console-page-vision .vision-content,
 html[data-debug-mode="off"] body[data-console-page="person"] #console-page-vision .object-area,
-html[data-debug-mode="off"] body:is([data-console-page="target"], [data-console-page="line"]) #console-page-vision .vision-content > :not(#vision-fields-color),
-html[data-debug-mode="off"] body[data-color-vision] .camera-column > .stick-panel,
+html[data-debug-mode="off"] body:is([data-console-page="target"], [data-console-page="pickup"], [data-console-page="line"]) #console-page-vision .vision-content > :not(#vision-fields-color, #pickup-stages),
 html[data-debug-mode="off"] #console-page-maze :is(#maze-status, .route-flow, .maze-intro),
 html[data-debug-mode="off"] #console-page-maze .maze-settings > label:not(:has([data-maze="threshold_mm"])) { display: none !important; }
 html[data-debug-mode="off"] #console-page-control label[for="obstacle-distance"] { grid-column: 1 / -1; display: block; }
 html[data-debug-mode="off"] #console-page-control label[for="obstacle-distance"] .speed-range { width: 100%; }
-html[data-debug-mode="off"] body[data-color-vision] .camera-column { grid-template-rows: minmax(0, 1fr); }
 .camera-fps #detection-fps { display: none; }
 body:is([data-color-vision][data-recognition-source="color"], [data-console-page="person"][data-recognition-source="object"]) .camera-fps #video-fps { display: none; }
 body:is([data-color-vision][data-recognition-source="color"], [data-console-page="person"][data-recognition-source="object"]) .camera-fps #detection-fps { display: inline; }
@@ -123,7 +134,24 @@ body:is([data-color-vision][data-recognition-source="color"], [data-console-page
 .color-preset-editor { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: stretch; min-width: 0; }
 .color-preset-editor .speed-input { width: 100%; min-height: 34px; }
 .color-preset-editor .action { width: auto; min-width: 58px; padding: 6px 10px; }
-#vision-fields-color > .color-threshold { grid-column: 1 / -1; }
+#vision-fields-color > .color-threshold {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+.color-threshold .speed-range { grid-area: 2 / 1 / auto / -1; }
+.color-threshold output { grid-area: 1 / 2; }
+body:is([data-console-page="target"], [data-console-page="pickup"], [data-console-page="line"]) :is(#vision-fields-color > .color-threshold, .head-position-setting) {
+  grid-template-columns: var(--vision-label-width) minmax(0, 1fr) calc(4ch + 12px);
+  gap: 8px;
+  font-size: var(--font-body);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+body:is([data-console-page="target"], [data-console-page="pickup"], [data-console-page="line"]) .color-threshold .speed-range { grid-area: 1 / 2; min-width: 0; margin: 0; }
+body:is([data-console-page="target"], [data-console-page="pickup"], [data-console-page="line"]) .color-threshold output { grid-area: 1 / 3; text-align: center; }
+body:is([data-console-page="target"], [data-console-page="pickup"], [data-console-page="line"]) .head-position-setting .speed-input { width: 100%; }
 #vision-fields-color > label[for="color-presets"] { color: var(--muted); }
 #color-presets { text-overflow: ellipsis; padding-inline: 4px; }
 .tracking-actions .action { min-width: 0; min-height: 34px; padding: 7px 8px; text-align: center; font-size: var(--font-body); }
@@ -131,7 +159,7 @@ body:is([data-color-vision][data-recognition-source="color"], [data-console-page
 .object-area span { color: var(--text); }
 .tracking-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding-top: 8px; border-top: 1px solid var(--divider); }
 #pickup-sequence-start { display: none; }
-body[data-console-page="pickup"] #pickup-sequence-start {
+html[data-debug-mode="on"] body[data-console-page="pickup"] #pickup-sequence-start {
   display: block;
   grid-column: 1 / -1;
 }
@@ -217,8 +245,13 @@ input[type="checkbox"] { width: 15px; height: 15px; margin: 0; accent-color: var
 output { font-variant-numeric: tabular-nums; }
 .parameter output { color: var(--accent); font-size: var(--font-body); font-variant-numeric: tabular-nums; }
 .tracking-pid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 22px 0; }
-.head-position-setting { display: flex; align-items: center; gap: 8px; margin: 0; }
-.head-position-setting input { width: 100px; }
+.head-position-setting { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 0; }
+.head-position-setting .speed-range { width: 100%; min-width: 0; margin: 0; }
+.head-position-setting .speed-input {
+  width: calc(4ch + 12px);
+  padding-inline: 4px;
+  text-align: center;
+}
 .tracking-pid fieldset { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
 .tracking-pid legend { color: var(--text); font-size: var(--font-body); padding: 0 6px; }
 .tracking-pid label { display: grid; grid-template-columns: 15px minmax(0, 1fr) 35px; align-items: center; gap: 5px; margin: 17px 0; font-size: var(--font-body); }
@@ -234,6 +267,8 @@ output { font-variant-numeric: tabular-nums; }
 .maze-settings .speed-input { width: 90px; }
 .maze-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; flex-shrink: 0; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line); }
 .maze-actions .action { width: 100%; }
+.feature-parameter-reset { grid-column: 1 / -1; }
+html:not([data-debug-mode="on"]) .feature-parameter-reset { display: none; }
 .panel-footnote { display: flex; gap: 8px; align-items: flex-start; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: var(--font-note); line-height: 1.6; }
 body[data-console-page="system"] .workspace { grid-template-columns: minmax(0, 1fr); }
 body[data-console-page="system"] .camera-column { display: none; }
@@ -368,7 +403,7 @@ body[data-console-page="system"] .system-panel { grid-column: 1; grid-row: 1 / -
   body[data-console-page="system"] .workspace { grid-template-rows: minmax(0, 1fr); }
   .system-panel .panel-heading .status-note { max-width: 150px; font-size: var(--font-meta); text-align: right; }
   .settings-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  .settings-card { padding: 10px; } .settings-card h3 { font-size: var(--font-body); }
+  .settings-card { padding: 10px; }
   .obstacle-controls { margin-top: 10px; gap: 8px; }
   .obstacle-controls label, .obstacle-controls output { font-size: var(--font-body); }
   .diagnostics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
@@ -709,6 +744,16 @@ html[data-theme] .action.stop:hover:not(:disabled) { background: #862129; border
 .vision-pid .tracking-pid .tracking-deadzone { display: grid; grid-template-columns: auto 72px auto; justify-content: start; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: var(--font-body); }
 .vision-pid .tracking-pid .tracking-deadzone input { width: 72px; margin: 0; }
 .tracking-deadzone output { color: var(--muted); }
+.vision-pid .tracking-pid .line-speed-setting {
+  display: grid;
+  grid-template-columns: max-content minmax(0, calc(8ch + 24px)) max-content;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  white-space: nowrap;
+}
+.line-speed-setting .speed-input { width: 100%; padding-inline: 4px; text-align: center; }
+
 .target-parameters .coordinated-goal { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; }
 .target-parameters .coordinated-follow-area { display: grid; grid-template-columns: auto minmax(0, 108px) auto; justify-content: start; align-items: center; gap: 8px; }
 .coordinated-follow-area input { width: 100%; min-width: 0; margin: 0; }
@@ -716,6 +761,13 @@ html[data-theme] .action.stop:hover:not(:disabled) { background: #862129; border
 .coordinated-final-point { margin-top: 0; }
 .coordinated-final-point .tracking-deadzone { display: grid; grid-template-columns: auto minmax(0, 58px) auto; justify-content: start; align-items: center; gap: 4px; min-width: 0; }
 .coordinated-final-point input { width: 100%; min-width: 0; margin: 0; }
+body[data-console-page="pickup"] .target-parameters .coordinated-goal { grid-template-columns: minmax(0, 1fr); }
+:is(#head-pid, #coordinated-head-pid, #body-pid, body[data-console-page="pickup"] .coordinated-final-point) .tracking-deadzone {
+  grid-template-columns: 2.5em minmax(0, 72px) max-content;
+  gap: 5px;
+}
+:is(#head-pid, #coordinated-head-pid, #body-pid, body[data-console-page="pickup"] .coordinated-final-point) .tracking-deadzone > span { white-space: nowrap; }
+:is(#head-pid, #coordinated-head-pid, #body-pid, body[data-console-page="pickup"] .coordinated-final-point) .tracking-deadzone input { width: 100%; }
 .target-parameters .coordinated-arrival { display: grid; grid-template-columns: auto minmax(64px, 1fr) auto; align-items: center; gap: 6px; }
 .coordinated-arrival select { width: 100%; min-width: 0; text-align: left; text-overflow: ellipsis; }
 .coordinated-arrival-delay, .coordinated-mouth label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
@@ -732,7 +784,12 @@ html[data-theme] .action.stop:hover:not(:disabled) { background: #862129; border
 .system-panel { overflow-y: auto; }
 .system-panel > * { flex-shrink: 0; }
 .system-panel .settings-section { min-height: auto; }
-.system-panel .settings-card { width: 100%; max-width: 640px; }
+.system-panel > .panel-heading h2 { font-size: var(--font-title); }
+.system-panel .settings-card { width: 100%; max-width: 640px; font-size: var(--font-body); }
+.system-panel .settings-card .subsection-heading h3 {
+  color: var(--text);
+  font-size: var(--font-section);
+}
 .software-info-rows { margin-top: 10px; }
 .software-info-rows > div { display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 44px; }
 .software-info-rows dt { color: var(--text); font-size: var(--font-body); }
@@ -780,7 +837,7 @@ body[data-operator-tab="actions"] .control-panel > .mode-obstacle { display: blo
 .status-list .metric { align-items: center; padding: 9px 0; }
 .status-content > p { flex-shrink: 0; }
 
-/* In the wide control view, the camera and both joysticks share the middle column. */
+/* In the wide control view, the camera and joysticks share the middle column. */
 .stick { grid-template-rows: 58px minmax(0, 1fr) 26px; }
 .stick-speed .speed-label { grid-template-columns: minmax(0, 1fr) 64px; }
 @media (min-width: 1100px) and (min-height: 740px) {
@@ -1131,7 +1188,7 @@ html[data-theme="light"] .pad::before, html[data-theme="light"] .pad::after { ba
   .accessory-controls .speed-range { flex: 1; width: 0; margin: 0; }
 }
 
-html:not([data-debug-mode="off"]) body[data-color-vision] .camera-column {
+body[data-vision-page] .camera-column {
   grid-template-rows: minmax(0, 1fr) minmax(0, 144px);
 }
 body[data-vision-page] .camera-column > .stick-panel {
@@ -1146,7 +1203,7 @@ body:is([data-vision-page], [data-console-page="maze"]) .camera-viewport { flex:
 @media (min-width: 1100px) and (min-height: 740px) {
   .vision-panel { gap: 8px; }
   .vision-pid .tracking-pid .pid-control { margin: 4px 0; }
-  html:not([data-debug-mode="off"]) body[data-color-vision] .camera-column { grid-template-rows: minmax(0, 1fr) 214px; gap: 0; }
+  body[data-vision-page] .camera-column { grid-template-rows: minmax(0, 1fr) 214px; gap: 0; }
   body[data-vision-page] .camera-column > .stick-panel {
     padding: 12px 24px;
     border: 0;
@@ -1182,8 +1239,8 @@ body:is([data-vision-page], [data-console-page="maze"]) .camera-viewport { flex:
   .feedback-dock { grid-column: 1; grid-row: 2; align-self: end; z-index: 1; max-height: 88px; padding: 10px 18px; border-top: 1px solid var(--divider); background: var(--shell); }
 }
 @media (min-width: 1100px) and (min-height: 740px) and (max-height: 820px) {
-  .vision-panel { padding: 12px 16px; gap: 5px; }
-  .vision-panel > .panel-heading { min-height: 26px; }
+  .vision-panel { padding: 12px 18px; gap: 5px; }
+  :is(.vision-panel, .action-bank) > .panel-heading { min-height: 26px; }
   .vision-source-fields .speed-range { margin-top: 3px; }
   .tracking-actions .action { min-height: 30px; padding: 4px 8px; }
   .target-parameters { gap: 2px; }
@@ -1506,44 +1563,37 @@ html[data-studio-embedded="true"] .feedback-dock,html[data-studio-embedded="true
   }
 }
 
-/* The motion and target pages keep the sticks without speed controls. */
-body[data-color-vision] .stick .stick-speed,
-body[data-color-vision] .camera-column > .stick-panel .stick .stick-speed { display: none; }
-body[data-console-page="control"] .stick-panel .stick .stick-speed { display: contents; }
-body[data-console-page="control"] .stick-speed > :not(.stick-lock) { display: none; }
-body:is([data-console-page="control"], [data-color-vision]) .stick,
-body:is([data-console-page="control"], [data-color-vision]) .stick.stick-right,
-body:is([data-console-page="control"], [data-color-vision]) .camera-column > .stick-panel .stick,
-body:is([data-console-page="control"], [data-color-vision]) .camera-column > .stick-panel .stick.stick-right {
+/* Use the same stick controls and keyboard labels on the motion and vision pages. */
+.stick-panel .stick .stick-speed { display: contents; }
+.stick-panel .stick-speed > :not(.stick-lock) { display: none; }
+.stick-panel .stick, .camera-column > .stick-panel :is(.stick, .stick.stick-right) {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
 }
-body:is([data-console-page="control"], [data-color-vision]) .stick .pad-slot,
-body:is([data-console-page="control"], [data-color-vision]) .stick.stick-right .pad-slot,
-body:is([data-console-page="control"], [data-color-vision]) .camera-column > .stick-panel .stick .pad-slot,
-body:is([data-console-page="control"], [data-color-vision]) .camera-column > .stick-panel .stick.stick-right .pad-slot { grid-column: 1; grid-row: 1; }
-
-/* Show the keyboard control on the matching joystick direction. */
-body[data-console-page="control"] .stick-panel .axis:not(.unused) {
+.stick-panel .stick .pad-slot, .camera-column > .stick-panel :is(.stick, .stick.stick-right) .pad-slot {
+  grid-column: 1;
+  grid-row: 1;
+}
+.stick-panel .axis:not(.unused) {
   display: inline-flex; align-items: center; gap: 3px; max-width: none; white-space: nowrap;
 }
-body[data-console-page="control"] .stick-panel .axis.top { flex-direction: column; }
-body[data-console-page="control"] .stick-panel .axis.bottom { flex-direction: column-reverse; }
-body[data-console-page="control"] .stick-panel .axis.left { flex-direction: row; }
-body[data-console-page="control"] .stick-panel .axis.right { flex-direction: row-reverse; }
-body[data-console-page="control"] .stick-panel .axis::before {
+.stick-panel .axis.top { flex-direction: column; }
+.stick-panel .axis.bottom { flex-direction: column-reverse; }
+.stick-panel .axis.left { flex-direction: row; }
+.stick-panel .axis.right { flex-direction: row-reverse; }
+.stick-panel .pad:not([data-stick="head"]) .axis::before {
   display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 3px;
   border: 1px solid var(--line); border-radius: 4px; background: var(--surface-soft);
   color: var(--text); font: 600 11px/1 system-ui, sans-serif;
 }
-body[data-console-page="control"] .pad[data-stick="left"] .axis.top::before { content: "W"; }
-body[data-console-page="control"] .pad[data-stick="left"] .axis.bottom::before { content: "S"; }
-body[data-console-page="control"] .pad[data-stick="left"] .axis.left::before { content: "A"; }
-body[data-console-page="control"] .pad[data-stick="left"] .axis.right::before { content: "D"; }
-body[data-console-page="control"] .pad[data-stick="right"] .axis.top::before { content: "↑"; }
-body[data-console-page="control"] .pad[data-stick="right"] .axis.bottom::before { content: "↓"; }
-body[data-console-page="control"] .pad[data-stick="right"] .axis.left::before { content: "←"; }
-body[data-console-page="control"] .pad[data-stick="right"] .axis.right::before { content: "→"; }
+.stick-panel .pad[data-stick="left"] .axis.top::before { content: "W"; }
+.stick-panel .pad[data-stick="left"] .axis.bottom::before { content: "S"; }
+.stick-panel .pad[data-stick="left"] .axis.left::before { content: "A"; }
+.stick-panel .pad[data-stick="left"] .axis.right::before { content: "D"; }
+.stick-panel .pad[data-stick="right"] .axis.top::before { content: "↑"; }
+.stick-panel .pad[data-stick="right"] .axis.bottom::before { content: "↓"; }
+.stick-panel .pad[data-stick="right"] .axis.left::before { content: "←"; }
+.stick-panel .pad[data-stick="right"] .axis.right::before { content: "→"; }
 
 .control-panel .accessory-controls { grid-template-columns: minmax(0, 1fr); }
 
@@ -1578,13 +1628,12 @@ body[data-operator-tab="actions"] .control-panel > .operator-extras { flex: 0 0 
   .control-panel > [data-control-divider="obstacle"] { grid-row: 6; }
 }
 
-.head-stick { display: none; }
-body[data-console-page="control"] .sticks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-body[data-console-page="control"] .stick:not(.head-stick) {
+.stick-panel .sticks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.stick-panel .stick:not(.head-stick) {
   position: relative;
   container-type: size;
 }
-body[data-console-page="control"] .stick-panel .stick-speed .stick-lock {
+.stick-panel .stick-speed .stick-lock {
   --pad-size: min(100cqw, 100cqh, var(--pad-max-width, 240px));
   --pad-inline-inset: max(var(--lock-outward-limit, -11px), calc((100cqw - var(--pad-size)) / 2 - 24px));
   --lock-drop: clamp(2.5px, calc((var(--pad-size) - 105px) / 4), 21px);
@@ -1599,12 +1648,11 @@ body[data-console-page="control"] .stick-panel .stick-speed .stick-lock {
   gap: 4px;
   touch-action: manipulation;
 }
-body[data-console-page="control"] .stick-panel .stick-right .stick-speed .stick-lock {
+.stick-panel .stick-right .stick-speed .stick-lock {
   inset-inline-start: auto;
   inset-inline-end: var(--pad-inline-inset);
 }
-body[data-console-page="control"] .stick-panel .stick-speed .stick-lock span { position: static; display: inline; }
-body[data-console-page="control"] .stick.head-stick { display: grid; }
+.stick-panel .stick-speed .stick-lock span { position: static; display: inline; }
 .head-stick-content {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
@@ -1631,4 +1679,4 @@ html[data-debug-mode="on"] .head-stick-center { display: none; }
 }
 html[data-debug-mode="on"] .head-stick-feedback { display: flex; }
 html[data-debug-mode="on"] .head-stick-content { height: min(100%, calc(100cqw + 30px), 270px); }
-body[data-console-page="control"] .head-stick .axis::before { display: none; }
+.stick-panel .head-stick .axis::before { display: none; }

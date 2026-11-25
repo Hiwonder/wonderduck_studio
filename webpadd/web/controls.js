@@ -19,6 +19,7 @@ import { bindMotionInput } from './motion-input.js';
       });
       const tofEnabled = document.body.dataset.tofEnabled !== 'false';
       const isVisionPage = () => document.body.hasAttribute('data-vision-page');
+      const manualControlPage = () => isVisionPage() || document.body.dataset.consolePage === 'control';
       const targetHeadOnly = () => document.body.dataset.consolePage === 'target';
       const lineFollowing = () => document.body.dataset.consolePage === 'line';
       const pickupPage = () => document.body.dataset.consolePage === 'pickup';
@@ -108,7 +109,6 @@ import { bindMotionInput } from './motion-input.js';
         onPulse: () => sendInput(),
       });
       let mode = "drive";
-      let visionModeRequested = false;
       let ownsControl = false;
       let otherController = false;
       const dot = document.querySelector("#dot");
@@ -152,9 +152,9 @@ import { bindMotionInput } from './motion-input.js';
       const turnRange = document.querySelector("#turn-range");
       const triggerRanges = [...document.querySelectorAll("[data-trigger-range]")];
       const motion = bindMotionInput({
-        state, headStickAxes, isVisionPage, triggerRanges,
-        headStickAvailable: () => mode !== 'body_pose' && document.body.dataset.consolePage === 'control',
-        displayMode: () => displayMode(),
+        state, headStickAxes, triggerRanges,
+        headStickAvailable: () => mode !== 'body_pose',
+        displayMode: () => mode,
         sticksBlocked: () => sticksBlocked(),
         motionUnavailable: () => motionUnavailable(),
         remindMotion: () => remindMotion(),
@@ -199,8 +199,14 @@ import { bindMotionInput } from './motion-input.js';
       const audioVolume = document.querySelector('#audio-volume');
       const audioVolumeValue = document.querySelector('#audio-volume-value');
       const trackingStart = document.querySelector('#tracking-start');
+      const restoreTracking = document.querySelector('#restore-tracking-parameters');
+      const restoreMaze = document.querySelector('#restore-maze-parameters');
       const pickupSequenceStart = document.querySelector('#pickup-sequence-start');
       const headPosition = document.querySelector('#head-position');
+      const headPositionSlider = document.querySelector('#head-position-slider');
+      const minHeadPitch = Number(headPosition.min), maxHeadPitch = Number(headPosition.max);
+      const headPitchInRange = value => Number.isInteger(value) && value >= minHeadPitch && value <= maxHeadPitch;
+      const clampHeadPitch = value => Math.min(maxHeadPitch, Math.max(minHeadPitch, Math.round(value)));
       const headPositionSetting = document.querySelector('#head-position-setting');
       const followStopArea = document.querySelector('#follow-stop-area');
       const followAreaDeadzone = document.querySelector('#follow-area-deadzone');
@@ -227,39 +233,67 @@ import { bindMotionInput } from './motion-input.js';
       pages.person.limits.distanceDeadzone = savedDistanceDeadzone !== null && Number.isSafeInteger(parsedDistanceDeadzone)
         && parsedDistanceDeadzone >= 0 && parsedDistanceDeadzone <= 4294967295 ? parsedDistanceDeadzone : personDefaults.distanceDeadzone;
       followDistanceDeadzone.value = String(pages.person.limits.distanceDeadzone);
-      let headPositionState = 'idle', headPositionWanted = false;
-      const currentHeadPositionScope = () => targetHeadOnly() ? 'home'
+      let headPositionState = 'idle', headPositionWanted = false, headCenterPending = false;
+      let headPitchTimer = null;
+      const currentHeadPositionScope = () => targetHeadOnly() ? 'target_tracking'
         : document.body.dataset.consolePage === 'person' ? 'person'
-          : pickupPage() ? trackingScope : 'target';
+          : pickupPage() ? trackingScope : 'line';
       let headPositionScope = 'target';
       let targetHeadHome = null, headPositionTarget = null;
       const headPositionKey = scope => `${scope}-follow-head-position`;
-      const applyHeadPositionScope = scope => {
-        let value = scope === 'home'
-          ? (targetHeadHome === null ? '' : String(targetHeadHome))
-          : localStorage.getItem(headPositionKey(scope))
-            ?? String(scope === 'person' ? personDefaults.headPosition : targetHeadDefault);
-        if (scope === 'person' && [2200, 2150].includes(Number(value))) {
-          value = String(personDefaults.headPosition);
-          localStorage.setItem(headPositionKey(scope), value);
-        }
-        headPosition.value = value;
-        headPositionTarget = value !== '' && Number.isInteger(Number(value))
-          && Number(value) >= 1024 && Number(value) <= 2250 ? Number(value) : null;
+      const defaultHeadPitch = scope => scope === 'target_tracking' ? targetHeadHome
+        : scope === 'person' ? personDefaults.headPosition : targetHeadDefault;
+      const savedHeadPitch = scope => {
+        const value = localStorage.getItem(headPositionKey(scope));
+        return value !== null && value.trim() !== '' && Number.isInteger(Number(value))
+          ? clampHeadPitch(Number(value)) : defaultHeadPitch(scope);
       };
+      const showHeadPitch = pitch => {
+        headPositionTarget = pitch;
+        headPosition.value = pitch === null ? '' : String(pitch);
+        headPositionSlider.value = String(pitch ?? targetHeadDefault);
+      };
+      const applyHeadPositionScope = scope => showHeadPitch(savedHeadPitch(scope));
+      const restoreHeadPosition = scope => {
+        localStorage.setItem(headPositionKey(scope), String(defaultHeadPitch(scope) ?? ''));
+        applyHeadPositionScope(scope);
+      };
+      const legacyPersonPitch = localStorage.getItem(headPositionKey('person'));
+      if (['2200', '2150'].includes(legacyPersonPitch) && localStorage.getItem('person-id31-limits-version') === null) {
+        localStorage.setItem(headPositionKey('person'), String(personDefaults.headPosition));
+      }
+      localStorage.setItem('person-id31-limits-version', '1');
+      const legacyLinePitch = localStorage.getItem(headPositionKey('target'));
+      if (legacyLinePitch !== null && localStorage.getItem(headPositionKey('line')) === null) {
+        localStorage.setItem(headPositionKey('line'), legacyLinePitch);
+      }
       applyHeadPositionScope(headPositionScope);
       const trackingStop = document.querySelector('#tracking-stop');
       const coordinatedStatus = document.querySelector("#coordinated-status");
       const trackingGuide = document.querySelector('#tracking-guide');
       const trackingGoal = document.querySelector('#tracking-goal');
+      const trackingGoalLabel = trackingGoal.querySelector('.tracking-goal-label');
+      const trackingHeadGoal = document.querySelector('#tracking-head-goal');
+      const trackingLineGuides = document.querySelector('#tracking-line-guides');
+      const trackingLineMin = document.querySelector('#tracking-line-min');
+      const trackingLineMax = document.querySelector('#tracking-line-max');
+      const trackingLineTarget = document.querySelector('#tracking-line-target');
       const trackingTargetMarker = document.querySelector('#tracking-target');
-      const coordinatedInputSelector = '[data-coordinated-pid-axis], [data-coordinated-pid-range], [data-coordinated-deadzone], [data-coordinated-body-gain], [data-coordinated-final-point], [data-coordinated-final-tolerance], [data-coordinated-arrival-skill], [data-coordinated-mouth], #coordinated-arrival-delay';
+      const headTargetSelector = ':is([data-head-target-point], [data-head-target-tolerance])';
+      const headSettingsInputSelector = `[data-head-pid-axis], [data-head-pid-range-axis], #head-pid ${headTargetSelector}`;
+      const pickupHeadTargetSelector = `#coordinated-head-pid ${headTargetSelector}`;
+      const headTargetFields = [...document.querySelectorAll(`#head-pid ${headTargetSelector}`)];
+      const pickupHeadTargetFields = [...document.querySelectorAll(pickupHeadTargetSelector)];
+      const headImageSize = [320, 180];
+      const coordinatedInputSelector = `[data-coordinated-pid-axis], [data-coordinated-pid-range], ${pickupHeadTargetSelector}, [data-coordinated-body-gain], [data-coordinated-final-point], [data-coordinated-final-tolerance], [data-coordinated-arrival-skill], [data-coordinated-mouth], #coordinated-arrival-delay`;
       const phaseInputSelector = '[data-coordinated-phase-gain], [data-coordinated-phase-limit]';
       const coordinatedInputs = [...document.querySelectorAll(coordinatedInputSelector)];
       const phaseInputs = [...document.querySelectorAll(phaseInputSelector)];
       const arrivalSkillInput = document.querySelector('#coordinated-arrival-skill');
       const arrivalDelayInput = document.querySelector('#coordinated-arrival-delay');
       const lineSpeedInput = document.querySelector('#line-speed');
+      const lineTargetInput = document.querySelector('#line-target-x');
+      const lineToleranceInput = document.querySelector('#line-target-tolerance');
       const colorPresetSelect = document.querySelector('#color-presets');
       const colorPresetName = document.querySelector('#color-preset-name');
       const colorPresetSave = document.querySelector('#color-preset-save');
@@ -306,6 +340,7 @@ import { bindMotionInput } from './motion-input.js';
       const idleCoordinated = createRun();
       let coordinatedRun = selectedPage?.coordinatedRun ?? idleCoordinated;
       const coordinatedHeadDeadzone = [0.1, 0.05];
+      const coordinatedHeadTarget = [160, 90];
       const coordinatedGains = [[0.5, 0.04, 0.01], [0.5, 0.04, 0.01]];
       const coordinatedBodyGains = [0.2, 0.3, 1.0];
       const finalBodyGains = [0.2, 0.3, 1.0];
@@ -316,14 +351,41 @@ import { bindMotionInput } from './motion-input.js';
         before: {enabled: false, open: 0, duration_s: 0.5},
         after: {enabled: false, open: 0, duration_s: 0.5},
       };
+      const imagePercent = (value, axis) => Math.max(0, Math.min(100, value / headImageSize[axis] * 100));
+      const headToleranceInPixels = deadzone => [deadzone[1] * headImageSize[0], deadzone[0] * headImageSize[1]];
+      const positionTrackingBox = (box, point, tolerance) => {
+        const left = imagePercent(point[0] - tolerance[0], 0);
+        const top = imagePercent(point[1] - tolerance[1], 1);
+        const right = imagePercent(point[0] + tolerance[0], 0);
+        const bottom = imagePercent(point[1] + tolerance[1], 1);
+        box.style.left = `${left}%`;
+        box.style.top = `${top}%`;
+        box.style.width = `${right - left}%`;
+        box.style.height = `${bottom - top}%`;
+      };
       const updateTrackingGuide = () => {
-        const showGoal = ['pickup', 'person'].includes(document.body.dataset.consolePage);
-        trackingGuide.hidden = !isVisionPage() || (showGoal && !coordinatedSettingsReady);
-        trackingGoal.hidden = !showGoal;
-        trackingGoal.style.left = `${(coordinatedFinalPoint[0] - coordinatedFinalTolerance[0]) / 320 * 100}%`;
-        trackingGoal.style.top = `${(coordinatedFinalPoint[1] - coordinatedFinalTolerance[1]) / 180 * 100}%`;
-        trackingGoal.style.width = `${coordinatedFinalTolerance[0] / 160 * 100}%`;
-        trackingGoal.style.height = `${coordinatedFinalTolerance[1] / 90 * 100}%`;
+        const headOnly = targetHeadOnly();
+        const pickup = pickupPage();
+        const coordinated = pickup || document.body.dataset.consolePage === 'person';
+        const line = lineFollowing();
+        trackingGuide.hidden = !isVisionPage() || (coordinated && !coordinatedSettingsReady);
+        trackingGoal.hidden = !headOnly && !coordinated;
+        trackingGoalLabel.hidden = !pickup;
+        trackingHeadGoal.hidden = !pickup;
+        trackingLineGuides.hidden = !line;
+        if (headOnly) {
+          positionTrackingBox(trackingGoal, pages.target.targetPoint, headToleranceInPixels(pages.target.deadzone));
+        } else if (coordinated) {
+          positionTrackingBox(trackingGoal, coordinatedFinalPoint, coordinatedFinalTolerance);
+          if (pickup) positionTrackingBox(trackingHeadGoal, coordinatedHeadTarget, headToleranceInPixels(coordinatedHeadDeadzone));
+        } else if (line) {
+          const { targetX, deadzone } = pages.line;
+          const tolerance = deadzone[1] * headImageSize[0];
+          trackingLineMin.hidden = trackingLineMax.hidden = tolerance === 0;
+          trackingLineMin.style.left = `${imagePercent(targetX - tolerance, 0)}%`;
+          trackingLineMax.style.left = `${imagePercent(targetX + tolerance, 0)}%`;
+          trackingLineTarget.style.left = `${imagePercent(targetX, 0)}%`;
+        }
       };
       const updateTrackingMarker = point => {
         const valid = Array.isArray(point) && point.length === 2
@@ -338,7 +400,7 @@ import { bindMotionInput } from './motion-input.js';
       let coordinatedArrivalSkill = '', availableSkills = [];
       let savedAudioVolume = null, confirmedVolume = null, desiredVolume = null;
       let volumeBusy = false, volumeTimer = null, volumeRevision = 0;
-      const sticksBlocked = () => !controlLeaseReady || !driveControlReady || otherController || !session.open || mazeRun.active || mazeRun.pending || vision.awaitingTarget
+      const sticksBlocked = () => !manualControlPage() || !controlLeaseReady || !driveControlReady || otherController || !session.open || mazeRun.active || mazeRun.pending || vision.awaitingTarget
         || lineRun.active || lineRun.pending || coordinatedOwner !== null;
       const updateSticksAvailability = () => {
         const disabled = sticksBlocked();
@@ -347,7 +409,9 @@ import { bindMotionInput } from './motion-input.js';
       };
       const zero = () => {
         cancelPickMouth();
-        visionModeRequested = false;
+        headCenterPending = false;
+        clearTimeout(headPitchTimer);
+        headPitchTimer = null;
         motion.reset();
         sendInput();
       };
@@ -417,6 +481,7 @@ import { bindMotionInput } from './motion-input.js';
         }
       };
       const updateSettingsState = () => {
+        updateFeatureRestoreButtons();
         resetSettings.disabled = !settingsLoaded || !settingsDefaults || !headSettingsDefaults || !coordinatedLeaseReady || !phaseReady || !settingsReady()
           || Object.values(trackingProfiles).some(profile => !profile.coordinatedReady || !profile.phaseReady)
           || settingsSaving || headSettingsSaving || trackingBusy();
@@ -436,12 +501,13 @@ import { bindMotionInput } from './motion-input.js';
       const applyHeadSettings = (saved) => {
         const previous = applyingSettings;
         applyingSettings = true;
-        for (const input of document.querySelectorAll('[data-head-tracking-deadzone]')) {
-          const axis = Number(input.dataset.headTrackingDeadzone);
-          pages.target.deadzone[axis] = saved.deadzone[axis];
-          input.value = String(pages.target.deadzone[axis] * 100);
+        pages.target.targetPoint.splice(0, 2, ...(saved.target_point ?? [160, 90]));
+        pages.target.deadzone.splice(0, 2, ...saved.deadzone);
+        for (const input of headTargetFields) {
+          input.value = String(headTargetField(input, pages.target.targetPoint, pages.target.deadzone).value);
           setValidity(input, '');
         }
+        updateTrackingGuide();
         for (const input of document.querySelectorAll('[data-head-pid-axis]')) {
           const axis = Number(input.dataset.headPidAxis), term = Number(input.dataset.headPidTerm);
           pages.target.gains[axis][term] = saved.gains[axis][term];
@@ -451,19 +517,29 @@ import { bindMotionInput } from './motion-input.js';
         }
         applyingSettings = previous;
       };
-      const collectHeadSettings = () => ({ deadzone: [...pages.target.deadzone], gains: pages.target.gains.map(axis => [...axis]) });
+      const headTargetField = (input, point, deadzone) => {
+        const axis = Number(input.dataset.headTargetPoint ?? input.dataset.headTargetTolerance);
+        const tolerance = input.hasAttribute('data-head-target-tolerance');
+        const values = tolerance ? deadzone : point;
+        const index = tolerance ? 1 - axis : axis;
+        const scale = tolerance ? headImageSize[axis] : 1;
+        return { values, index, scale, value: Number((values[index] * scale).toFixed(8)) };
+      };
+      const collectHeadSettings = () => ({ target_point: [...pages.target.targetPoint], deadzone: [...pages.target.deadzone],
+        gains: pages.target.gains.map(axis => [...axis]) });
       const validGains = value => Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
       const validDeadzone = value => Number.isFinite(value) && value >= 0;
       const validMouth = value => value && Object.keys(value).length === 3
         && typeof value.enabled === 'boolean' && Number.isFinite(value.open)
         && value.open >= 0 && value.open <= 1 && validDeadzone(value.duration_s);
-      const validCoordinatedSettings = value => value && Object.keys(value).length === 9
-        && Object.hasOwn(value, 'head_deadzone') && Object.hasOwn(value, 'head_gains') && Object.hasOwn(value, 'body_gains') && Object.hasOwn(value, 'final_point') && Object.hasOwn(value, 'final_tolerance') && Object.hasOwn(value, 'arrival_skill') && Object.hasOwn(value, 'arrival_delay_s')
+      const validImagePoint = value => Array.isArray(value) && value.length === 2
+        && value.every((point, axis) => Number.isFinite(point) && point >= 0 && point <= headImageSize[axis]);
+      const validCoordinatedSettings = value => value
+        && (value.head_target_point == null || validImagePoint(value.head_target_point))
         && Array.isArray(value.head_deadzone) && value.head_deadzone.length === 2 && value.head_deadzone.every(validDeadzone)
         && Array.isArray(value.head_gains) && value.head_gains.length === 2 && value.head_gains.every(validGains)
         && validGains(value.body_gains)
-        && Array.isArray(value.final_point) && value.final_point.length === 2
-        && value.final_point.every((point, axis) => Number.isFinite(point) && point >= 0 && point <= [320, 180][axis])
+        && validImagePoint(value.final_point)
         && Array.isArray(value.final_tolerance) && value.final_tolerance.length === 2 && value.final_tolerance.every(validDeadzone)
         && validDeadzone(value.arrival_delay_s) && typeof value.arrival_skill === 'string'
         && validMouth(value.mouth_before) && validMouth(value.mouth_after);
@@ -481,6 +557,7 @@ import { bindMotionInput } from './motion-input.js';
       };
       const applyCoordinatedSettings = saved => {
         coordinatedHeadDeadzone.splice(0, 2, ...saved.head_deadzone);
+        coordinatedHeadTarget.splice(0, 2, ...(saved.head_target_point ?? [160, 90]));
         const gains = saved.head_gains;
         for (const input of document.querySelectorAll('[data-coordinated-pid-axis]')) {
           const axis = Number(input.dataset.coordinatedPidAxis), term = Number(input.dataset.coordinatedPidTerm);
@@ -489,10 +566,8 @@ import { bindMotionInput } from './motion-input.js';
           setValidity(input, '');
           updateHeadPidRange(input, gains[axis][term]);
         }
-        for (const input of document.querySelectorAll('[data-coordinated-deadzone]')) {
-          const field = input.dataset.coordinatedDeadzone;
-          const value = coordinatedHeadDeadzone[field === 'head-0' ? 0 : 1] * 100;
-          input.value = String(value);
+        for (const input of pickupHeadTargetFields) {
+          input.value = String(headTargetField(input, coordinatedHeadTarget, coordinatedHeadDeadzone).value);
           setValidity(input, '');
         }
         coordinatedBodyGains.splice(0, 3, ...saved.body_gains);
@@ -532,6 +607,7 @@ import { bindMotionInput } from './motion-input.js';
       };
       const collectCoordinatedSettings = () => ({
         head_deadzone: [...coordinatedHeadDeadzone], head_gains: coordinatedGains.map(axis => [...axis]),
+        ...(trackingScope === 'person' ? {} : {head_target_point: [...coordinatedHeadTarget]}),
         body_gains: [...coordinatedBodyGains], final_point: [...coordinatedFinalPoint],
         final_tolerance: [...coordinatedFinalTolerance], arrival_delay_s: coordinatedArrivalDelay,
         arrival_skill: coordinatedArrivalSkill,
@@ -567,7 +643,7 @@ import { bindMotionInput } from './motion-input.js';
         coordinatedSettingsReady = profile.coordinatedReady;
         phaseReady = profile.phaseReady;
         coordinatedLeaseReady = coordinatedSettingsReady && phaseReady;
-        const editable = scope !== 'target';
+        const editable = pickupPage() || document.body.dataset.consolePage === 'person';
         coordinatedInputs.forEach(input => { input.disabled = !editable || !coordinatedSettingsReady; });
         phaseInputs.forEach(input => { input.disabled = !editable || !phaseReady; });
         const previous = applyingSettings;
@@ -598,31 +674,38 @@ import { bindMotionInput } from './motion-input.js';
         }
         updateTrackingButton();
       }));
-      const applySettings = (saved, forceColor = false) => {
-        if (!saved) return;
-        applyingSettings = true;
-        applySpeed(saved.linear_speed, false);
-        applyTurn(saved.turn_speed, false);
+      const applyMazeSettings = saved => {
         for (const input of mazeInputs) {
-          input.value = String(saved.maze[input.dataset.maze]);
-          pages.maze.settings[input.dataset.maze] = saved.maze[input.dataset.maze];
+          input.value = String(saved[input.dataset.maze]);
+          pages.maze.settings[input.dataset.maze] = saved[input.dataset.maze];
           setValidity(input, '');
         }
-        pages.line.referenceArea = saved.tracking.reference_area;
-        pages.line.speed = saved.tracking.line_speed ?? 0.15;
+      };
+      const applyLineSettings = saved => {
+        pages.line.referenceArea = saved.reference_area;
+        pages.line.speed = saved.line_speed ?? 0.15;
         lineSpeedInput.value = String(pages.line.speed);
-        pages.line.deadzone.splice(0, 2, ...saved.tracking.deadzone);
-        pages.line.gains.splice(0, 2, ...saved.tracking.gains.map(axis => [...axis]));
-        for (const input of document.querySelectorAll('[data-tracking-deadzone]')) {
-          const axis = Number(input.dataset.trackingDeadzone);
-          input.value = String(pages.line.deadzone[axis] * 100);
-        }
+        setValidity(lineSpeedInput, '');
+        pages.line.deadzone.splice(0, 2, ...saved.deadzone);
+        pages.line.gains.splice(0, 2, ...saved.gains.map(axis => [...axis]));
+        pages.line.targetX = saved.line_target_x ?? 160;
+        lineTargetInput.value = String(pages.line.targetX);
+        lineToleranceInput.value = String(Number((pages.line.deadzone[1] * headImageSize[0]).toFixed(8)));
+        if (lineFollowing()) updateTrackingGuide();
         for (const input of document.querySelectorAll('[data-pid-axis]')) {
           const axis = Number(input.dataset.pidAxis), term = Number(input.dataset.pidTerm);
           input.value = String(pages.line.gains[axis][term]);
           input.nextElementSibling.value = String(pages.line.gains[axis][term]);
           setValidity(input.nextElementSibling, '');
         }
+      };
+      const applySettings = (saved, forceColor = false) => {
+        if (!saved) return;
+        applyingSettings = true;
+        applySpeed(saved.linear_speed, false);
+        applyTurn(saved.turn_speed, false);
+        applyMazeSettings(saved.maze);
+        applyLineSettings(saved.tracking);
         const threshold = document.querySelector('#color-threshold');
         threshold.value = String(saved.color_threshold);
         threshold.dispatchEvent(new Event('input'));
@@ -663,6 +746,7 @@ import { bindMotionInput } from './motion-input.js';
           tracking: {
             reference_area: pages.line.referenceArea,
             line_speed: pages.line.speed,
+            line_target_x: pages.line.targetX,
             deadzone: [...pages.line.deadzone],
             gains: pages.line.gains.map(axis => [...axis]),
           },
@@ -678,8 +762,11 @@ import { bindMotionInput } from './motion-input.js';
         if (!settingsLoaded || applyingSettings || settingsFailed || !settingsDirty || !settingsReady()) return;
         if (settingsSaving && !finalSave) return;
         if (obstaclePending || volumeBusy || desiredVolume !== null || volumeTimer !== null || restoreObstacle) return;
-        const invalid = [...document.querySelectorAll('input:not(#follow-stop-area):not(#follow-area-deadzone):not(#follow-stop-distance):not(#follow-distance-deadzone):not([data-trigger-range]):not([data-stick-lock]):not([data-head-pid-axis]):not([data-head-pid-range-axis]):not([data-head-tracking-deadzone]):not([data-coordinated-pid-axis]):not([data-coordinated-pid-range]):not([data-coordinated-deadzone]):not([data-coordinated-body-gain])')]
-          .find(input => !input.validity.valid);
+        const separateInputs = `#follow-stop-area, #follow-area-deadzone, #follow-stop-distance, #follow-distance-deadzone,
+          [data-trigger-range], [data-stick-lock], #head-position, #head-position-slider,
+          ${headSettingsInputSelector}, ${coordinatedInputSelector}, ${phaseInputSelector}`;
+        const invalid = [...document.querySelectorAll('input')]
+          .find(input => !input.matches(separateInputs) && !input.validity.valid);
         if (invalid) { settingsStatus.textContent = '参数无效，未自动保存'; return; }
         const saved = collectSettings(), serialized = JSON.stringify(saved);
         if (serialized === savedSettingsJson) {
@@ -710,7 +797,7 @@ import { bindMotionInput } from './motion-input.js';
         clearTimeout(headSettingsTimer); headSettingsTimer = null;
         if (!settingsLoaded || applyingSettings || headSettingsFailed || !headSettingsDirty || !settingsReady()) return;
         if (headSettingsSaving && !finalSave) return;
-        if ([...document.querySelectorAll('[data-head-pid-axis], [data-head-tracking-deadzone]')].some(input => !input.validity.valid)) {
+        if ([...document.querySelectorAll(headSettingsInputSelector)].some(input => !input.validity.valid)) {
           settingsStatus.textContent = '参数无效，未自动保存'; return;
         }
         const saved = collectHeadSettings(), serialized = JSON.stringify(saved);
@@ -792,16 +879,83 @@ import { bindMotionInput } from './motion-input.js';
         settingsStatus.textContent = '参数已修改，等待保存…';
         profile.phaseTimer = setTimeout(() => flushPhaseSettings(false, scope), 250);
       };
+      const restorePersonLimits = () => {
+        const fields = [
+          ['area', 'person-follow-stop-area', followStopArea],
+          ['areaDeadzone', 'person-follow-area-deadzone', followAreaDeadzone],
+          ['distance', 'person-follow-stop-distance', followStopDistance],
+          ['distanceDeadzone', 'person-follow-distance-deadzone', followDistanceDeadzone],
+        ];
+        for (const [field, key, input] of fields) {
+          pages.person.limits[field] = personDefaults[field];
+          input.value = String(personDefaults[field]);
+          setValidity(input, '');
+          localStorage.setItem(key, input.value);
+        }
+      };
+      const canRestoreFeatureParameters = () => {
+        const page = document.body.dataset.consolePage;
+        const otherTracking = (lineRun.active && page !== 'line')
+          || (coordinatedOwner !== null && !(page === 'target' && coordinatedRun.active));
+        if (!settingsLoaded || !settingsReady() || vision.awaitingTarget || lineRun.pending
+          || otherTracking || mazeRun.active || mazeRun.pending) return false;
+        if (page === 'target') return !!headSettingsDefaults && targetHeadHome !== null && !headSettingsSaving;
+        if (page === 'line' || page === 'maze') return !!settingsDefaults && !settingsSaving;
+        if (page !== 'pickup' && page !== 'person') return false;
+        const profile = trackingProfile();
+        return coordinatedLeaseReady && !profile.coordinatedSaving && !profile.phaseSaving;
+      };
+      const updateFeatureRestoreButtons = () => {
+        const ready = canRestoreFeatureParameters();
+        restoreTracking.disabled = !isVisionPage() || !ready;
+        restoreMaze.disabled = document.body.dataset.consolePage !== 'maze' || !ready;
+      };
+      const restoreFeatureParameters = () => {
+        if (!canRestoreFeatureParameters()) return;
+        const page = document.body.dataset.consolePage;
+        if (page === 'target') {
+          restoreHeadPosition(headPositionScope);
+          applyHeadSettings(headSettingsDefaults);
+          if (coordinatedRun.active) sendCoordinated('update', vision.target, headPositionTarget);
+          queueHeadSettings();
+          flushHeadSettings();
+        } else if (page === 'maze') {
+          applyMazeSettings(settingsDefaults.maze);
+          queueSettings();
+          flushSettings();
+        } else {
+          const person = page === 'person';
+          restoreHeadPosition(headPositionScope);
+          if (page === 'line') {
+            applyLineSettings(settingsDefaults.tracking);
+            if (lineRun.active) sendTracking('update', null, headPositionTarget);
+            queueSettings();
+            flushSettings();
+          } else {
+            if (person) restorePersonLimits();
+            applyCoordinatedSettings(person ? personCoordinatedDefaults : coordinatedDefaults);
+            applyPhaseSettings(person ? personPhaseDefaults : phaseDefaults);
+            queueCoordinatedSettings();
+            queuePhaseSettings();
+            flushCoordinatedSettings();
+            flushPhaseSettings();
+          }
+        }
+        updateFeatureRestoreButtons();
+        updateTrackingButton();
+      };
+      restoreTracking.addEventListener('click', restoreFeatureParameters);
+      restoreMaze.addEventListener('click', restoreFeatureParameters);
       const changedParameter = event => {
         const field = event.target;
-        if (!field.matches('input, select') || field.matches(`[data-stick-lock], [data-trigger-range], [data-head-pid-axis], [data-head-pid-range-axis], [data-head-tracking-deadzone], ${coordinatedInputSelector}, ${phaseInputSelector}, #follow-stop-area, #follow-area-deadzone, #follow-stop-distance, #follow-distance-deadzone, #color-presets, #color-preset-name, #audio-volume, #network-announcement-enabled, #person-model`)) return;
+        if (!field.matches('input, select') || field.matches(`[data-stick-lock], [data-trigger-range], #head-position, #head-position-slider, ${headSettingsInputSelector}, ${coordinatedInputSelector}, ${phaseInputSelector}, #follow-stop-area, #follow-area-deadzone, #follow-stop-distance, #follow-distance-deadzone, #color-presets, #color-preset-name, #audio-volume, #network-announcement-enabled, #person-model`)) return;
         queueSettings();
       };
       document.addEventListener('input', changedParameter);
       document.addEventListener('change', event => {
-        if (event.target.matches('#network-announcement-enabled, #person-model')) return;
+        if (event.target.matches('#network-announcement-enabled, #person-model, #head-position, #head-position-slider')) return;
         changedParameter(event);
-        if (event.target.matches('[data-head-pid-axis], [data-head-pid-range-axis], [data-head-tracking-deadzone]')) flushHeadSettings();
+        if (event.target.matches(headSettingsInputSelector)) flushHeadSettings();
         else if (event.target.matches(coordinatedInputSelector)) flushCoordinatedSettings();
         else if (event.target.matches(phaseInputSelector)) flushPhaseSettings();
         else flushSettings();
@@ -817,21 +971,15 @@ import { bindMotionInput } from './motion-input.js';
         applyHeadSettings(headSettingsDefaults);
         applyCoordinatedSettings(trackingScope === 'person' ? personCoordinatedDefaults : coordinatedDefaults);
         applyPhaseSettings(trackingScope === 'person' ? personPhaseDefaults : phaseDefaults);
-        const defaultHeadPosition = headPositionScope === 'person' ? personDefaults.headPosition : targetHeadDefault;
-        headPosition.value = defaultHeadPosition === null ? '' : String(defaultHeadPosition);
-        headPositionTarget = defaultHeadPosition;
+        restoreHeadPosition(headPositionScope);
+        localStorage.removeItem(headPositionKey('target_tracking'));
         headPositionWanted = false;
-        followStopArea.value = String(pages.person.limits.area = personDefaults.area);
-        followAreaDeadzone.value = String(pages.person.limits.areaDeadzone = personDefaults.areaDeadzone);
-        followStopDistance.value = String(pages.person.limits.distance = personDefaults.distance);
-        followDistanceDeadzone.value = String(pages.person.limits.distanceDeadzone = personDefaults.distanceDeadzone);
+        restorePersonLimits();
         const followDefaults = {
           'person-follow-head-position': personDefaults.headPosition,
           'target-follow-head-position': targetHeadDefault,
           'pickup_after-follow-head-position': targetHeadDefault,
-          'person-follow-stop-area': pages.person.limits.area,
-          'person-follow-area-deadzone': pages.person.limits.areaDeadzone, 'person-follow-stop-distance': pages.person.limits.distance,
-          'person-follow-distance-deadzone': pages.person.limits.distanceDeadzone,
+          'line-follow-head-position': targetHeadDefault,
         };
         for (const [key, value] of Object.entries(followDefaults)) localStorage.setItem(key, String(value));
         applySpeed(settingsDefaults.linear_speed);
@@ -912,12 +1060,13 @@ import { bindMotionInput } from './motion-input.js';
         }
       });
       const updateTrackingButton = () => {
+        updateFeatureRestoreButtons();
         updateSticksAvailability();
         const busy = vision.awaitingTarget || lineRun.active || lineRun.pending || coordinatedOwner !== null;
         const configured = visionSource === 'color' ? Boolean(colorReference && colorChosen) : true;
         const pickupProfileReady = scope => trackingProfiles[scope].coordinatedReady && trackingProfiles[scope].phaseReady;
         const parametersReady = targetHeadOnly()
-          ? settingsLoaded && !!headSettingsDefaults && targetHeadHome !== null
+          ? settingsLoaded && !!headSettingsDefaults && headPositionTarget !== null
           : lineFollowing() ? settingsLoaded && lineSpeedInput.validity.valid
             : coordinatedLeaseReady;
         const startBlocked = !configured || !visionDirect[visionSource] || busy || mazeRun.active || mazeRun.pending || !session.open;
@@ -927,7 +1076,7 @@ import { bindMotionInput } from './motion-input.js';
         const firstArrivalSkill = trackingProfiles.target.coordinated?.arrival_skill;
         pickupSequenceStart.disabled = startBlocked || !pickupProfileReady('target')
           || !pickupProfileReady('pickup_after') || !firstArrivalSkill;
-        pickupSequenceStart.title = firstArrivalSkill ? '' : '请先设置动作前的到位动作';
+        pickupSequenceStart.title = firstArrivalSkill ? '' : '请先设置拾取目标的到位动作';
         trackingStart.title = !parametersReady
           ? (targetHeadOnly() ? '头部追踪参数不可用' : lineFollowing() || document.body.dataset.consolePage === 'person'
             ? '身体追踪参数不可用' : '联合追踪参数不可用') : '';
@@ -951,24 +1100,25 @@ import { bindMotionInput } from './motion-input.js';
               || (!vision.frameReady ? '等待识别画面' : '等待机器人状态'))
           : (lineRun.pending && !lineRun.cancelled) ? '正在启动' : '';
         const pickupLabel = pickupPage() && (vision.awaitingTarget || coordinatedRun.pending || coordinatedRun.active)
-          ? (pages.pickup.runScope === 'pickup_after' || pages.pickup.robotStage === 'after' ? '动作后' : '动作前') : '';
+          ? (pages.pickup.runScope === 'pickup_after' || pages.pickup.robotStage === 'after' ? '放置目标' : '拾取目标') : '';
         coordinatedStatus.textContent = [pickupLabel, phase ? `追踪阶段：${phase}` : ''].filter(Boolean).join(' · ');
       };
-      const sendTracking = (action, target = null) => {
-        const initial_pitch = action === 'start' && isVisionPage() ? headPositionTarget : null;
+      const sendTracking = (action, target = null, newPitch = null) => {
+        const initial_pitch = action === 'start' ? headPositionTarget : newPitch;
+        if (action === 'start') vision.startPitch = initial_pitch;
         if (studioActive && session.open) session.send({
           type: 'motion_tracking', action, initial_pitch, target, line_speed: pages.line.speed,
+          line_target_x: pages.line.targetX,
           reference_area: pages.line.referenceArea ?? 0.01, deadzone: pages.line.deadzone, gains: pages.line.gains,
         });
       };
       const pickupParameters = scope => {
         const profile = trackingProfiles[scope];
-        const pitch = scope === headPositionScope ? headPositionTarget
-          : Number(localStorage.getItem(headPositionKey(scope)) ?? targetHeadDefault);
+        const pitch = scope === headPositionScope ? headPositionTarget : savedHeadPitch(scope);
         return {
           ...(scope === trackingScope ? collectCoordinatedSettings() : profile.coordinated),
           ...(scope === trackingScope ? collectPhaseSettings() : profile.phases),
-          initial_pitch: Number.isInteger(pitch) && pitch >= 1024 && pitch <= 2250 ? pitch : null,
+          initial_pitch: pitch,
         };
       };
       const sendCoordinated = (action, target = null, newPitch = null) => {
@@ -977,7 +1127,7 @@ import { bindMotionInput } from './motion-input.js';
         const areaScale = camera ? (camera.width * camera.height) / (1280 * 720) : 1;
         const personFollow = document.body.dataset.consolePage === 'person';
         const headOnly = targetHeadOnly();
-        const startPitch = headOnly ? targetHeadHome : headPositionTarget;
+        const startPitch = headPositionTarget;
         if (action === 'start') vision.startPitch = startPitch ?? 1500;
         const pickup = pickupPage() && action !== 'stop' ? pickupParameters(pages.pickup.runScope ?? 'target') : null;
         const pickupAfter = pickup && pages.pickup.runScope === null ? {
@@ -986,25 +1136,29 @@ import { bindMotionInput } from './motion-input.js';
         } : null;
         if (studioActive && session.open) session.send({
           type: 'coordinated_tracking', action,
-          initial_pitch: action === 'start' ? startPitch : (personFollow && action === 'update' ? newPitch : null),
+          initial_pitch: action === 'start' ? startPitch : newPitch,
           // Native detection goes directly to the robot; the browser only supplies settings.
           target: null, camera: trackingCamera,
           head_deadzone: headOnly ? pages.target.deadzone : coordinatedHeadDeadzone,
           head_gains: headOnly ? pages.target.gains : coordinatedGains,
+          ...(headOnly ? {head_target_point: pages.target.targetPoint} : {}),
           body_gains: headOnly ? [0, 0, 0] : coordinatedBodyGains,
           final_body_gains: headOnly ? [0, 0, 0] : finalBodyGains,
-          approach_linear_limit: approachLinearLimit, final_linear_limit: finalLinearLimit,
-          final_lateral_limit: finalLateralLimit,
-          final_point: coordinatedFinalPoint,
-          final_tolerance: coordinatedFinalTolerance,
+          approach_linear_limit: headOnly ? null : approachLinearLimit,
+          final_linear_limit: headOnly ? 0 : finalLinearLimit,
+          final_lateral_limit: headOnly ? 0 : finalLateralLimit,
+          final_point: headOnly ? [160, 90] : coordinatedFinalPoint,
+          final_tolerance: headOnly ? [0, 0] : coordinatedFinalTolerance,
           stop_area_px: personFollow ? Math.max(1, Math.round(pages.person.limits.area * areaScale)) : null,
           stop_area_deadzone_px: personFollow ? Math.round(pages.person.limits.areaDeadzone * areaScale) : 0,
           stop_distance_mm: personFollow && tofEnabled ? pages.person.limits.distance : null,
           stop_distance_deadzone_mm: personFollow && tofEnabled ? pages.person.limits.distanceDeadzone : 0,
           arrival_skill: personFollow || headOnly ? '' : coordinatedArrivalSkill,
           arrival_delay_s: personFollow || headOnly ? 0 : coordinatedArrivalDelay,
-          mouth_before: {...coordinatedMouth.before, enabled: !personFollow && !headOnly && coordinatedMouth.before.enabled},
-          mouth_after: {...coordinatedMouth.after, enabled: !personFollow && !headOnly && coordinatedMouth.after.enabled},
+          mouth_before: headOnly ? {enabled: false, open: 0, duration_s: 0}
+            : {...coordinatedMouth.before, enabled: !personFollow && coordinatedMouth.before.enabled},
+          mouth_after: headOnly ? {enabled: false, open: 0, duration_s: 0}
+            : {...coordinatedMouth.after, enabled: !personFollow && coordinatedMouth.after.enabled},
           ...(pickup ? {...pickup, initial_pitch: action === 'start' ? pickup.initial_pitch : null, pickup_after: pickupAfter} : {}),
         });
       };
@@ -1219,53 +1373,40 @@ import { bindMotionInput } from './motion-input.js';
           setNotice(error, true);
         });
       });
-      document.querySelectorAll('[data-coordinated-deadzone]').forEach(input => {
-        const field = input.dataset.coordinatedDeadzone;
-        const values = coordinatedHeadDeadzone;
-        const axis = field === 'head-1' ? 1 : 0;
-        const scale = 100;
-        const error = '联合追踪死区需要非负有限数值';
+      for (const input of [lineTargetInput, lineToleranceInput]) {
+        const tolerance = input === lineToleranceInput;
+        const scale = tolerance ? headImageSize[0] : 1;
         input.addEventListener('input', () => {
-          setValidity(input, '');
-          const value = input.valueAsNumber;
-          if (!Number.isFinite(value) || !input.validity.valid) setValidity(input, error);
-          else { values[axis] = value / scale; updateCoordinated(); }
-          queueCoordinatedSettings();
-        });
-        input.addEventListener('change', () => {
-          if (input.validity.valid) return;
-          input.value = String(values[axis] * scale);
-          setValidity(input, '');
-          setNotice(error, true);
-        });
-      });
-      document.querySelectorAll('[data-tracking-deadzone]').forEach((input) => input.addEventListener('input', () => {
-        const value = Number(input.value);
-        if (input.value !== '' && Number.isFinite(value) && value >= 0) {
-          pages.line.deadzone[Number(input.dataset.trackingDeadzone)] = value / 100;
+          if (!input.validity.valid) return;
+          if (tolerance) pages.line.deadzone[1] = input.valueAsNumber / scale;
+          else pages.line.targetX = input.valueAsNumber;
+          updateTrackingGuide();
           if (lineRun.active) sendTracking('update');
-        }
-      }));
-      document.querySelectorAll('[data-head-tracking-deadzone]').forEach(input => {
-        const axis = Number(input.dataset.headTrackingDeadzone);
-        input.addEventListener('input', () => {
-          setValidity(input, '');
-          const value = input.valueAsNumber;
-          if (!Number.isFinite(value) || value < 0) {
-            setValidity(input, '头部死区需要非负有限数值');
-          } else {
-            pages.target.deadzone[axis] = value / 100;
-            if (targetHeadOnly()) updateCoordinated();
-          }
-          queueHeadSettings();
         });
         input.addEventListener('change', () => {
-          if (input.validity.valid) return;
-          input.value = String(pages.target.deadzone[axis] * 100);
-          setValidity(input, '');
-          setNotice('头部死区需要非负有限数值', true);
+          if (!input.validity.valid) {
+            const value = tolerance ? pages.line.deadzone[1] * scale : pages.line.targetX;
+            input.value = String(Number(value.toFixed(8)));
+          }
         });
-      });
+      }
+      const bindHeadTargetFields = (inputs, point, deadzone, queueSettings) => {
+        for (const input of inputs) {
+          input.addEventListener('input', () => {
+            if (!input.validity.valid) return;
+            const {values, index, scale} = headTargetField(input, point, deadzone);
+            values[index] = input.valueAsNumber / scale;
+            updateTrackingGuide();
+            updateCoordinated();
+            queueSettings();
+          });
+          input.addEventListener('change', () => {
+            if (!input.validity.valid) input.value = String(headTargetField(input, point, deadzone).value);
+          });
+        }
+      };
+      bindHeadTargetFields(headTargetFields, pages.target.targetPoint, pages.target.deadzone, queueHeadSettings);
+      bindHeadTargetFields(pickupHeadTargetFields, coordinatedHeadTarget, coordinatedHeadDeadzone, queueCoordinatedSettings);
       const stopTracking = (send = true) => {
         lineRun.stop(send ? () => sendTracking('stop') : null, session.open);
         updateMazeButton();
@@ -1359,11 +1500,7 @@ import { bindMotionInput } from './motion-input.js';
       };
       const reconcileHeadPosition = () => {
         const visible = isVisionPage();
-        const headOnly = targetHeadOnly();
         headPositionSetting.hidden = !visible;
-        headPosition.readOnly = headOnly;
-        document.querySelector('#head-position-home').hidden = !headOnly;
-        document.querySelector('#head-position-range').hidden = headOnly;
         // The server owns the head-home handoff until studio_leave completes.
         if (studioLeaveRequest !== null) return;
         const waitingForTarget = vision.awaitingTarget && !vision.targetReady && headPositionState !== 'idle';
@@ -1379,20 +1516,42 @@ import { bindMotionInput } from './motion-input.js';
           sendHeadPosition('stop');
         }
       };
-      headPosition.addEventListener('change', () => {
-        if (targetHeadOnly()) {
-          headPosition.value = targetHeadHome === null ? '' : String(targetHeadHome);
+      const commitHeadPosition = pitch => {
+        if (!Number.isFinite(pitch)) {
+          showHeadPitch(headPositionTarget);
           return;
         }
-        if (!headPosition.reportValidity()) return;
-        headPositionTarget = headPosition.value === '' ? null : Number(headPosition.value);
+        showHeadPitch(clampHeadPitch(pitch));
         localStorage.setItem(headPositionKey(headPositionScope), headPosition.value);
-        headPositionWanted = true;
-        if (headPositionState === 'active' && headPositionTarget !== null) sendHeadPosition('update');
-        if (coordinatedRun.active && document.body.dataset.consolePage === 'person') {
-          sendCoordinated('update', vision.target, headPositionTarget ?? 1500);
+        if (lineFollowing() && (lineRun.active || lineRun.pending)) {
+          if (lineRun.active) sendTracking('update', null, headPositionTarget);
+        } else if ((targetHeadOnly() || selectedPage === pages.person) && (coordinatedRun.active || coordinatedRun.pending)) {
+          if (coordinatedRun.active) sendCoordinated('update', vision.target, headPositionTarget);
+        } else {
+          headPositionWanted = true;
+          if (headPositionState === 'active') sendHeadPosition('update');
+          reconcileHeadPosition();
         }
-        reconcileHeadPosition();
+        updateTrackingButton();
+      };
+      headPosition.addEventListener('input', () => {
+        clearTimeout(headPitchTimer);
+        headPitchTimer = null;
+        if (Number.isFinite(headPosition.valueAsNumber)) headPositionSlider.value = headPosition.value;
+      });
+      headPosition.addEventListener('change', () => commitHeadPosition(headPosition.valueAsNumber));
+      headPositionSlider.addEventListener('input', () => {
+        headPosition.value = headPositionSlider.value;
+        if (headPitchTimer !== null || !(lineRun.active || (targetHeadOnly() && coordinatedRun.active))) return;
+        headPitchTimer = setTimeout(() => {
+          headPitchTimer = null;
+          commitHeadPosition(headPositionSlider.valueAsNumber);
+        }, 80);
+      });
+      headPositionSlider.addEventListener('change', () => {
+        clearTimeout(headPitchTimer);
+        headPitchTimer = null;
+        if (headPositionTarget !== headPositionSlider.valueAsNumber) commitHeadPosition(headPositionSlider.valueAsNumber);
       });
       followStopArea.addEventListener('input', () => {
         setValidity(followStopArea, '');
@@ -1472,14 +1631,14 @@ import { bindMotionInput } from './motion-input.js';
       const startSelectedTracking = () => {
         if (!studioActive || !state.active || !session.open || !vision.awaitingTarget || !vision.targetReady || !visionDirect[visionSource]
           || lineRun.pending || coordinatedOwner !== null
-          || (targetHeadOnly() && targetHeadHome === null)) return;
+          || (targetHeadOnly() && headPositionTarget === null)) return;
         if (headPositionState !== 'idle') {
           reconcileHeadPosition();
           return;
         }
         vision.awaitingTarget = false;
         if (pickupPage() && pages.pickup.runScope === null && !trackingProfiles.target.coordinated?.arrival_skill) {
-          setNotice('请先设置动作前的到位动作', true);
+          setNotice('请先设置拾取目标的到位动作', true);
           updateMazeButton();
           return;
         }
@@ -1524,17 +1683,15 @@ import { bindMotionInput } from './motion-input.js';
         const headOnly = targetHeadOnly();
         const stagedTarget = pickupPage();
         document.querySelector('#pickup-stages').hidden = !stagedTarget;
-        const showCoordinated = personFollow || stagedTarget || headOnly;
+        const showCoordinated = personFollow || stagedTarget;
         document.querySelectorAll('.coordinated-goal').forEach(field => { field.hidden = !showCoordinated; });
         document.querySelector('#follow-stop-area-setting').hidden = !personFollow;
         document.querySelector('#follow-area-deadzone-setting').hidden = !personFollow;
         document.querySelector('#follow-stop-distance-setting').hidden = !personFollow || !tofEnabled;
         document.querySelector('#follow-distance-deadzone-setting').hidden = !personFollow || !tofEnabled;
         document.querySelectorAll('.coordinated-arrival, .coordinated-mouth').forEach(field => {
-          field.hidden = !(stagedTarget || headOnly);
+          field.hidden = !stagedTarget;
         });
-        document.querySelector('#inactive-arrival-heading').hidden = !headOnly;
-        document.querySelector('#inactive-coordinated-heading').hidden = !headOnly;
         const headTab = document.querySelector('[data-coordinated-tab="head"]');
         const bodyTab = document.querySelector('[data-coordinated-tab="body"]');
         if (personFollow && headTab.getAttribute('aria-selected') === 'true') bodyTab.click();
@@ -1764,7 +1921,7 @@ import { bindMotionInput } from './motion-input.js';
       const setConnected = (connected, text) => {
         dot.classList.toggle("online", connected);
         dot.setAttribute("aria-label", connected ? "控制已就绪" : "控制未连接");
-        setText(connection, text || (connected ? '控制已连接' : '控制未连接'));
+        setText(connection, text === null ? '' : text || (connected ? '控制已连接' : '控制未连接'));
         updateActionAvailability(connected);
         renderMotionPower();
         speedInput.disabled = !connected;
@@ -1922,21 +2079,11 @@ import { bindMotionInput } from './motion-input.js';
       const sendInput = () => {
         if (!studioActive || !controlLeaseReady || !session.open
             || session.backpressured || (state.active && (mazeRun.active || mazeRun.pending))) return;
-        state.buttons = [];
-        const visionInput = isVisionPage()
-          && state.active && !sticksBlocked()
-          && [state.left_x, state.left_y, state.right_x, state.right_y].some(value => value !== 0);
-        if (visionInput && mode !== 'head_drive') {
-          if (!visionModeRequested) {
-            // Send a neutral edge first so the existing mode button can rise with this input.
-            session.send({ type: 'input', seq: ++sequence, ...state,
-              left_x: 0, left_y: 0, right_x: 0, right_y: 0, buttons: [] });
-            visionModeRequested = true;
-          }
-          if (!state.buttons.includes('right')) state.buttons.push('right');
+        const head_stick = manualControlPage() && mode !== 'body_pose' ? headStickAxes : undefined;
+        if (state.active && !sticksBlocked() && headPositionWanted && head_stick?.some(value => value !== 0)) {
+          headPositionWanted = false;
+          reconcileHeadPosition();
         }
-        const head_stick = document.body.dataset.consolePage === 'control' && mode !== 'body_pose'
-          ? headStickAxes : undefined;
         session.send({ type: "input", seq: ++sequence, ...state, head_stick });
       };
       function sendActionRequest(name) {
@@ -2093,14 +2240,11 @@ import { bindMotionInput } from './motion-input.js';
         updateSettingsState();
         restoreSharedSettings();
       };
-      const displayMode = () => isVisionPage() ? 'head_drive' : mode;
       const updateMode = (nextMode, announce = true) => {
         const next = modeCopy[nextMode] ? nextMode : "drive";
-        const visionSwitch = visionModeRequested && next === 'head_drive'
-          && isVisionPage() && !sticksBlocked();
-        if (mode !== next && !visionSwitch) { keys.clear(); zero(); }
+        if (mode !== next) { keys.clear(); zero(); }
         mode = next;
-        const copy = modeCopy[displayMode()];
+        const copy = modeCopy[mode];
         setText(leftHint, copy.leftHint);
         setText(rightHint, copy.rightHint);
         setText(leftSummary, copy.leftSummary);
@@ -2115,7 +2259,6 @@ import { bindMotionInput } from './motion-input.js';
         });
         motion.renderMode();
         updateSticksAvailability();
-        if (visionSwitch) { visionModeRequested = false; sendInput(); }
         if (announce) setNotice(`已切换到${copy.label}。`);
       };
       const connect = () => { if (studioActive) session.start(); };
@@ -2132,10 +2275,8 @@ import { bindMotionInput } from './motion-input.js';
           setConnected(true, "");
           window.__visionControlToken = message.vision_token || null;
           window.dispatchEvent(new Event('vision-control-token'));
-          targetHeadHome = Number.isInteger(message.head_home_pitch_raw)
-            && message.head_home_pitch_raw >= 1024 && message.head_home_pitch_raw <= 2250
-            ? message.head_home_pitch_raw : null;
-          if (headPositionScope === 'home') applyHeadPositionScope('home');
+          targetHeadHome = headPitchInRange(message.head_home_pitch_raw) ? message.head_home_pitch_raw : null;
+          if (headPositionScope === 'target_tracking') applyHeadPositionScope(headPositionScope);
           const draft = settingsDirty ? collectSettings() : null;
           const headDraft = headSettingsDirty ? collectHeadSettings() : null;
           const hadTrackingDraft = trackingUnsaved();
@@ -2278,6 +2419,7 @@ import { bindMotionInput } from './motion-input.js';
           if (message.action === 'start' && lineRun.pending) {
             const mustStop = lineRun.accept(message.accepted, studioActive && state.active && lineFollowing());
             if (lineRun.active) {
+              if (vision.startPitch !== headPositionTarget) sendTracking('update', null, headPositionTarget);
               armLineWatchdog();
             } else if (mustStop) sendTracking('stop');
           } else if (message.action === 'update' && !message.accepted && lineRun.active) {
@@ -2312,16 +2454,22 @@ import { bindMotionInput } from './motion-input.js';
             setNotice(`头部保持已停止：${message.reason || '机器人拒绝请求'}`, true);
           }
           reconcileHeadPosition();
-          if (headPositionState === 'idle') startSelectedTracking();
+          if (headPositionState === 'idle') {
+            if (headCenterPending && message.accepted && state.active && !headCenterUnavailable()) {
+              sendAction('center_head');
+            }
+            headCenterPending = false;
+            startSelectedTracking();
+          }
         } else if (message.type === 'coordinated_tracking_result') {
           const owner = coordinatedOwner;
           const current = owner === coordinatedRun && !owner.cancelled && studioActive;
           if (message.action === 'start' && owner?.pending) {
             const mustStop = owner.accept(message.accepted, current);
             if (owner.active) {
-              const changedPitch = document.body.dataset.consolePage === 'person'
-                && vision.startPitch !== (headPositionTarget ?? 1500);
-              sendCoordinated('update', vision.target, changedPitch ? (headPositionTarget ?? 1500) : null);
+              const changedPitch = (targetHeadOnly() || selectedPage === pages.person)
+                && vision.startPitch !== headPositionTarget;
+              sendCoordinated('update', vision.target, changedPitch ? headPositionTarget : null);
             } else {
               owner.clearTimer();
               coordinatedOwner = null;
@@ -2406,7 +2554,6 @@ import { bindMotionInput } from './motion-input.js';
             controlBusy.hidden = false;
             return;
           }
-          if (visionModeRequested) { keys.clear(); zero(); }
           if (message.request_id !== undefined) {
             for (const [name, pending] of pendingSkills) {
               if (pending.id === message.request_id) clearPendingSkill(name);
@@ -2477,13 +2624,21 @@ import { bindMotionInput } from './motion-input.js';
         obstaclePending = false;
         confirmedObstacle = null;
         zero();
-        setConnected(false, "页面未连接");
+        setConnected(false, studioActive ? '页面未连接' : null);
       }
 
       actionButtons.forEach(button => {
         button.addEventListener('click', () => {
           const action = button.dataset.action;
-          if (action === 'center_head' && (!state.active || headCenterUnavailable())) return;
+          if (action === 'center_head') {
+            if (!state.active || headCenterUnavailable()) return;
+            if (headPositionState !== 'idle') {
+              headCenterPending = true;
+              headPositionWanted = false;
+              reconcileHeadPosition();
+              return;
+            }
+          }
           sendAction(action);
         });
       });
@@ -2563,10 +2718,8 @@ import { bindMotionInput } from './motion-input.js';
         if (isVisionPage()) {
           const scope = document.body.dataset.consolePage === 'person' ? 'person' : 'target';
           if (pickupPage()) selectPickupStage('target');
-          if (scope !== trackingScope) {
-            applyTrackingProfile(scope);
-            updateSettingsState();
-          }
+          else applyTrackingProfile(scope);
+          updateSettingsState();
           if (currentHeadPositionScope() !== headPositionScope) {
             headPositionScope = currentHeadPositionScope();
             applyHeadPositionScope(headPositionScope);

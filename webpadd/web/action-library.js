@@ -11,7 +11,7 @@
   panel.hidden = false;
 
   function feedback(text, error = false) {
-    window.dispatchEvent(new CustomEvent('console-feedback', { detail: { text, error } }));
+    window.dispatchEvent(new CustomEvent('console-feedback', { detail: { page: 'control', text, error } }));
   }
 
   function request(operation, name) {

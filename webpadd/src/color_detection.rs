@@ -83,6 +83,8 @@ enum Settings {
     Sample {
         generation: u64,
         point: [f64; 2],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_reference: Option<ColorReference>,
         threshold: f64,
         #[serde(default)]
         line: bool,
@@ -101,11 +103,16 @@ impl Settings {
         let threshold = match self {
             Self::Prepare { .. } => return true,
             Self::Sample {
-                point, threshold, ..
+                point, previous_reference, threshold, ..
             } => {
                 if !point
                     .iter()
                     .all(|v| v.is_finite() && (0.0..1.0).contains(v))
+                {
+                    return false;
+                }
+                if previous_reference.as_ref().is_some_and(|reference|
+                    !reference.lab.iter().all(|v| (0.0..=255.0).contains(v)))
                 {
                     return false;
                 }

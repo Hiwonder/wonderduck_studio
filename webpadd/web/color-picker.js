@@ -3,6 +3,7 @@
   const frame = document.querySelector('.camera-frame');
   const overlay = document.querySelector('#color-overlay');
   const output = overlay.getContext('2d');
+  const recognitionColor = getComputedStyle(overlay).getPropertyValue('--recognition-color').trim();
   const button = document.querySelector('#color-pick');
   const result = document.querySelector('#color-result');
   const lineResult = document.querySelector('#line-result');
@@ -98,7 +99,11 @@
       if (hex) notice.append(document.createTextNode(' · '));
       notice.append(document.createTextNode(message));
       result.append(notice);
-      window.dispatchEvent(new CustomEvent('console-feedback', {detail: {text: message, error: true}}));
+      if (visionPageActive()) {
+        window.dispatchEvent(new CustomEvent('console-feedback', {
+          detail: {page: document.body.dataset.consolePage, text: message, error: true},
+        }));
+      }
     }
     result.title = '';
   }
@@ -145,13 +150,14 @@
   }
 
   function command() {
-    if (phase === 'choose' || (socket && (phase === 'idle' || phase === 'paused'))) {
+    if ((phase === 'choose' && !reference) || (socket && (phase === 'idle' || phase === 'paused'))) {
       return {type: 'prepare', generation};
     }
     if (phase === 'sampling') {
-      return {type: 'sample', generation, point: sample.point, threshold: Number(threshold.value), line: lineMode};
+      return {type: 'sample', generation, point: sample.point, threshold: Number(threshold.value),
+        line: lineMode, ...(reference ? {previous_reference: reference} : {})};
     }
-    if (phase === 'tracking') {
+    if (phase === 'tracking' || phase === 'choose') {
       return {type: 'configure', generation, reference, threshold: Number(threshold.value), line: lineMode};
     }
     return null;
@@ -163,7 +169,7 @@
     if (!socket) { connect(); return; }
     if (socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(settings));
-      setRecognitionActive(phase === 'tracking');
+      setRecognitionActive(phase === 'tracking' || Boolean(reference && ['choose', 'sampling'].includes(phase)));
     }
   }
 
@@ -216,11 +222,10 @@
         output.arc(x, y, 6, 0, 2 * Math.PI);
       }
     }
-    output.strokeStyle = 'rgb(255,255,0)';
+    output.strokeStyle = recognitionColor;
     output.lineWidth = 3;
     output.stroke();
     if (data.line.center !== null) {
-      output.strokeStyle = '#ff604b';
       output.lineWidth = 4;
       output.beginPath();
       output.arc(...toRaw(data.line.center, 0.84), 9, 0, 2 * Math.PI);
@@ -228,28 +233,42 @@
     }
   }
 
-  function drawSample(data) {
-    if (phase !== 'sampling') return;
-    if (!validDimensions(data) || !Array.isArray(data.point) || data.point.length !== 2
+  function showSampleProgress(data) {
+    if (!Array.isArray(data.point) || data.point.length !== 2
       || !data.point.every(value => Number.isFinite(value) && value >= 0 && value <= 1)
       || !Number.isInteger(data.count) || data.count < 1 || data.count > 10) {
       throw new Error('取色进度格式无效');
     }
-    if (data.count <= sample.count) return;
-    sample.count = data.count;
-    result.textContent = `取色 ${data.count}/10`;
-    if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+    sample.count = Math.max(sample.count, data.count);
+    const message = `取色 ${sample.count}/10`;
+    if (window.WonderduckLanguage) window.WonderduckLanguage.setLocalizedText(result, message);
+    else result.textContent = message;
+  }
+
+  function canDrawOverlay() {
+    return video.srcObject && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+  }
+
+  function drawSample(data) {
+    if (phase !== 'sampling') return;
+    if (!validDimensions(data)) throw new Error('取色进度格式无效');
+    showSampleProgress(data);
+    if (!canDrawOverlay()) {
       clearTarget();
       return;
     }
     sizeOverlay(data);
-    output.beginPath();
-    output.arc(data.point[0] * data.width, data.point[1] * data.height, data.count, 0, 2 * Math.PI);
-    output.strokeStyle = 'rgb(255,255,0)';
-    output.lineWidth = 5;
-    output.stroke();
+    drawSampleMarker(data);
     clearTimeout(expiry);
     expiry = setTimeout(clearTarget, 2000);
+  }
+
+  function drawSampleMarker(data) {
+    output.beginPath();
+    output.arc(sample.point[0] * data.width, sample.point[1] * data.height, sample.count, 0, 2 * Math.PI);
+    output.strokeStyle = recognitionColor;
+    output.lineWidth = 5;
+    output.stroke();
   }
 
   function drawFrame(data) {
@@ -278,31 +297,37 @@
     }
     if (data.captured_at_unix_us <= lastCaptured) return;
     lastCaptured = data.captured_at_unix_us;
-    const completed = phase === 'sampling';
-    reference = data.reference;
-    if (completed) explicitlySelected = true;
-    sample = null;
-    phase = 'tracking';
+    if (data.sampling && phase === 'sampling') showSampleProgress(data.sampling);
+    else if (phase !== 'choose') {
+      const completed = phase === 'sampling';
+      reference = data.reference;
+      sample = null;
+      phase = 'tracking';
+      button.setAttribute('aria-pressed', 'true');
+      frame.classList.remove('picking');
+      if (completed) {
+        explicitlySelected = true;
+        window.dispatchEvent(new CustomEvent('color-reference-changed', {detail: reference}));
+        sendSettings();
+      }
+      showReference();
+    }
     setRecognitionActive(true);
-    button.setAttribute('aria-pressed', 'true');
-    frame.classList.remove('picking');
-    showReference();
     if (lineMode) {
       const message = line.center === null ? '识别区域内未找到巡线' : '已识别巡线';
       if (window.WonderduckLanguage) window.WonderduckLanguage.setLocalizedText(lineResult, message);
       else if (lineResult.textContent !== message) lineResult.textContent = message;
       lineResult.hidden = false;
     }
-    if (completed) window.dispatchEvent(new CustomEvent('color-reference-changed', {detail: reference}));
     recordFrame('color');
-    const drawOverlay = video.srcObject && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+    const drawOverlay = canDrawOverlay();
     if (drawOverlay) sizeOverlay(data);
     if (lineMode && drawOverlay) drawLineResult(data);
     let point = null;
     if (data.bounds) {
       const [x, y, width, height] = data.bounds;
       if (drawOverlay) {
-        output.strokeStyle = 'rgb(255,255,0)';
+        output.strokeStyle = recognitionColor;
         output.lineWidth = 2;
         output.strokeRect(x, y, width, height);
       }
@@ -312,6 +337,7 @@
       else if (data.rotate === 270) [u, v] = [v, 1 - u];
       point = [Math.max(-1, Math.min(1, 2 * u - 1)), Math.max(-1, Math.min(1, 2 * v - 1))];
     }
+    if (drawOverlay && phase === 'sampling' && sample.count) drawSampleMarker(data);
     // A selected reference is ready even when no matching contour is present.
     publishTarget(true, point, data.area, data.captured_at_unix_us, lineMode ? line : null);
     clearTimeout(expiry);
@@ -340,7 +366,7 @@
         } else if (data.type === 'sampling' || data.type === 'frame') {
           if (data.generation !== generation || !command()) return;
           if (data.type === 'sampling') drawSample(data);
-          else if (activeSource === 'color' && (phase === 'sampling' || phase === 'tracking')) drawFrame(data);
+          else if (activeSource === 'color' && (phase === 'sampling' || phase === 'tracking' || (phase === 'choose' && reference))) drawFrame(data);
         } else if (['waiting', 'recovering', 'error'].includes(data.type)) {
           const label = {waiting: '等待摄像头', recovering: '等待摄像头恢复', error: '颜色识别失败'}[data.type];
           const message = [label, data.message].filter(Boolean).join('：');
@@ -406,9 +432,11 @@
   }
 
   button.addEventListener('click', () => {
-    const cancel = phase === 'choose' || phase === 'sampling';
-    clear();
-    if (cancel) return;
+    if (phase === 'choose' || phase === 'sampling') {
+      cancelPick();
+      return;
+    }
+    if (phase !== 'tracking') clear();
     window.dispatchEvent(new Event('color-pick-start'));
     suspendedByPage = false;
     phase = 'choose';
@@ -416,7 +444,7 @@
     frame.classList.add('picking');
     result.textContent = '请选择画面区域';
     window.dispatchEvent(new CustomEvent('console-feedback', {
-      detail: {text: '请将鼠标移到摄像头画面中，点击要取色的物体', error: false},
+      detail: {page: document.body.dataset.consolePage, text: '请将鼠标移到摄像头画面中，点击要取色的物体', error: false},
     }));
     sendSettings();
   });
@@ -434,7 +462,21 @@
     result.textContent = '取色 0/10';
     sendSettings();
   });
-  frame.addEventListener('contextmenu', event => { event.preventDefault(); if (phase !== 'paused') clear(); });
+  function cancelPick() {
+    if (!reference) { clear(); return; }
+    generation++;
+    phase = 'tracking';
+    sample = null;
+    frame.classList.remove('picking');
+    showReference();
+    sendSettings();
+  }
+
+  frame.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    if (phase === 'choose' || phase === 'sampling') cancelPick();
+    else if (phase !== 'paused') clear();
+  });
   window.addEventListener('vision-source-change', event => {
     if (activeSource !== event.detail) {
       activeSource = event.detail;
@@ -446,17 +488,22 @@
   window.addEventListener('object-detection-frame', () => recordFrame('object'));
   window.addEventListener('object-detection-reset', () => resetFps('object'));
   function loadReference(value, presetThreshold, explicit) {
-    clear();
-    if (presetThreshold !== undefined) {
-      threshold.value = String(presetThreshold);
-      threshold.dispatchEvent(new Event('input', {bubbles: true}));
-    }
-    if (!value) return;
+    if (!value) { clear(); return; }
     if (!validReference(value)) { showReference('已保存颜色参照无效'); return; }
+    if (!explicit || !reference) clear();
+    else {
+      generation++;
+      sample = null;
+      frame.classList.remove('picking');
+    }
     if (explicit) suspendedByPage = false;
     reference = value;
     explicitlySelected = explicit;
     phase = !explicit || activeSource === 'object' || !visionPageActive() || suspendedByPage ? 'paused' : 'tracking';
+    if (presetThreshold !== undefined) {
+      threshold.value = String(presetThreshold);
+      thresholdValue.textContent = Number(threshold.value).toFixed(2);
+    }
     button.setAttribute('aria-pressed', String(phase === 'tracking'));
     showReference();
     if (explicit) window.dispatchEvent(new CustomEvent('color-reference-changed', {detail: reference}));

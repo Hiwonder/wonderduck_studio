@@ -1,7 +1,6 @@
-// Sidebar state and notifications shared by all workspaces.
-import { friendlyErrorMessage } from './user-messages.js';
+// Sidebar state shared by all workspaces.
 import { deviceFresh, SAMPLE_MAX_AGE_MS, SERVO_STATUS_MAX_AGE_MS } from './state-status.js';
-import { onLanguageChange, setLocalizedAttribute, setLocalizedText } from '../../../webpadd/web/language.js';
+import { setLocalizedAttribute, setLocalizedText } from '../../../webpadd/web/language.js';
 
 export function createConnectionStatus($) {
   return function setConnectionStatus(text, kind, detail = '') {
@@ -80,28 +79,20 @@ export function createLowVoltageIndicator() {
   };
 }
 
-export function renderSidebarVoltage($, { calibrating, voltage, fresh, lowVoltage }) {
+export function renderTopbarVoltage($, { calibrating, voltage, fresh, lowVoltage }) {
   calibrating = Boolean(calibrating);
   const warning = lowVoltageWarning(lowVoltage);
-  const output = $('sidebar-voltage');
+  const output = $('topbar-voltage');
   const shownVoltage = warning && Number.isFinite(lowVoltage.voltage_v) ? lowVoltage.voltage_v : voltage;
   const text = calibrating ? '采集中' : (fresh || warning) && Number.isFinite(shownVoltage) ? `${shownVoltage.toFixed(1)} V` : '--';
   const label = warning ? '电压过低，请及时充电' : calibrating ? 'IMU 校准采集中' : '电池电压';
   setLocalizedText(output, text);
   setLocalizedAttribute(output, 'aria-label', label);
-  const row = $('sidebar-telemetry'), battery = $('sidebar-battery-icon'), sampling = $('sidebar-sampling-icon');
+  const row = $('topbar-battery'), battery = $('topbar-battery-icon'), sampling = $('topbar-sampling-icon');
   setLocalizedAttribute(row, 'title', label);
   row.classList.toggle('low-voltage', warning);
   if (battery.hasAttribute('hidden') !== calibrating) battery.toggleAttribute('hidden', calibrating);
   if (sampling.hasAttribute('hidden') === calibrating) sampling.toggleAttribute('hidden', !calibrating);
-}
-
-export function renderSidebarCpu($, health) {
-  const temperature = health?.cpu_temp_c;
-  const throttle = health?.cpu_throttle;
-  const throttled = throttle?.level > 0 || (throttle?.max_khz > 0 && throttle.khz < throttle.max_khz);
-  setLocalizedText($('sidebar-cpu-temperature'), Number.isFinite(temperature) ? 'CPU ' + temperature.toFixed(0) + ' °C' : 'CPU --');
-  $('sidebar-cpu-throttled').hidden = !throttled;
 }
 
 export function createSidebar($, iconsRefresh) {
@@ -126,48 +117,4 @@ export function createSidebar($, iconsRefresh) {
   compactSidebar.addEventListener('change', event => setSidebarOpen(!event.matches));
   setSidebarOpen(!compactSidebar.matches);
   return setSidebarOpen;
-}
-
-export function createNotifications($) {
-  const lastCommand = $('last-command');
-  let lastStatus = lastCommand.textContent, routineSource = null, noticeId = 0;
-  function toast(message, error = false, { routine = false, source = null } = {}) {
-    if (message === '工作区已切换，请重新操作') return;
-    if (error) message = friendlyErrorMessage(message);
-    if (routine) {
-      routineSource = source;
-      setLocalizedText(lastCommand, message);
-      lastStatus = lastCommand.textContent;
-      if (lastCommand.classList.contains('error') !== error) lastCommand.classList.toggle('error', error);
-      return;
-    }
-    $('toast-message').textContent = message;
-    $('toast').classList.toggle('error', error);
-    $('toast').hidden = false;
-    clearTimeout(toast.timer);
-    const current = ++noticeId;
-    toast.timer = setTimeout(() => { $('toast').hidden = true; }, error ? 7000 : 3000);
-    return current;
-  }
-  toast.dismiss = id => {
-    if (id !== noticeId) return;
-    clearTimeout(toast.timer);
-    $('toast').hidden = true;
-  };
-  toast.clearRoutine = source => {
-    if (!source || routineSource !== source || lastCommand.textContent !== lastStatus) return;
-    routineSource = null;
-    lastStatus = '';
-    lastCommand.textContent = '';
-    lastCommand.classList.remove('error');
-  };
-  $('toast-close').addEventListener('click', () => toast.dismiss(noticeId));
-  onLanguageChange(() => { lastStatus = lastCommand.textContent; });
-  new MutationObserver(() => {
-    if (lastCommand.textContent === lastStatus) return;
-    lastStatus = lastCommand.textContent;
-    routineSource = null;
-    lastCommand.classList.remove('error');
-  }).observe(lastCommand, { childList: true, characterData: true, subtree: true });
-  return toast;
 }
