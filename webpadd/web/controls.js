@@ -1089,12 +1089,13 @@ import { bindMotionInput } from './motion-input.js';
           waiting_action: '等待动作', mouth_before_action: '动作前调整嘴部', running_action: '执行动作',
           mouth_after_action: '动作后调整嘴部', holding_stand: '站立保持',
           waiting_target: '目标暂时丢失', searching: '扫描寻找目标', paused_vision: '画面中断，运动暂停',
-          waiting_feedback: '等待舵机反馈', waiting_robot: '等待机器人就绪', fallen: '机器人已跌倒',
+          waiting_feedback: '等待舵机反馈', waiting_robot: '等待机器人就绪',
+          fallen: '正在起身，站稳后继续',
         };
         const headOnlyPhase = vision.robotPhase === 'approach' ? '头部追踪'
           : vision.robotPhase === 'waiting_target' ? '头部追踪 · 等待目标' : phases[vision.robotPhase];
         const phase = vision.awaitingTarget ? '等待识别画面'
-          : lineRun.active ? (pages.line.point ? '自主巡线' : '等待识别巡线')
+          : lineRun.active ? (vision.robotPhase === 'fallen' ? phases.fallen : pages.line.point ? '自主巡线' : '等待识别巡线')
           : coordinatedRun.active || (coordinatedRun.pending && !coordinatedRun.cancelled)
             ? ((targetHeadOnly() ? headOnlyPhase : phases[vision.robotPhase])
               || (!vision.frameReady ? '等待识别画面' : '等待机器人状态'))
@@ -2011,7 +2012,8 @@ import { bindMotionInput } from './motion-input.js';
       };
       const updateStatus = (status) => {
         const connected = status.robotd_connected === true;
-        const nextTrackingPhase = connected && coordinatedRun.active ? status.tracking_phase || null : null;
+        const nextTrackingPhase = connected && (coordinatedRun.active || lineRun.active)
+          ? status.tracking_phase || null : null;
         const nextPickupStage = connected && pickupPage() && coordinatedRun.active && pages.pickup.runScope === null
           ? status.pickup_stage || null : null;
         if (nextPickupStage !== pages.pickup.robotStage || nextTrackingPhase !== vision.robotPhase) {
@@ -2068,7 +2070,8 @@ import { bindMotionInput } from './motion-input.js';
         setStatusValue(gyroStatus, formatVector(status.imu_gyro, 3));
         setStatusValue(rpyStatus, formatRpy(status.imu_quat));
         setStatusValue(tofDistance, tofMessage(status));
-        if (mazeRun.active) setText(mazeStatus, connected && typeof status.tof_distance_mm === 'number' ? '避障行走中' : '测距不可用，等待恢复');
+        if (mazeRun.active) setText(mazeStatus, status.tracking_phase === 'fallen' ? '正在起身，站稳后继续'
+          : connected && typeof status.tof_distance_mm === 'number' ? '避障行走中' : '测距不可用，等待恢复');
         setText(obstacleState, connected && status.obstacle_active === true ? "避障中" : "");
         const safety = status.fallen === true ? "已倒下" : status.limp === true ? "已泄力" : status.fallen === false ? "正常" : "--";
         setStatusValue(safetyStatus, safety, safety === "正常" ? "good" : safety === "--" ? "" : "warn");

@@ -399,6 +399,7 @@ const ENGLISH = new Map(Object.entries({
   '站立保持': 'Holding standing pose', '目标暂时丢失': 'Target temporarily lost', '扫描寻找目标': 'Searching for target',
   '画面中断，运动暂停': 'Video lost; movement paused', '等待舵机反馈': 'Waiting for servo feedback',
   '等待机器人就绪': 'Waiting for robot', '等待机器人状态': 'Waiting for robot status', '机器人已跌倒': 'Robot has fallen',
+  '正在起身，站稳后继续': 'Getting up. The task will resume once stable.',
   '画面中断，头部追踪已停止': 'Video lost; head tracking stopped', '画面中断，联合追踪已暂停': 'Video lost; combined tracking paused',
   '头部追踪 · 等待目标': 'Head tracking · waiting for target', '头部追踪 · 寻找目标': 'Head tracking · searching for target',
   '身体追踪 · 寻找目标': 'Body tracking · searching for target',
