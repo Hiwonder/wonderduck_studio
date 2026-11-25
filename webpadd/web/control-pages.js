@@ -71,12 +71,12 @@ export function createControlPages() {
     profile: createTrackingProfile(),
     limits: {area: null, areaDeadzone: null, distance: null, distanceDeadzone: null},
   };
-  const target = {vision: createVisionState(), coordinatedRun: createRun(), targetPoint: [160, 90], deadzone: [0.1, 0.05],
-    gains: [[0.5, 0.04, 0.01], [0.5, 0.04, 0.01]]};
+  const target = {vision: createVisionState(), coordinatedRun: createRun(), targetPoint: [160, 90], deadzone: [0.05, 0.05],
+    gains: [[1.3, 0, 0.1], [2.8, 0.2, 0.5]]};
   const pickup = {vision: createVisionState(), coordinatedRun: createRun(), before: createTrackingProfile(),
     after: createTrackingProfile(), robotStage: null, runScope: null};
   const line = {vision: createVisionState(), run: createRun(), point: null,
-    speed: 0.15, targetX: 160, referenceArea: null, deadzone: [0.1, 0.05], gains: [[0.5, 0.04, 0.01], [0.5, 0.04, 0.01]]};
+    speed: 0.15, targetX: 160, referenceArea: 0.0869, deadzone: [0.1, 0.05], gains: [[0.5, 0.04, 0.01], [0.5, 0.04, 0.01]]};
   const maze = {run: createRun(), settings: null};
   return {control, person, target, pickup, line, maze};
 }

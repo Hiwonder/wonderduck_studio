@@ -1,5 +1,6 @@
 //! On-demand object detection from the existing media frame socket.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -18,7 +19,13 @@ use crate::AppState;
 use duck_detect::{onnx, rknn};
 use crate::frame_prefetch::{CameraFrames, camera_recoverable, media_socket, source_root};
 use crate::object_detection_ncnn;
-use crate::person_models::{PersonDecoder, Yolov6nDecoder};
+use crate::person_models::{DEFAULT_PERSON_CONFIDENCE, PersonDecoder, Yolov6nDecoder};
+
+const YOLO26N_THRESHOLD: f32 = 0.25;
+
+fn valid_person_confidence(value: f32) -> bool {
+    (0.01..=1.0).contains(&value)
+}
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -43,6 +50,20 @@ pub(super) struct Object {
     pub(super) class: usize,
     pub(super) score: f32,
     pub(super) bounds: [f32; 4],
+}
+
+impl Event {
+    pub(super) fn filter_confidence(&mut self, confidence: f32) {
+        if let Self::Frame { objects, .. } = self {
+            objects.retain(|object| object.score >= if object.class == 0 { confidence } else { YOLO26N_THRESHOLD });
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum PersonCommand {
+    SetConfidence { confidence: f32 },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -160,7 +181,7 @@ struct Detector {
 
 #[derive(Default)]
 struct Subscribers {
-    count: usize,
+    confidence: HashMap<u64, f32>,
     running: bool,
 }
 
@@ -171,10 +192,10 @@ impl Detector {
         Self { model, shared, events, recorder }
     }
 
-    fn subscribe(&self) -> Subscription {
+    fn subscribe(&self, id: u64, confidence: f32) -> Subscription {
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock().expect("object subscriber lock poisoned");
-        state.count += 1;
+        state.confidence.insert(id, confidence);
         if !state.running {
             state.running = true;
             self.events.send_replace(Event::Waiting);
@@ -187,16 +208,26 @@ impl Detector {
                 .expect("cannot start object detection worker");
         }
         wake.notify_one();
-        Subscription(self.shared.clone())
+        Subscription { id, shared: self.shared.clone() }
     }
 }
 
-struct Subscription(Arc<(Mutex<Subscribers>, Condvar)>);
+struct Subscription {
+    id: u64,
+    shared: Arc<(Mutex<Subscribers>, Condvar)>,
+}
+
+impl Subscription {
+    fn set_confidence(&self, value: f32) {
+        self.shared.0.lock().expect("object subscriber lock poisoned").confidence.insert(self.id, value);
+    }
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
-        let (lock, wake) = &*self.0;
+        let (lock, wake) = &*self.shared;
         let mut state = lock.lock().expect("object subscriber lock poisoned");
-        state.count -= 1;
+        state.confidence.remove(&self.id);
         wake.notify_one();
     }
 }
@@ -231,17 +262,30 @@ pub(super) async fn upgrade(
     let Some(model) = model else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    upgrade.on_upgrade(move |socket| session(socket, state, model))
+    let confidence = match query.as_deref().into_iter().flat_map(|query| query.split('&'))
+        .find_map(|pair| pair.strip_prefix("confidence="))
+    {
+        Some(raw) => match raw.parse::<f32>() {
+            Ok(value) if valid_person_confidence(value) => value,
+            _ => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        None => DEFAULT_PERSON_CONFIDENCE,
+    };
+    upgrade.on_upgrade(move |socket| session(socket, state, model, confidence))
 }
 
-async fn session(mut socket: WebSocket, state: AppState, model: PersonModel) {
+async fn session(mut socket: WebSocket, state: AppState, model: PersonModel, confidence: f32) {
     let id = state.next_session.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let detector = state.objects.get(model);
-    let _subscription = detector.subscribe();
+    let subscription = detector.subscribe(id, confidence);
+    let (confidence, relay_confidence) = watch::channel(confidence);
     let mut events = detector.events.subscribe();
-    let relay = tokio::spawn(crate::vision_relay::relay_objects(state.clone(), id, detector.events.subscribe()));
+    let relay = tokio::spawn(crate::vision_relay::relay_objects(
+        state.clone(), id, detector.events.subscribe(), relay_confidence,
+    ));
     loop {
-        let current = events.borrow_and_update().clone();
+        let mut current = events.borrow_and_update().clone();
+        current.filter_confidence(*confidence.borrow());
         let Ok(message) = serde_json::to_string(&current) else {
             break;
         };
@@ -252,8 +296,20 @@ async fn session(mut socket: WebSocket, state: AppState, model: PersonModel) {
             result = events.changed() => if result.is_err() { break },
             result = socket.recv() => match result {
                 Some(Ok(Message::Text(text))) => {
-                    let accepted = crate::vision_relay::bind(&state, id, crate::vision_relay::Source::Person, &text).await;
-                    let reply = serde_json::json!({"type":"tracking_bound", "accepted":accepted});
+                    let reply = match serde_json::from_str::<PersonCommand>(&text) {
+                        Ok(PersonCommand::SetConfidence { confidence: requested }) => {
+                            let accepted = valid_person_confidence(requested);
+                            if accepted {
+                                subscription.set_confidence(requested);
+                                confidence.send_replace(requested);
+                            }
+                            serde_json::json!({"type":"confidence_result", "accepted":accepted, "confidence":*confidence.borrow()})
+                        }
+                        Err(_) => {
+                            let accepted = crate::vision_relay::bind(&state, id, crate::vision_relay::Source::Person, &text).await;
+                            serde_json::json!({"type":"tracking_bound", "accepted":accepted})
+                        }
+                    };
                     if socket.send(Message::Text(reply.to_string().into())).await.is_err() { break; }
                     continue;
                 }
@@ -278,11 +334,11 @@ fn worker(Detector { model, shared, events, recorder }: Detector) {
             events.send_replace(Event::Error {
                 message: format!("物体检测不可用：{error:#}"),
             });
-            while state.count > 0 {
+            while !state.confidence.is_empty() {
                 state = wake.wait(state).expect("object subscriber lock poisoned");
             }
         }
-        if state.count == 0 {
+        if state.confidence.is_empty() {
             state.running = false;
             events.send_replace(Event::Waiting);
             if let Some(recorder) = &recorder { recorder.status("stopped", None); }
@@ -375,15 +431,11 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
     let mut frames = CameraFrames::camera(&socket, false)?;
     let mut recovering = false;
     loop {
-        if shared
-            .0
-            .lock()
-            .expect("object subscriber lock poisoned")
-            .count
-            == 0
-        {
+        let threshold = shared.0.lock().expect("object subscriber lock poisoned")
+            .confidence.values().copied().min_by(f32::total_cmp);
+        let Some(threshold) = threshold else {
             return Ok(());
-        }
+        };
         let start = Instant::now();
         let (header, data) = match frames.next() {
             Ok(frame) => {
@@ -404,13 +456,13 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
                 drop(frames);
                 let (lock, wake) = &**shared;
                 let state = lock.lock().expect("object subscriber lock poisoned");
-                if state.count == 0 {
+                if state.confidence.is_empty() {
                     return Ok(());
                 }
                 let (state, _) = wake
                     .wait_timeout(state, Duration::from_millis(250))
                     .expect("object subscriber lock poisoned");
-                if state.count == 0 {
+                if state.confidence.is_empty() {
                     return Ok(());
                 }
                 drop(state);
@@ -442,10 +494,11 @@ fn run(kind: PersonModel, shared: &Arc<(Mutex<Subscribers>, Condvar)>, events: &
             .infer_with(&rgb, |outputs| {
                 match &decoder {
                     DetectionDecoder::Objects { scores, boxes } => {
-                        duck_detect::objects::decode(outputs[*scores], outputs[*boxes], fit, width, height, 0.25)
+                        duck_detect::objects::decode(outputs[*scores], outputs[*boxes], fit, width, height,
+                            threshold.min(YOLO26N_THRESHOLD))
                     }
-                    DetectionDecoder::Person(decoder) => decoder.decode(outputs, fit, width, height),
-                    DetectionDecoder::Yolov6n(decoder) => decoder.decode(outputs, fit, width, height),
+                    DetectionDecoder::Person(decoder) => decoder.decode(outputs, fit, width, height, threshold),
+                    DetectionDecoder::Yolov6n(decoder) => decoder.decode(outputs, fit, width, height, threshold),
                 }
             })?
             .into_iter()

@@ -4,6 +4,10 @@
   const video = document.querySelector('#camera-video');
   const status = document.querySelector('#object-status');
   const areaValue = document.querySelector('#object-area-value');
+  const confidenceInput = document.querySelector('#person-confidence');
+  const confidenceValue = document.querySelector('#person-confidence-value');
+  const confidenceKey = 'person-follow-confidence';
+  const defaultConfidence = Number(confidenceInput.defaultValue);
   const modelPicker = document.querySelector('#person-model');
   const modelSwitch = modelPicker.labels[0];
   const context = canvas.getContext('2d');
@@ -13,6 +17,40 @@
   try { preferredModel = localStorage.getItem(modelStorageKey); } catch {}
   let socket = null;
   let pendingStart = null;
+  let confidenceTimer = null;
+  const storedConfidence = Number(localStorage.getItem(confidenceKey));
+  const validConfidence = value => Number.isFinite(value) && value >= Number(confidenceInput.min) && value <= Number(confidenceInput.max);
+  let confidence = validConfidence(storedConfidence) ? storedConfidence : defaultConfidence;
+  function showConfidence() {
+    confidenceInput.value = String(confidence);
+    confidenceValue.textContent = confidence.toFixed(2);
+  }
+  showConfidence();
+  function sendConfidence() {
+    clearTimeout(confidenceTimer);
+    confidenceTimer = null;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({type: 'set_confidence', confidence}));
+    }
+  }
+  function setConfidence(value) {
+    confidence = value;
+    showConfidence();
+    localStorage.setItem(confidenceKey, String(value));
+  }
+  confidenceInput.addEventListener('input', () => {
+    setConfidence(confidenceInput.valueAsNumber);
+    if (confidenceTimer === null) confidenceTimer = setTimeout(sendConfidence, 80);
+  });
+  confidenceInput.addEventListener('change', () => {
+    if (confidenceTimer !== null) sendConfidence();
+  });
+  window.addEventListener('person-confidence-reset', () => {
+    confidence = defaultConfidence;
+    localStorage.removeItem(confidenceKey);
+    showConfidence();
+    sendConfidence();
+  });
   function bindTracking() {
     if (socket?.readyState === WebSocket.OPEN && window.__visionControlToken) {
       socket.send(JSON.stringify({type: 'bind_tracking', token: window.__visionControlToken}));
@@ -136,16 +174,29 @@
   function connect(model) {
     window.dispatchEvent(new Event('object-detection-reset'));
     lastCaptured = -1;
-    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const connection = new WebSocket(`${scheme}//${location.host}/objects?model=${encodeURIComponent(model)}`);
+    const url = new URL('/objects', location.href);
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('model', model);
+    const requestedConfidence = confidence;
+    url.searchParams.set('confidence', String(requestedConfidence));
+    const connection = new WebSocket(url);
     socket = connection;
-    connection.onopen = () => { if (socket === connection) { setRecognitionActive(true); bindTracking(); } };
+    connection.onopen = () => {
+      if (socket !== connection) return;
+      setRecognitionActive(true);
+      if (confidence !== requestedConfidence) sendConfidence();
+      bindTracking();
+    };
     connection.onmessage = (event) => {
       if (socket !== connection) return;
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'tracking_bound') {
           window.dispatchEvent(new CustomEvent('vision-direct-binding', {detail: {source: 'object', bound: data.accepted === true}}));
+        } else if (data.type === 'confidence_result') {
+          if (!data.accepted) window.dispatchEvent(new CustomEvent('console-feedback', {
+            detail: {page: 'person', text: '行人检测置信度设置失败', error: true},
+          }));
         } else if (data.type === 'frame') {
           if (!validFrame(data)) throw new Error('识别帧格式无效');
           if (data.captured_at_unix_us <= lastCaptured) return;

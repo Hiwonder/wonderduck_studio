@@ -76,7 +76,8 @@ fn default_head_target_point() -> [f64; 2] {
 
 impl Default for HeadTrackingSettings {
     fn default() -> Self {
-        Self { target_point: default_head_target_point(), deadzone: [0.1, 0.05], gains: [[0.5, 0.04, 0.01]; 2] }
+        Self { target_point: default_head_target_point(), deadzone: [0.05, 0.05],
+            gains: [[1.3, 0.0, 0.1], [2.8, 0.2, 0.5]] }
     }
 }
 
@@ -132,7 +133,7 @@ impl CoordinatedTrackingSettings {
             head_gains: [[2.0, 0.0, 0.1], [2.8, 0.2, 0.5]],
             body_gains: [2.0, 0.2, 1.0],
             final_point: [160.0, 90.0],
-            final_tolerance: [60.0, 20.0],
+            final_tolerance: [40.0, 18.75],
             arrival_delay_s: 1.0,
             arrival_skill: "ground_pick".into(),
             mouth_before: proto::TimedMouthPosition { enabled: true, open: 1.0, duration_s: 0.5 },
@@ -301,10 +302,10 @@ impl Default for Settings {
                 turn_initial_ms: 400, turn_final_ms: 600, restore_ms: 1000,
             },
             tracking: TrackingSettings {
-                reference_area: None, line_speed: default_line_speed(), line_target_x: Some(160.0), deadzone: [0.1, 0.05],
+                reference_area: Some(0.0869), line_speed: default_line_speed(), line_target_x: Some(160.0), deadzone: [0.1, 0.05],
                 gains: [[0.5, 0.04, 0.01], [0.5, 0.04, 0.01]],
             },
-            color_threshold: 0.5, color_reference: None, object_label: None,
+            color_threshold: 0.37, color_reference: None, object_label: Some(0),
             obstacle: proto::ObstacleParams::default(),
             low_voltage: proto::LowVoltageParams::default(),
             // The board's mixer initialization uses the full PCM playback range.

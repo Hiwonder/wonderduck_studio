@@ -242,13 +242,16 @@ pub(super) async fn frame_from_value(state: &AppState, id: u64, source: Source, 
     Some(Frame { binding, captured, width, height, rotate, target, line, line_frame: line_data.is_some() })
 }
 
-pub(super) async fn relay_objects(state: AppState, id: u64, mut events: watch::Receiver<crate::object_detection::Event>) {
+pub(super) async fn relay_objects(state: AppState, id: u64, mut events: watch::Receiver<crate::object_detection::Event>,
+    confidence: watch::Receiver<f32>,
+) {
     while events.changed().await.is_ok() {
-        let event = events.borrow_and_update().clone();
+        let mut event = events.borrow_and_update().clone();
         if !matches!(event, crate::object_detection::Event::Frame { .. }) {
             invalidate(&state, id).await;
             continue;
         }
+        event.filter_confidence(*confidence.borrow());
         if let Ok(value) = serde_json::to_value(event)
             && let Some(frame) = frame_from_value(&state, id, Source::Person, &value).await {
             publish(&state, frame).await;

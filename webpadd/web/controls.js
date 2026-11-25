@@ -892,6 +892,7 @@ import { bindMotionInput } from './motion-input.js';
           setValidity(input, '');
           localStorage.setItem(key, input.value);
         }
+        window.dispatchEvent(new Event('person-confidence-reset'));
       };
       const canRestoreFeatureParameters = () => {
         const page = document.body.dataset.consolePage;
@@ -2315,7 +2316,7 @@ import { bindMotionInput } from './motion-input.js';
             colorPresetName.value = '';
             window.dispatchEvent(new CustomEvent('color-reference-load', {detail: null}));
           }
-          applySettings(draft || message.settings);
+          applySettings(draft || message.settings || settingsDefaults);
           applyHeadSettings(headDraft || message.head_settings);
           applyTrackingProfile(document.body.dataset.consolePage === 'person' ? 'person' : trackingScope);
           settingsLoaded = true;

@@ -134,8 +134,8 @@
 <div class="vision-source-fields" data-vision-fields="color" id="vision-fields-color"><button aria-pressed="false" class="action" id="color-pick" type="button">取色</button><div class="color-preset-editor"><input aria-label="颜色名称" class="speed-input" id="color-preset-name" placeholder="颜色名称" type="text"/><button class="action" disabled="" id="color-preset-save" type="button">保存</button></div><label for="color-presets">选择颜色</label><div class="color-preset-editor"><select class="action" disabled="" id="color-presets"><option value="">请选择</option></select><button aria-label="删除所选颜色" class="action" disabled="" id="color-preset-delete" type="button">删除</button></div>
 <div class="parameter color-threshold">
 <label for="color-threshold">色差阈值</label>
-<input class="speed-range" id="color-threshold" max="1" min="0" step="0.01" type="range" value="0.5"/>
-<output for="color-threshold" id="color-threshold-value">0.50</output>
+<input class="speed-range" id="color-threshold" max="1" min="0" step="0.01" type="range" value="0.37"/>
+<output for="color-threshold" id="color-threshold-value">0.37</output>
 </div></div>
 <div aria-live="polite" class="vision-feedback"><div class="color-result" data-vision-feedback="color"><span class="color-swatch" hidden="" id="color-swatch"></span><span id="color-result"></span><span id="line-result" hidden=""></span></div></div>
 <div class="head-position-setting" id="head-position-setting" hidden>
@@ -168,14 +168,14 @@
 </div></div></div>
 </div><div class="tracking-pid" data-pid-pane="head" hidden="" id="head-pid">
 <fieldset><legend>俯仰 PID</legend>
-<div class="pid-control"><span>P</span><input aria-label="俯仰 P 滑杆" class="speed-range" data-head-pid-range-axis="0" data-head-pid-range-term="0" max="10" min="0" step="any" type="range" value="0.5"/><input aria-label="俯仰 P 数值" class="speed-input" data-head-pid-axis="0" data-head-pid-term="0" step="any" type="number" value="0.5"/></div>
-<div class="pid-control"><span>I</span><input aria-label="俯仰 I 滑杆" class="speed-range" data-head-pid-range-axis="0" data-head-pid-range-term="1" max="10" min="0" step="any" type="range" value="0.04"/><input aria-label="俯仰 I 数值" class="speed-input" data-head-pid-axis="0" data-head-pid-term="1" step="any" type="number" value="0.04"/></div>
-<div class="pid-control"><span>D</span><input aria-label="俯仰 D 滑杆" class="speed-range" data-head-pid-range-axis="0" data-head-pid-range-term="2" max="10" min="0" step="any" type="range" value="0.01"/><input aria-label="俯仰 D 数值" class="speed-input" data-head-pid-axis="0" data-head-pid-term="2" step="any" type="number" value="0.01"/></div>
+<div class="pid-control"><span>P</span><input aria-label="俯仰 P 滑杆" class="speed-range" data-head-pid-range-axis="0" data-head-pid-range-term="0" max="10" min="0" step="any" type="range" value="1.3"/><input aria-label="俯仰 P 数值" class="speed-input" data-head-pid-axis="0" data-head-pid-term="0" step="any" type="number" value="1.3"/></div>
+<div class="pid-control"><span>I</span><input aria-label="俯仰 I 滑杆" class="speed-range" data-head-pid-range-axis="0" data-head-pid-range-term="1" max="10" min="0" step="any" type="range" value="0"/><input aria-label="俯仰 I 数值" class="speed-input" data-head-pid-axis="0" data-head-pid-term="1" step="any" type="number" value="0"/></div>
+<div class="pid-control"><span>D</span><input aria-label="俯仰 D 滑杆" class="speed-range" data-head-pid-range-axis="0" data-head-pid-range-term="2" max="10" min="0" step="any" type="range" value="0.1"/><input aria-label="俯仰 D 数值" class="speed-input" data-head-pid-axis="0" data-head-pid-term="2" step="any" type="number" value="0.1"/></div>
 </fieldset>
 <fieldset><legend>左右 PID</legend>
-<div class="pid-control"><span>P</span><input aria-label="左右 P 滑杆" class="speed-range" data-head-pid-range-axis="1" data-head-pid-range-term="0" max="10" min="0" step="any" type="range" value="0.5"/><input aria-label="左右 P 数值" class="speed-input" data-head-pid-axis="1" data-head-pid-term="0" step="any" type="number" value="0.5"/></div>
-<div class="pid-control"><span>I</span><input aria-label="左右 I 滑杆" class="speed-range" data-head-pid-range-axis="1" data-head-pid-range-term="1" max="10" min="0" step="any" type="range" value="0.04"/><input aria-label="左右 I 数值" class="speed-input" data-head-pid-axis="1" data-head-pid-term="1" step="any" type="number" value="0.04"/></div>
-<div class="pid-control"><span>D</span><input aria-label="左右 D 滑杆" class="speed-range" data-head-pid-range-axis="1" data-head-pid-range-term="2" max="10" min="0" step="any" type="range" value="0.01"/><input aria-label="左右 D 数值" class="speed-input" data-head-pid-axis="1" data-head-pid-term="2" step="any" type="number" value="0.01"/></div>
+<div class="pid-control"><span>P</span><input aria-label="左右 P 滑杆" class="speed-range" data-head-pid-range-axis="1" data-head-pid-range-term="0" max="10" min="0" step="any" type="range" value="2.8"/><input aria-label="左右 P 数值" class="speed-input" data-head-pid-axis="1" data-head-pid-term="0" step="any" type="number" value="2.8"/></div>
+<div class="pid-control"><span>I</span><input aria-label="左右 I 滑杆" class="speed-range" data-head-pid-range-axis="1" data-head-pid-range-term="1" max="10" min="0" step="any" type="range" value="0.2"/><input aria-label="左右 I 数值" class="speed-input" data-head-pid-axis="1" data-head-pid-term="1" step="any" type="number" value="0.2"/></div>
+<div class="pid-control"><span>D</span><input aria-label="左右 D 滑杆" class="speed-range" data-head-pid-range-axis="1" data-head-pid-range-term="2" max="10" min="0" step="any" type="range" value="0.5"/><input aria-label="左右 D 数值" class="speed-input" data-head-pid-axis="1" data-head-pid-term="2" step="any" type="number" value="0.5"/></div>
 </fieldset>
 <div class="vision-deadzone target-parameters">
 <div class="parameter"><span>目标(320×180)</span><div class="tracking-deadzones">
@@ -184,7 +184,7 @@
 </div></div>
 <div class="parameter"><span>目标误差</span><div class="tracking-deadzones">
 <label class="tracking-deadzone"><span>X ±</span><input aria-label="目标 X 误差" class="speed-input" data-head-target-tolerance="0" min="0" step="any" type="number" value="16" required/><output>px</output></label>
-<label class="tracking-deadzone"><span>Y ±</span><input aria-label="目标 Y 误差" class="speed-input" data-head-target-tolerance="1" min="0" step="any" type="number" value="18" required/><output>px</output></label>
+<label class="tracking-deadzone"><span>Y ±</span><input aria-label="目标 Y 误差" class="speed-input" data-head-target-tolerance="1" min="0" step="any" type="number" value="9" required/><output>px</output></label>
 </div></div></div>
 </div><div class="tracking-pid" data-pid-pane="coordinated" hidden="" id="coordinated-pid">
 <div class="coordinated-tab-row"><div aria-label="联合追踪参数" class="segmented tracking-pid-tabs" role="tablist"><button aria-controls="coordinated-head-pid" aria-selected="true" data-coordinated-tab="head" role="tab" type="button">头部参数</button><button aria-controls="coordinated-body-pid" aria-selected="false" data-coordinated-tab="body" role="tab" tabindex="-1" type="button">身体参数</button></div><div aria-label="身体阶段" class="segmented body-phase-tabs" hidden="" role="tablist"><button aria-controls="body-phase-approach" aria-selected="true" data-body-stage-tab="approach" role="tab" type="button">接近</button><button aria-controls="body-phase-final" aria-selected="false" data-body-stage-tab="final" role="tab" tabindex="-1" type="button">对准</button></div></div>
@@ -224,6 +224,11 @@
 </div></div>
 </div>
 <div class="object-area" data-vision-fields="object" title="面积按 1280×720 画面换算" hidden="">检测框面积：<span id="object-area-value">--</span></div>
+<div class="person-confidence" data-vision-fields="object" hidden="">
+<label for="person-confidence">行人检测置信度阈值</label>
+<input class="speed-range" id="person-confidence" min="0.01" max="1" step="0.01" type="range" value="0.50"/>
+<output id="person-confidence-value" for="person-confidence">0.50</output>
+</div>
 <div class="tracking-actions">
 <div class="person-model-controls" data-vision-fields="object" hidden="">
 <label for="person-model" hidden=""><span>行人检测模型</span><select class="action" id="person-model" disabled="" autocomplete="off"><option value="yolov5s-relu-640x384">YOLOv5s-ReLU 640×384</option><option value="yolo26n">YOLO26n（原模型）</option><option value="yolov6n-512">YOLOv6n 512×512</option></select></label>

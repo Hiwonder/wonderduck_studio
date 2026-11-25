@@ -1,8 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use duck_detect::{Letterbox, objects::Object};
 
-const YOLOV5S_RELU_THRESHOLD: f32 = 0.26;
-const YOLOV6N_THRESHOLD: f32 = 0.4;
+pub(super) const DEFAULT_PERSON_CONFIDENCE: f32 = 0.5;
 const YOLOV6N_CANDIDATES: usize = 5376;
 const NMS_THRESHOLD: f32 = 0.45;
 const MAX_DETECTIONS: usize = 300;
@@ -47,6 +46,7 @@ impl Yolov6nDecoder {
         fit: Letterbox,
         width: usize,
         height: usize,
+        threshold: f32,
     ) -> Result<Vec<Object>> {
         let scores = outputs.get(self.scores).context("missing YOLOv6n scores")?;
         let boxes = outputs.get(self.boxes).context("missing YOLOv6n boxes")?;
@@ -59,7 +59,7 @@ impl Yolov6nDecoder {
         let mut candidates = Vec::new();
         for (&score, coords) in scores.iter().zip(boxes.chunks_exact(4)) {
             if !score.is_finite()
-                || score < YOLOV6N_THRESHOLD
+                || score < threshold
                 || !coords.iter().all(|val| val.is_finite())
             {
                 continue;
@@ -115,6 +115,7 @@ impl PersonDecoder {
         fit: Letterbox,
         width: usize,
         height: usize,
+        threshold: f32,
     ) -> Result<Vec<Object>> {
         ensure!(
             fit.scale.is_finite()
@@ -167,7 +168,7 @@ impl PersonDecoder {
                         }
                     };
                     let score = value(4) * value(5);
-                    if !score.is_finite() || score < YOLOV5S_RELU_THRESHOLD {
+                    if !score.is_finite() || score < threshold {
                         continue;
                     }
                     let x = (value(0) * 2.0 - 0.5 + (cell % head.columns) as f32) * stride;
@@ -256,8 +257,10 @@ mod tests {
                 };
                 medium[index] = value;
             }
+            assert!(decoder.decode(&[&small, &medium, &large], FIT, 1280, 720, DEFAULT_PERSON_CONFIDENCE)
+                .unwrap().is_empty());
             let objects = decoder
-                .decode(&[&small, &medium, &large], FIT, 1280, 720)
+                .decode(&[&small, &medium, &large], FIT, 1280, 720, 0.26)
                 .unwrap();
             assert_eq!(
                 objects,
@@ -285,17 +288,17 @@ mod tests {
         let mut medium = vec![0.0; 24 * 40 * 18];
         let small = vec![0.0; 12 * 20 * 18];
         let anchor_start = (6 * 40 + 10) * 18 + 6;
-        medium[anchor_start..anchor_start + 6].copy_from_slice(&[0.5, 0.5, 0.5, 0.5, 0.5, 0.6]);
+        medium[anchor_start..anchor_start + 6].copy_from_slice(&[0.5, 0.5, 0.5, 0.5, 1.0, 0.6]);
         let (fit, _, _) = uyvy::letterbox_rect_layout(1280, 720, (640, 384), uyvy::Turn::None);
         let objects = decoder
-            .decode(&[&large, &medium, &small], fit, 1280, 720)
+            .decode(&[&large, &medium, &small], fit, 1280, 720, DEFAULT_PERSON_CONFIDENCE)
             .unwrap();
 
         assert_eq!(
             objects,
             [Object {
                 class: 0,
-                score: 0.3,
+                score: 0.6,
                 bounds: [274.0, 139.0, 398.0, 229.0],
             }]
         );
@@ -315,7 +318,7 @@ mod tests {
             pad_x: 0.0,
             pad_y: 112.0,
         };
-        let objects = decoder.decode(&[&boxes, &scores], fit, 640, 360).unwrap();
+        let objects = decoder.decode(&[&boxes, &scores], fit, 640, 360, DEFAULT_PERSON_CONFIDENCE).unwrap();
         assert_eq!(
             objects,
             [Object {

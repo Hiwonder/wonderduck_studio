@@ -166,6 +166,10 @@ html[data-debug-mode="on"] body[data-console-page="pickup"] #pickup-sequence-sta
 .person-model-controls { grid-column: 1 / -1; display: grid; gap: 4px; color: var(--muted); font-size: var(--font-note); }
 .person-model-controls label { display: grid; gap: 4px; min-width: 0; }
 .person-model-controls select { width: 100%; text-align: left; text-overflow: ellipsis; }
+.person-confidence { display: none; }
+html[data-debug-mode="on"] .person-confidence:not([hidden]) { display: grid; grid-template-columns: auto minmax(0, 1fr) 4ch; align-items: center; gap: 8px; color: var(--muted); font-size: var(--font-body); }
+.person-confidence .speed-range { min-width: 0; margin: 0; }
+.person-confidence output { text-align: end; }
 html[data-debug-mode="off"] body[data-console-page="person"] .vision-panel > .tracking-actions { margin-top: auto; }
 .tracking-actions .primary:not(:disabled), html[data-theme="light"] .tracking-actions .primary:not(:disabled) { background: var(--accent); border-color: var(--accent); color: #27282b; }
 .vision-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 14px; flex: 0 0 auto; min-height: 14px; color: var(--muted); font-size: var(--font-note); }

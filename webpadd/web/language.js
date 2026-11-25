@@ -404,6 +404,7 @@ const ENGLISH = new Map(Object.entries({
   '头部追踪 · 等待目标': 'Head tracking · waiting for target', '头部追踪 · 寻找目标': 'Head tracking · searching for target',
   '身体追踪 · 寻找目标': 'Body tracking · searching for target',
   '面积按 1280×720 画面换算': 'Area is expressed in pixels at 1280×720',
+  '行人检测置信度阈值': 'Person detection confidence', '行人检测置信度设置失败': 'Could not set person detection confidence',
   '页面未连接': 'Page disconnected', '正在连接图传': 'Connecting to video', '物体检测连接失败': 'Object detection connection failed',
   '操作未完成，请检查设备状态后重试。': 'The operation did not complete. Check the device status and try again.',
   '无法初始化 3D 显示，请检查浏览器 WebGL 2 支持': 'Could not initialize the 3D view. Check browser WebGL 2 support.',
