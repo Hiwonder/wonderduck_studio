@@ -156,7 +156,7 @@ export function createParameterSave({ context, request, command, toast, setBusy,
     const validIds = new Set(current.joints?.map(joint => joint.id));
     for (const id of selectedIds) if (!validIds.has(id)) selectedIds.delete(id);
     if (running && !canContinue(current)) cancelReason ||= '控制状态已变化';
-    const blocked = current.readonly || running || loading || current.busy || current.parameterWriteBusy;
+    const blocked = current.readonly || running || loading || current.busy;
     get('load-params').disabled = blocked || current.parameterId !== current.id || !current.registers;
     for (const input of document.querySelectorAll('.servo-select-toggle, .batch-parameter-toggle')) {
       const id = input.classList.contains('servo-select-toggle') ? Number(input.closest('tr').dataset.id) : null;

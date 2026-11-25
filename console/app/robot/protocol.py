@@ -162,8 +162,10 @@ class ServoLayout:
             temporary.replace(self.layout_path)
 
 
-def register_definition(address, mode=0):
+def register_definition(address, mode=0, *, servo_version=None):
     register = dict(BY_ADDRESS[address])
+    if address == 31 and servo_version == (1, 1):
+        register.update(minimum=-256, maximum=256)
     if address == 44 and mode != 0:
         register.update(minimum=-1000, maximum=1000, sign_bit=10, unit="0.001", name="PWM 开环输出")
     if address == 46 and mode == 1:
@@ -324,9 +326,10 @@ def parse_registers(raw):
     if len(raw) != 71:
         raise ValueError("完整参数块必须为 71 字节")
     mode = raw[33]
+    servo_version = tuple(raw[3:5])
     values = []
     for item in REGISTERS:
-        register = register_definition(item["address"], mode)
+        register = register_definition(item["address"], mode, servo_version=servo_version)
         data = raw[register["address"]:register["address"] + register["size"]]
         values.append(dict(register, value=decode_register(register, data), raw_value=int.from_bytes(data, "little")))
     return values

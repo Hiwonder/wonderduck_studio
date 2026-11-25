@@ -13,6 +13,7 @@ servo-layout.before-*.json
 AGENTS.md
 /actions/
 /action-groups/
+/offset-profiles/
 /calibrations/
 0.06
 PACKAGE-MANIFEST.json

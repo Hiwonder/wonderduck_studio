@@ -1,6 +1,34 @@
 import { ACTION_POSITION_LIMITS } from './servo-panel.js';
 
 const $ = id => document.getElementById(id);
+const csvPickerType = { description: 'CSV', accept: { 'text/csv': ['.csv'] } };
+
+function csvFilename(name) {
+  return /\.csv$/i.test(name) ? name : `${name}.csv`;
+}
+
+function chooseDialog(dialog) {
+  const form = dialog.querySelector('form');
+  return new Promise(resolve => {
+    const finish = value => {
+      dialog.removeEventListener('cancel', cancel);
+      form.removeEventListener('submit', submit);
+      dialog.close();
+      resolve(value);
+    };
+    const cancel = event => {
+      event.preventDefault();
+      finish('cancel');
+    };
+    const submit = event => {
+      event.preventDefault();
+      finish(event.submitter?.value ?? 'cancel');
+    };
+    dialog.addEventListener('cancel', cancel);
+    form.addEventListener('submit', submit);
+    dialog.showModal();
+  });
+}
 
 export function createActionEditor({ request, toast, confirmAction, context, servoPanel, iconsRefresh }) {
   let frames = [], selected = -1, importedLayout = [], actionId = 1, choosing = false, starting = false, stopping = false;
@@ -348,36 +376,117 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
     return (await request('action-document', { operation: 'load', name })).document;
   }
 
-  async function chooseDocument(append) {
+  async function chooseLocation(title, local, robot) {
     if (choosing) return;
     choosing = true;
+    $('action-location-title').textContent = title;
     try {
-      const { names } = await request('action-document', { operation: 'list' });
-      const dialog = $('action-select'), options = $('action-select-name');
-      $('action-select-title').textContent = append ? '串联动作' : '打开动作';
-      options.replaceChildren(new Option(names.length ? '请选择动作' : '暂无动作文件', ''));
-      for (const name of names) options.add(new Option(name, name));
-      $('action-select-confirm').disabled = !names.length;
-      dialog.returnValue = '';
-      const selection = new Promise(resolve => dialog.addEventListener('close', () => {
-        resolve(dialog.returnValue === 'ok' ? options.value : '');
-      }, { once: true }));
-      dialog.showModal();
-      const name = await selection;
-      if (!name) return;
-      const { document } = await request('action-document', { operation: 'load', name });
-      openDocument(document, append);
-      if (!append) $('action-name').value = name.replace(/\.csv$/i, '');
-      toast(append ? `已串联动作：${name}` : `已打开动作：${name}`);
+      const option = await chooseDialog($('action-location'));
+      // The dialog resolves in the submit event so that local pickers retain user activation.
+      if (option === 'local') await local();
+      if (option === 'robot') await robot();
     } finally {
       choosing = false;
     }
+  }
+
+  async function chooseRobotFile(title, offsets = false, proposedName = null) {
+    const { names } = await request('action-document', { operation: offsets ? 'list_offsets' : 'list' });
+    const dialog = $('action-select'), options = $('action-select-name'), filename = $('action-select-filename');
+    const saving = proposedName !== null;
+    $('action-select-title').textContent = title;
+    $('action-select-directory').textContent = offsets ? 'offset-profiles/' : 'action-groups/';
+    $('action-select-open').hidden = saving;
+    $('action-select-save').hidden = !saving;
+    filename.disabled = !saving;
+    options.disabled = saving;
+    options.replaceChildren(new Option(names.length ? '请选择文件' : '暂无文件', ''));
+    $('action-select-existing').replaceChildren(...names.map(name => new Option('', name)));
+    for (const name of names) options.add(new Option(name, name));
+    filename.value = proposedName ?? '';
+    $('action-select-confirm').disabled = !saving && !names.length;
+    if (await chooseDialog(dialog) !== 'ok') return '';
+    return saving ? filename.value.trim() : options.value;
+  }
+
+  function chooseLocalFile() {
+    const input = $('action-local-file');
+    input.value = '';
+    return new Promise(resolve => {
+      const selected = () => {
+        input.removeEventListener('change', selected);
+        input.removeEventListener('cancel', selected);
+        resolve(input.files[0] ?? null);
+      };
+      input.addEventListener('change', selected);
+      input.addEventListener('cancel', selected);
+      input.click();
+    });
+  }
+
+  function applyDocument(document, name, append) {
+    openDocument(document, append);
+    if (!append) $('action-name').value = name.replace(/\.csv$/i, '');
+    toast(append ? `已串联动作：${name}` : `已打开动作：${name}`);
+  }
+
+  function chooseDocument(append) {
+    const title = append ? '串联动作' : '打开动作';
+    return chooseLocation(title, async () => {
+      const file = await chooseLocalFile();
+      if (!file) return;
+      const { document } = await request('action-document', { operation: 'parse', content: await file.text() });
+      applyDocument(document, file.name, append);
+    }, async () => {
+      const name = await chooseRobotFile(title);
+      if (!name) return;
+      const { document } = await request('action-document', { operation: 'load', name });
+      applyDocument(document, name, append);
+    });
   }
 
   function download(content, name) {
     const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }));
     const link = document.createElement('a'); link.href = url; link.download = name; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function saveLocalFile(name, serialize) {
+    let handle;
+    if (typeof window.showSaveFilePicker === 'function') {
+      try {
+        handle = await window.showSaveFilePicker({ suggestedName: csvFilename(name), types: [csvPickerType] });
+      } catch (error) {
+        if (error.name === 'AbortError') return;
+        if (error.name !== 'SecurityError') throw error;
+      }
+    }
+    if (!handle) {
+      const choice = await chooseDialog($('action-local-save'));
+      if (choice !== 'download') return;
+      const { content } = await serialize();
+      download(content, csvFilename(name));
+      return;
+    }
+    const { content } = await serialize();
+    const writable = await handle.createWritable();
+    try {
+      await writable.write(content);
+      await writable.close();
+    } catch (error) {
+      await writable.abort().catch(() => {});
+      throw error;
+    }
+  }
+
+  async function saveRobotFile(command) {
+    try {
+      return await request('action-document', command);
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      if (!await confirmAction('覆盖文件', `文件“${command.name}”已存在，是否覆盖？`)) return null;
+      return request('action-document', { ...command, overwrite: true });
+    }
   }
 
   function perform(fn) { Promise.resolve().then(fn).catch(error => toast(error.message, true)); }
@@ -423,34 +532,51 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
   on('action-run', () => playbackBusy() ? stop() : run());
   on('action-open', () => chooseDocument(false));
   on('action-append', () => chooseDocument(true));
-  on('action-save', async () => {
-    const name = $('action-name').value.trim(), document = makeDocument();
-    try { await request('action-document', { operation: 'save', name, document }); }
-    catch (error) {
-      if (error.status !== 409) throw error;
-      if (!await confirmAction('覆盖动作组', `动作组“${name}”已存在，是否覆盖？`)) return;
-      await request('action-document', { operation: 'save', name, document, overwrite: true });
-    }
-    await refreshGroups();
-    $('action-groups').value = name.toLowerCase().endsWith('.csv') ? name : `${name}.csv`;
-    update(); toast('动作组已保存');
+  on('action-save', () => {
+    const document = makeDocument(), title = '保存动作';
+    const proposed = $('action-name').value.trim() || '动作1';
+    return chooseLocation(title, () => saveLocalFile(proposed, () =>
+      request('action-document', { operation: 'serialize', document })), async () => {
+      const name = await chooseRobotFile(title, false, proposed);
+      if (!name) return;
+      const result = await saveRobotFile({ operation: 'save', name, document });
+      if (!result) return;
+      await refreshGroups();
+      $('action-name').value = result.name.replace(/\.csv$/i, '');
+      $('action-groups').value = result.name;
+      update(); toast('动作组已保存');
+    });
   });
   on('groups-refresh', refreshGroups);
   $('action-groups').addEventListener('change', update);
   on('group-run', () => playbackBusy() ? stop() : run(loadGroup, $('action-loop').checked, 'group'));
   on('offset-read', async () => { offsets = await servoPanel.readOffsets(); update(); toast('偏差已读取'); });
-  on('offset-save', async () => {
+  on('offset-save', () => {
     if (!offsets) throw new Error('请先读取偏差');
-    const { content } = await request('action-document', { operation: 'serialize_offsets', offsets: servoPanel.offsetValues() });
-    download(content, 'servo.offsets.csv');
+    const title = '保存偏差', proposed = 'servo.offsets.csv', values = servoPanel.offsetValues();
+    return chooseLocation(title, () => saveLocalFile(proposed, () =>
+      request('action-document', { operation: 'serialize_offsets', offsets: values })), async () => {
+      const name = await chooseRobotFile(title, true, proposed);
+      if (!name) return;
+      const result = await saveRobotFile({ operation: 'save_offsets', name, offsets: values });
+      if (result) toast('偏差文件已保存');
+    });
   });
-  on('offset-load', () => $('offset-file').click());
-  $('offset-file').addEventListener('change', () => perform(async () => {
-    const file = $('offset-file').files[0]; $('offset-file').value = '';
+  async function applyOffsetProfile(values) {
+    if (!await confirmAction('加载位置偏差', `将向 ${Object.keys(values).length} 个舵机写入并读回位置偏差。继续？`)) return;
+    const count = await servoPanel.applyOffsets(values);
+    offsets = values; update(); toast(`已写入并读回 ${count} 个舵机偏差`);
+  }
+  on('offset-load', () => chooseLocation('加载偏差', async () => {
+    const file = await chooseLocalFile();
     if (!file) return;
-    const data = await request('action-document', { operation: 'parse_offsets', content: await file.text() });
-    if (!await confirmAction('加载位置偏差', `将向 ${Object.keys(data.offsets).length} 个舵机写入并读回位置偏差。继续？`)) return;
-    const count = await servoPanel.applyOffsets(data.offsets); offsets = data.offsets; update(); toast(`已写入并读回 ${count} 个舵机偏差`);
+    const { offsets } = await request('action-document', { operation: 'parse_offsets', content: await file.text() });
+    await applyOffsetProfile(offsets);
+  }, async () => {
+    const name = await chooseRobotFile('加载偏差', true);
+    if (!name) return;
+    const { offsets } = await request('action-document', { operation: 'load_offsets', name });
+    await applyOffsetProfile(offsets);
   }));
 
   return { update, render, refreshGroups };

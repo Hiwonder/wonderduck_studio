@@ -48,18 +48,30 @@ def document_to_json(document):
 class ActionDocuments:
     def __init__(self, directory):
         self.directory = Path(directory)
+        self.offset_directory = self.directory.with_name("offset-profiles")
         self.lock = threading.Lock()
 
-    def path(self, name):
+    def path(self, name, directory):
         if not isinstance(name, str) or not name or len(name) > 120 or name.strip() != name:
             raise ValueError("动作组名称无效")
         if name in (".", "..") or re.search(r"[\\/\x00-\x1f]", name):
             raise ValueError("动作组名称不能包含路径或控制字符")
         filename = name if name.lower().endswith(".csv") else name + ".csv"
-        target = self.directory / filename
+        target = directory / filename
         if target.is_symlink():
             raise ValueError("动作组不能是符号链接")
         return target
+
+    def save(self, command, directory, writer, value):
+        overwrite = command.get("overwrite", False)
+        if type(overwrite) is not bool:
+            raise ValueError("覆盖选项无效")
+        with self.lock:
+            target = self.path(command.get("name"), directory)
+            if target.exists() and not overwrite:
+                raise FileExistsError("同名文件已存在")
+            writer(target, value)
+        return dict(name=target.name)
 
     def handle(self, command, joints=None, full_servo_range=False):
         operation = command.get("operation")
@@ -99,21 +111,28 @@ class ActionDocuments:
                 path = Path(temp) / "offsets.csv"
                 path.write_text(content, encoding="utf-8")
                 return dict(offsets=load_offset_profile(path))
-        if operation == "serialize_offsets":
+        if operation in ("serialize_offsets", "save_offsets"):
             values = command.get("offsets")
             if not isinstance(values, dict) or any(not key.isascii() or not key.isdecimal() for key in values):
                 raise ValueError("偏差数据无效")
+            offsets = {int(key): value for key, value in values.items()}
+            if operation == "save_offsets":
+                return self.save(command, self.offset_directory, save_offset_profile, offsets)
             with tempfile.TemporaryDirectory(prefix="console-offset-") as temp:
                 path = Path(temp) / "offsets.csv"
-                save_offset_profile(path, {int(key): value for key, value in values.items()})
+                save_offset_profile(path, offsets)
                 return dict(content=path.read_text(encoding="utf-8"))
-        if operation == "list":
-            if not self.directory.exists():
+        if operation in ("list", "list_offsets"):
+            directory = self.offset_directory if operation == "list_offsets" else self.directory
+            if not directory.exists():
                 return dict(names=[])
-            return dict(names=sorted(path.name for path in self.directory.iterdir()
+            return dict(names=sorted(path.name for path in directory.iterdir()
                                      if path.suffix.lower() == ".csv" and path.is_file() and not path.is_symlink()))
         if operation == "load":
-            return dict(document=document_to_json(load_action_csv(self.path(command.get("name")))))
+            path = self.path(command.get("name"), self.directory)
+            return dict(document=document_to_json(load_action_csv(path)))
+        if operation == "load_offsets":
+            return dict(offsets=load_offset_profile(self.path(command.get("name"), self.offset_directory)))
         if operation == "parse":
             content = command.get("content")
             if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_ACTION_CSV_BYTES:
@@ -129,13 +148,5 @@ class ActionDocuments:
                     path = Path(temp) / "action.csv"
                     save_action_csv(path, document)
                     return dict(content=path.read_text(encoding="utf-8"))
-            target = self.path(command.get("name"))
-            overwrite = command.get("overwrite", False)
-            if type(overwrite) is not bool:
-                raise ValueError("覆盖选项无效")
-            with self.lock:
-                if target.exists() and not overwrite:
-                    raise FileExistsError("动作组已存在")
-                save_action_csv(target, document)
-            return dict(name=target.name)
+            return self.save(command, self.directory, save_action_csv, document)
         raise ValueError("未知动作文件操作")

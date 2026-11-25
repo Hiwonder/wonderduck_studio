@@ -53,6 +53,10 @@ html[data-theme=dark] .sidebar .sidebar-footer #status-dot{border-color:#1a2b36}
 #topbar-cpu-temperature { inline-size: 6ch; }
 #topbar-voltage { inline-size: 4.5em; }
 .topbar-battery.low-voltage, #runtime-battery.low-voltage { color: var(--red); font-weight: 600; }
+.topbar-battery.low-voltage {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border-radius: 4px;
+}
 #topbar-cpu-throttled {
   position: absolute;
   inset-inline-end: -2px;
@@ -74,8 +78,18 @@ html[data-theme=dark] .sidebar-footer-button{border:0;background:transparent;col
 html[data-theme=dark] .sidebar-footer-button:hover{background:#344852;color:#f2f4f6}
 .sidebar-collapsed .sidebar-footer-button{width:34px;padding:8px;justify-content:center}
 .sidebar-collapsed .sidebar-footer-button span{display:none}
-.sidebar-debug-mode{justify-content:space-between}
-.sidebar-collapsed .sidebar-debug-mode{padding-inline:2px}
+.sidebar-debug-mode{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 30px;
+  column-gap:0;
+  block-size:36px;
+  padding-block:0;
+  margin-left:0;
+  transition:padding-inline 240ms ease;
+}
+.sidebar-debug-mode span{overflow:hidden;white-space:nowrap;transition:opacity 160ms ease}
+.sidebar-collapsed .sidebar-debug-mode{width:100%;padding-inline:2px}
+.sidebar-collapsed .sidebar-debug-mode span{display:block;opacity:0}
 .sidebar-collapsed .sidebar .sidebar-footer .connection{justify-content:center;padding:0}
 .sidebar{min-width:0;overflow-x:hidden;transition:width 240ms ease,padding 240ms ease}
 /* Keep the icon independent of the animated sidebar padding. */
@@ -307,5 +321,5 @@ html[data-theme=dark] .sensor-chart{--calibration-x:#75b4ff;--calibration-y:#f2c
   .sensor-chart canvas{height:280px}
 }
 @media(prefers-reduced-motion:reduce){
-  body.studio-shell,.sidebar{transition:none}
+  body.studio-shell,.sidebar,.sidebar-debug-mode,.sidebar-debug-mode span{transition:none}
 }

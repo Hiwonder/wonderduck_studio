@@ -84,7 +84,7 @@ pub(super) async fn obstacle_status_worker(socket: PathBuf, status_tx: watch::Se
 pub(super) async fn low_voltage_status_worker(socket: PathBuf, status_tx: watch::Sender<BrowserStatus>, lock: Arc<Mutex<()>>) {
     loop {
         if let Err(error) = run_low_voltage_status_stream(&socket, &status_tx, &lock).await {
-            tracing::debug!(%error, "could not refresh low-voltage settings");
+            tracing::debug!(%error, "could not refresh low-voltage status");
         }
         tokio::time::sleep(CONNECT_RETRY).await;
     }
@@ -120,7 +120,13 @@ async fn run_low_voltage_status_stream(socket: &Path, status_tx: &watch::Sender<
             }
         };
         id += 1;
-        status_tx.send_modify(|status| status.low_voltage = Some(result.settings));
+        status_tx.send_modify(|status| status.low_voltage = Some(BrowserLowVoltage {
+            settings: result.settings,
+            voltage_v: result.voltage_v,
+            low_for_ms: result.low_for_ms,
+            warning_active: result.warning_active,
+            triggered: result.triggered,
+        }));
         drop(guard);
         tokio::time::sleep(HEALTH_PERIOD).await;
     }

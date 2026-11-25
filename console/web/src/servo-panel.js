@@ -66,21 +66,17 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       return { id: activeTarget, ...row?.limits,
         enabled: !!row && canControl(activeTarget) && !offsetWriting && servo(activeTarget)?.torque === 1 };
     },
-    send: async data => {
-      const result = await request('command', {
-        action: 'move_direct', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
-      });
-      if (result.sent) toast(`ID ${data.id} · 目标编码器 ${data.raw} 步 · 已发送`, false, { routine: true, source: 'servo-target' });
-      return result;
-    },
+    send: data => request('command', {
+      action: 'move_direct', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
+    }),
     onError: error => toast(error.message, true),
   });
 
   const liveOffset = createLiveParameter({
     context: () => {
-      const row = rows.get(activeOffset), register = context().info?.registers.find(item => item.address === 31);
-      return { id: activeOffset, address: 31, min: register?.minimum, max: register?.maximum,
-        enabled: !!row && row.offsetValue !== null && !!register?.writable && canControl(activeOffset) };
+      const row = rows.get(activeOffset);
+      return { id: activeOffset, address: 31, min: Number(row?.offsetSlider.min), max: Number(row?.offsetSlider.max),
+        enabled: !!row && row.offsetValue !== null && canControl(activeOffset) && servo(activeOffset)?.torque === 1 };
     },
     send: async data => {
       const row = rows.get(data.id);
@@ -96,7 +92,6 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     onSent: data => {
       const row = rows.get(data.id);
       if (row) row.offsetError = '';
-      toast(`ID ${data.id} · 位置校正 ${data.value} · 已发送`, false, { routine: true, source: 'servo-offset' });
     },
     onError: error => {
       const row = rows.get(activeOffset);
@@ -268,18 +263,22 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     update();
   }
 
+  function showOffsetRegister(row, register) {
+    if (!register || !Number.isInteger(register.value)) throw new Error('位置校正读取无效');
+    row.offsetSlider.min = row.offsetInput.min = register.minimum;
+    row.offsetSlider.max = row.offsetInput.max = register.maximum;
+    row.offsetValue = register.value;
+    row.offsetError = '';
+    syncInputs(row.offsetSlider, row.offsetInput, register.value);
+  }
+
   async function readOffset(row) {
     const revision = row.revision, currentGeneration = generation;
     offsetRead = true;
     try {
       const result = await request('command', { action: 'registers', id: row.joint.id });
       const register = result.registers.find(item => item.address === 31);
-      if (!register || !Number.isInteger(register.value)) throw new Error('位置校正读取无效');
-      if (currentGeneration === generation && revision === row.revision) {
-        row.offsetValue = register.value;
-        row.offsetError = '';
-        syncInputs(row.offsetSlider, row.offsetInput, register.value);
-      }
+      if (currentGeneration === generation && revision === row.revision) showOffsetRegister(row, register);
     } catch (error) {
       if (currentGeneration === generation && revision === row.revision) {
         row.offsetError = error.message;
@@ -361,7 +360,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       if (Number.isInteger(target)) syncInputs(row.targetSlider, row.targetInput, target);
       else if (document.activeElement !== row.targetInput) row.targetInput.value = '';
       row.targetSlider.disabled = row.targetInput.disabled = !canControl(id) || offsetWriting;
-      const offsetEnabled = canControl(id) && row.offsetValue !== null && (!offsetWriting || activeOffset === id);
+      const offsetEnabled = canControl(id) && current?.torque === 1 && row.offsetValue !== null && (!offsetWriting || activeOffset === id);
       row.offsetSlider.disabled = row.offsetInput.disabled = !offsetEnabled;
       const available = canControl(id, true);
       for (const input of [row.targetSlider, row.targetInput]) input.classList.toggle('is-write-pending',
@@ -467,11 +466,9 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       for (const [id, row] of rows) {
         if (row.element.hidden || !servo(id)?.valid) continue;
         const data = await request('command', { action: 'registers', id });
-        const value = data.registers.find(item => item.address === 31)?.value;
-        if (!Number.isInteger(value)) throw new Error(`ID ${id} 偏差读取无效`);
-        row.offsetValue = value; row.offsetError = ''; row.revision++;
-        syncInputs(row.offsetSlider, row.offsetInput, value);
-        result[id] = value;
+        showOffsetRegister(row, data.registers.find(item => item.address === 31));
+        row.revision++;
+        result[id] = row.offsetValue;
       }
       return result;
     } finally { operation--; update(); }
@@ -489,9 +486,21 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     if (!entries.length) throw new Error('没有可用的舵机偏差');
     const excludedEntry = entries.find(([id]) => locked.has(Number(id)) || rows.get(Number(id)).element.hidden);
     if (excludedEntry) throw new Error(`ID ${excludedEntry[0]} 已锁定或隐藏，请先启用`);
+    if (entries.some(([id]) => servo(Number(id))?.torque !== 1)) throw new Error('请先开启所选舵机扭矩');
     cancel(); operation++; update();
     let completed = 0;
     try {
+      for (const [key, value] of entries) {
+        const id = Number(key), row = rows.get(id);
+        if (row.offsetValue === null) {
+          const data = await request('command', { action: 'registers', id });
+          showOffsetRegister(row, data.registers.find(item => item.address === 31));
+        }
+        const { min, max } = row.offsetSlider;
+        if (value < Number(min) || value > Number(max)) {
+          throw new Error(`ID ${id} 的位置校正须在 ${min}～${max} 步之间`);
+        }
+      }
       for (const [key, value] of entries) {
         const id = Number(key), row = rows.get(id);
         try {

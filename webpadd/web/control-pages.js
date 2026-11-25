@@ -69,7 +69,7 @@ export function createControlPages() {
     vision: createVisionState(),
     coordinatedRun: createRun(),
     profile: createTrackingProfile(),
-    limits: {area: null, areaDeadzone: null, distance: null, distanceDeadzone: null},
+    limits: {area: null, areaDeadzone: null},
   };
   const target = {vision: createVisionState(), coordinatedRun: createRun(), targetPoint: [160, 90], deadzone: [0.05, 0.05],
     gains: [[1.3, 0, 0.1], [2.8, 0.2, 0.5]]};
@@ -81,4 +81,5 @@ export function createControlPages() {
   return {control, person, target, pickup, line, maze};
 }
 
+export const personAreaReferencePixels = 1280 * 960;
 export {createVisionState};

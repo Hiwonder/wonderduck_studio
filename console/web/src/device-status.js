@@ -53,9 +53,11 @@ export function hottestServoTemperature(state, elapsed = 0, connectionError = ''
 
 export function createDeviceStatus({ toast }) {
   const get = id => document.getElementById(id);
+  const overheatingAlert = get('cpu-overheating-alert');
   const rows = new Map();
   let lastStatusNotice = '', lastAuxNotice = '', resourceCpu = null, resourceCpuAt = 0, healthCpu = null;
   let previousCpu = null;
+  let overheating = false;
   const cpuTemperature = () => resourceCpu !== null && performance.now() - resourceCpuAt < 10000
     ? resourceCpu : healthCpu;
   const number = (value, digits, suffix = '') => Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : '--';
@@ -199,6 +201,15 @@ export function createDeviceStatus({ toast }) {
     const throttle = health?.cpu_throttle;
     const throttled = throttle?.level > 0 || (throttle?.max_khz > 0 && throttle.khz < throttle.max_khz);
     get('topbar-cpu-throttled').hidden = !throttled;
+
+    // A raised cooling state identifies thermal throttling. The frequency ceiling
+    // can also be lowered by a power profile or a manual setting.
+    if (!Number.isInteger(throttle?.level)) return;
+    const thermalThrottling = throttle.level > 0;
+    if (thermalThrottling === overheating) return;
+    overheating = thermalThrottling;
+    if (overheating) overheatingAlert.showModal();
+    else overheatingAlert.close();
   }
 
   function renderResources(resources) {

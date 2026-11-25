@@ -219,7 +219,7 @@
   });
   const feedbackNodes = ['notice', 'settings-status', 'connection', 'coordinated-status', 'maze-status', 'camera-status']
     .map(id => document.getElementById(id));
-  const routineNodes = new Set(['connection', 'coordinated-status', 'maze-status', 'camera-status']);
+  const routineNodes = new Set(['connection', 'coordinated-status', 'maze-status', 'camera-status', 'settings-status']);
   const previousStates = new Map();
   const previousErrors = new Map();
   function sendFeedback(text, error, node = null, routine = false) {
@@ -232,34 +232,50 @@
     previousStates.clear();
     previousErrors.clear();
   }
-  const networkAnnouncement = document.querySelector('#network-announcement-enabled');
-  let announcementRequestId = 0, announcementConfirmed = null, announcementTimer = null;
-  function requestNetworkAnnouncement(enabled) {
-    if (!studioOrigin) return;
-    const requestId = ++announcementRequestId;
-    clearTimeout(announcementTimer);
-    networkAnnouncement.disabled = true;
-    window.parent.postMessage({ type: 'studio-network-announcement-request', requestId,
-      ...(typeof enabled === 'boolean' ? { enabled } : {}) }, studioOrigin);
-    announcementTimer = setTimeout(() => {
-      if (requestId !== announcementRequestId) return;
-      if (announcementConfirmed !== null) networkAnnouncement.checked = announcementConfirmed;
-      networkAnnouncement.disabled = announcementConfirmed === null;
-      sendFeedback('网络播报设置超时，请重试', true);
-    }, 8000);
+  const audioToggles = new Map();
+  for (const [setting, timeout, failure] of [
+    ['network-announcement', '网络播报设置超时，请重试', '网络播报设置失败'],
+    ['mouth-audio', '嘴部开合音效设置超时，请重试', '嘴部开合音效设置失败'],
+  ]) {
+    const input = document.getElementById(`${setting}-enabled`);
+    let id = 0, confirmed = null, timer = null;
+    const render = () => {
+      if (confirmed !== null) input.checked = confirmed;
+      input.disabled = confirmed === null;
+    };
+    const request = enabled => {
+      if (!studioOrigin) return;
+      const requestId = ++id;
+      clearTimeout(timer);
+      input.disabled = true;
+      window.parent.postMessage({ type: `studio-${setting}-request`, requestId,
+        ...(typeof enabled === 'boolean' ? { enabled } : {}) }, studioOrigin);
+      timer = setTimeout(() => {
+        id++;
+        render();
+        sendFeedback(timeout, true);
+      }, 8000);
+    };
+    const cancel = () => {
+      id++;
+      clearTimeout(timer);
+      input.disabled = true;
+    };
+    audioToggles.set(`studio-${setting}-result`, data => {
+      if (data.requestId !== id) return;
+      clearTimeout(timer);
+      if (typeof data.enabled === 'boolean') confirmed = data.enabled;
+      else sendFeedback(`${failure}：${data.error || '请重试'}`, true);
+      render();
+    });
+    input.addEventListener('change', () => request(input.checked));
+    window.addEventListener('studio-enter', () => {
+      if (body.dataset.consolePage === 'system') request();
+    });
+    for (const event of ['studio-preview', 'studio-leave', 'studio-disconnect']) {
+      window.addEventListener(event, cancel);
+    }
   }
-  function cancelNetworkAnnouncement() {
-    announcementRequestId++;
-    clearTimeout(announcementTimer);
-    networkAnnouncement.disabled = true;
-  }
-  networkAnnouncement.addEventListener('change', () => requestNetworkAnnouncement(networkAnnouncement.checked));
-  window.addEventListener('studio-enter', () => {
-    if (body.dataset.consolePage === 'system') requestNetworkAnnouncement();
-  });
-  window.addEventListener('studio-preview', cancelNetworkAnnouncement);
-  window.addEventListener('studio-leave', cancelNetworkAnnouncement);
-  window.addEventListener('studio-disconnect', cancelNetworkAnnouncement);
   function forwardFeedback(node) {
     if (!node || !activeStudioPage || activeStudioPage !== body.dataset.consolePage) return;
     if (node.id === 'camera-status' && activeStudioPage === 'system') return;
@@ -269,14 +285,17 @@
     const sourceText = (window.WonderduckLanguage?.sourceText(node) || visibleText).trim();
     const error = node.classList.contains('error')
       || (node.id !== 'notice' && /失败|无效|不可用|中断|未连接|已断开|超时|错误/.test(sourceText));
-    if (!sourceText || (node.id === 'camera-status' && !error)) {
-      previousStates.delete(node);
-      if (!sourceText) previousErrors.delete(node);
+    const settingsStatus = node.id === 'settings-status';
+    // Keep a failed save visible during editing and retries, including slider drags.
+    if (settingsStatus && !error && sourceText && sourceText !== '参数已自动保存') return;
+    if (!sourceText || (!error && (settingsStatus || node.id === 'camera-status'))) {
+      const hadState = previousStates.delete(node);
+      if (!sourceText || settingsStatus) previousErrors.delete(node);
+      if (settingsStatus && !hadState) return;
       window.parent.postMessage({ type: 'studio-feedback-clear', page: activeStudioPage, source: node.id }, studioOrigin);
       return;
     }
-    const routine = routineNodes.has(node.id) || (node.id === 'settings-status' && !error
-      && ['参数已修改，等待保存…', '正在自动保存…', '参数已自动保存'].includes(sourceText));
+    const routine = routineNodes.has(node.id);
     const state = `${error}:${sourceText}`;
     if (routine && previousStates.get(node) === state) return;
     if (routine) {
@@ -355,18 +374,8 @@
       document.getElementById('device-imu-firmware-version').textContent = versions?.imu_firmware_version || '未读取';
     } else if (event.data?.type === 'studio-software-update-busy') {
       softwareUpdate.disabled = event.data.busy === true;
-    } else if (event.data?.type === 'studio-network-announcement-result'
-        && event.data.requestId === announcementRequestId) {
-      clearTimeout(announcementTimer);
-      if (typeof event.data.enabled === 'boolean') {
-        announcementConfirmed = event.data.enabled;
-        networkAnnouncement.checked = announcementConfirmed;
-        networkAnnouncement.disabled = false;
-      } else {
-        if (announcementConfirmed !== null) networkAnnouncement.checked = announcementConfirmed;
-        networkAnnouncement.disabled = announcementConfirmed === null;
-        sendFeedback(`网络播报设置失败：${event.data.error || '请重试'}`, true);
-      }
+    } else if (audioToggles.has(event.data?.type)) {
+      audioToggles.get(event.data.type)(event.data);
     }
   });
   expanded.addEventListener('change', () => {

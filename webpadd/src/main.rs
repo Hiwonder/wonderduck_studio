@@ -244,7 +244,19 @@ struct BrowserStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     obstacle_active: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    low_voltage: Option<proto::LowVoltageParams>,
+    low_voltage: Option<BrowserLowVoltage>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct BrowserLowVoltage {
+    #[serde(flatten)]
+    settings: proto::LowVoltageParams,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voltage_v: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    low_for_ms: Option<u64>,
+    warning_active: bool,
+    triggered: bool,
 }
 
 impl BrowserStatus {
@@ -833,6 +845,8 @@ async fn control_loop(
                 && !control.coordinated_tracking_started;
             if !manual {
                 calls.clear();
+            } else if let Some(press) = control.take_mouth_press(now) {
+                calls.extend(press);
             }
             let readiness_changed = control.update_peer_readiness(now);
             let owner_changed = previous_owner != control.owner;

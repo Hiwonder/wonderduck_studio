@@ -16,13 +16,15 @@ import time
 
 from app.paths import CONSOLE_ROOT
 from app.sensors.qmi_calibration import HeadCalibration, ProfileStore
+from app.sensors.qmi_config import (
+    ACCEL_FULL_SCALE_G, ACTIVE_CONFIG, GYRO_FULL_SCALE_DPS,
+    LEGACY_ACTIVE_CONFIG, LEGACY_ASYNC_CONFIG,
+)
 
 
 BUS_PATH = "/dev/i2c-3"
 ADDRESS = int(os.environ.get("WONDERDUCK_HEAD_IMU_ADDRESS", "0x6a"), 0)
 RESET_CONFIG = bytes.fromhex("20 00 00 00 00 00 00")
-LEGACY_ACTIVE_CONFIG = bytes.fromhex("40 03 43 00 11 00 03")
-ACTIVE_CONFIG = bytes.fromhex("40 03 43 00 11 00 83")
 STATUSINT = 0x2d
 CTRL7 = 0x08
 CTRL9 = 0x0a
@@ -60,15 +62,22 @@ def known_configurations():
     # the successive writes in its initialization, or our synchronized mode.
     # Accepting interrupted initialization lets the next worker recover after
     # SIGKILL without taking over an unrelated sensor configuration.
-    result = {RESET_CONFIG, ACTIVE_CONFIG}
+    legacy = {RESET_CONFIG, LEGACY_ACTIVE_CONFIG, LEGACY_ASYNC_CONFIG}
     current = bytearray(RESET_CONFIG)
-    for register, value in ((0x02, 0x40), (0x03, 0x03), (0x04, 0x43),
-                            (0x05, 0x00), (0x06, 0x11), (0x07, 0x00),
-                            (0x08, 0x03)):
-        current[register - 2] = value
-        result.add(bytes(current))
+    for index, value in enumerate(LEGACY_ASYNC_CONFIG):
+        current[index] = value
+        legacy.add(bytes(current))
     for ctrl7 in (0x00, 0x80):
-        result.add(LEGACY_ACTIVE_CONFIG[:-1] + bytes([ctrl7]))
+        legacy.add(LEGACY_ACTIVE_CONFIG[:-1] + bytes([ctrl7]))
+    result = legacy | {ACTIVE_CONFIG}
+    # Accept every complete register write from a previous interrupted upgrade.
+    for previous in legacy:
+        current = bytearray(previous)
+        current[-1] = 0
+        result.add(bytes(current))
+        for index, value in enumerate(ACTIVE_CONFIG[:-1]):
+            current[index] = value
+            result.add(bytes(current))
     return result
 
 
@@ -191,13 +200,14 @@ class QmiSampler:
             # Finish an interrupted handshake before writing any sensor setup
             # registers; partial initialization can itself be a restart state.
             self._finish_known_command()
-            if config[:6] != LEGACY_ACTIVE_CONFIG[:6]:
-                self.probe.configure(self.device)
             # An old worker may have died while the shadow registers were
             # locked or a command was pending. Disabling the sensors and
             # repeating the complete handshake makes startup idempotent.
             self._release_lock()
             self.device.write(CTRL7, 0x00)
+            for register, value in enumerate(ACTIVE_CONFIG[:-1], 0x02):
+                if config[register - 0x02] != value:
+                    self.device.write(register, value)
             self._set_clock_gating(False)
             self.device.write(CTRL7, 0x83)
             if self._configuration() != ACTIVE_CONFIG:
@@ -274,8 +284,8 @@ class QmiSampler:
         reset = self.previous_time is not None and now - self.previous_time > self.max_gap
         if reset:
             self.reset_attitude("采样间断，航向已重新置零")
-        raw_g = [value / 16384 for value in raw[:3]]
-        raw_gyro = [math.radians(value * 256 / 32768) for value in raw[3:]]
+        raw_g = [value * ACCEL_FULL_SCALE_G / 32768 for value in raw[:3]]
+        raw_gyro = [math.radians(value * GYRO_FULL_SCALE_DPS / 32768) for value in raw[3:]]
         try:
             profile = self._timed("profile", self.profile_store.load)
         except (OSError, ValueError) as error:

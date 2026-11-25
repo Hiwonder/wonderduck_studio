@@ -212,7 +212,7 @@ class ColorDetectionEngine:
         height, width = uyvy.shape[:2]
         if rotation in (90, 270):
             width, height = height, width
-        detection_width = min(640, width)
+        detection_width = min(320, width)
         detection_height = max(1, round(height * detection_width / width))
         minimum_area = 30 * detection_width * detection_height / (640 * 360)
         regions = []

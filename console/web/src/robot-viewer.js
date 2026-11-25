@@ -22,7 +22,7 @@ export function createRobotViewer({ request, toast, context }) {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(35, 1, .01, 20);
   let renderer, controls, trunk, modelRoot, modelPositionTarget, pendingPoseTargets, referenceView;
-  let alignLiveFeet, modelPlatform;
+  let alignLiveFeet, modelPlatform, modelConfig;
   let modelAsset, modelPlacementReady = false;
   const modelPlacementKey = 'console-model-placement';
   const rigJoints = new Map();
@@ -240,6 +240,7 @@ export function createRobotViewer({ request, toast, context }) {
       modelRoot = gltf.scene;
       trunk = gltf.scene.getObjectByName(config.root_node);
       if (!trunk) throw new Error('模型缺少机身节点');
+      modelConfig = config;
       gltf.scene.position.y = config.home_trunk_height_m;
       scene.add(gltf.scene);
       for (const joint of config.joints) {
@@ -271,7 +272,7 @@ export function createRobotViewer({ request, toast, context }) {
       applyModelPalette();
       referenceView?.setRobotModel(gltf.scene, config);
       prepareJointHighlights(gltf.scene);
-      calibrationView?.setRobotModel(gltf.scene);
+      calibrationView?.setRobotModel(gltf.scene, config);
       if (latestPose) updatePose(latestPose);
       if (pendingPoseTargets) alignPoseToPlatform(pendingPoseTargets);
       else {
@@ -366,7 +367,7 @@ export function createRobotViewer({ request, toast, context }) {
       calibrationView = createCalibrationView({ viewer, renderer, onError: message => toast(message, true), onRelease: resizeViewer });
       calibrationView.setSource(calibrationSource);
       if (calibrationSnapshot) calibrationView.update(...calibrationSnapshot);
-      if (modelRoot) calibrationView.setRobotModel(modelRoot);
+      if (modelRoot && modelConfig) calibrationView.setRobotModel(modelRoot, modelConfig);
       calibrationView.setActive(calibrationVisible);
     }).catch(error => {
       console.error('加载校准视图失败', error);

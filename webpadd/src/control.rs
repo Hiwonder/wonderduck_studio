@@ -2,6 +2,7 @@
 
 use super::*;
 use duck_control::hx::MANUAL_HEAD_POSITION_LIMITS;
+use proto::mouth_gesture::MouthGesture;
 use robotd_params::PadDriveParams;
 use std::collections::HashMap;
 
@@ -19,6 +20,9 @@ pub(super) struct Input {
     pub head_stick: Option<[f64; 2]>,
     pub left_trigger: f64,
     pub right_trigger: f64,
+    pub mouth_auto: bool,
+    pub mouth_cancel: bool,
+    pub mouth_held: Option<bool>,
     pub buttons: u16,
 }
 
@@ -42,6 +46,12 @@ impl Input {
             && [self.left_x, self.left_y, self.right_x, self.right_y]
                 .into_iter()
                 .all(|v| v.abs() < 0.05)
+    }
+    fn mouth_pressure(self) -> f64 {
+        self.left_trigger.max(self.right_trigger)
+    }
+    fn mouth_open(self) -> f64 {
+        if self.mouth_auto { 1.0 } else { self.mouth_pressure() }
     }
     fn held(self, button: Button) -> bool {
         self.buttons & button.bit() != 0
@@ -106,6 +116,12 @@ pub(super) enum BrowserMessage {
         head_stick: Option<[f64; 2]>,
         left_trigger: f64,
         right_trigger: f64,
+        #[serde(default)]
+        mouth_auto: bool,
+        #[serde(default)]
+        mouth_cancel: bool,
+        #[serde(default)]
+        mouth_held: Option<bool>,
         buttons: Vec<Button>,
         active: bool,
     },
@@ -197,8 +213,11 @@ pub(super) enum BrowserMessage {
         final_tolerance: [f64; 2],
         stop_area_px: Option<u64>,
         stop_area_deadzone_px: u64,
-        stop_distance_mm: Option<u32>,
-        stop_distance_deadzone_mm: u32,
+        // Accept requests from clients that still include the retired distance settings.
+        #[serde(rename = "stop_distance_mm")]
+        _stop_distance_mm: Option<serde::de::IgnoredAny>,
+        #[serde(rename = "stop_distance_deadzone_mm")]
+        _stop_distance_deadzone_mm: Option<serde::de::IgnoredAny>,
         arrival_delay_s: f64,
         arrival_skill: String,
         mouth_before: proto::TimedMouthPosition,
@@ -464,6 +483,7 @@ pub(super) struct ControlPeer {
     input: Input,
     mode: MotionMode,
     reported_ready: bool,
+    mouth: MouthGesture,
 }
 
 impl ControlPeer {
@@ -478,12 +498,19 @@ impl ControlPeer {
             input: Input::default(),
             mode: MotionMode::Drive,
             reported_ready: false,
+            mouth: MouthGesture::default(),
         }
     }
 
     pub fn receive(&mut self, active: bool, input: Input, now: Instant) {
         if !active || !self.fresh(now) {
             self.require_neutral();
+        }
+        if active && self.neutral_at.is_some() && !input.mouth_cancel {
+            let held = input.mouth_held.unwrap_or(self.client != ControlClient::Web);
+            self.mouth.update(input.mouth_pressure(), held, now);
+        } else {
+            self.mouth.cancel();
         }
         self.input_at = active.then_some(now);
         self.input = input;
@@ -494,6 +521,11 @@ impl ControlPeer {
 
     pub fn require_neutral(&mut self) {
         self.neutral_at = None;
+        self.cancel_mouth();
+    }
+
+    pub fn cancel_mouth(&mut self) {
+        self.mouth.cancel();
     }
 
     fn fresh(&self, now: Instant) -> bool {
@@ -715,6 +747,9 @@ impl ControlState {
     }
 
     pub fn cancel(&mut self) {
+        if let Some(peer) = self.owner.and_then(|id| self.peers.get_mut(&id)) {
+            peer.mouth.cancel();
+        }
         self.input = Input::default();
         self.head_stick = HeadStick::default();
         self.start = Hold::default();
@@ -723,7 +758,7 @@ impl ControlState {
     }
     pub fn lose_human_control(&mut self) {
         if let Some(peer) = self.owner.and_then(|id| self.peers.get_mut(&id)) {
-            peer.neutral_at = None;
+            peer.require_neutral();
         }
         self.owner = None;
         self.owner_closing = false;
@@ -761,6 +796,10 @@ impl ControlState {
         }
     }
     pub fn set_mode(&mut self, mode: MotionMode) -> Vec<proto::Call> {
+        self.change_mode(mode, true)
+    }
+
+    fn change_mode(&mut self, mode: MotionMode, reset_head: bool) -> Vec<proto::Call> {
         let mut calls = vec![];
         if self.mode == MotionMode::BodyPose && mode != MotionMode::BodyPose {
             calls.push(proto::Call::RobotPose(proto::PoseParams {
@@ -768,7 +807,7 @@ impl ControlState {
                 ..Default::default()
             }));
         }
-        if self.mode.poses_head() && !mode.poses_head() {
+        if reset_head && self.mode.poses_head() && !mode.poses_head() {
             calls.push(proto::Call::RobotHead(proto::HeadParams::default()));
         }
         if self.mode != mode {
@@ -822,6 +861,25 @@ impl ControlState {
             false
         }
     }
+    pub fn take_mouth_press(&mut self, now: Instant) -> Option<[proto::Call; 2]> {
+        if !self.fresh(now) || !self.armed || self.owner_closing {
+            return None;
+        }
+        let peer = self.owner.and_then(|id| self.peers.get_mut(&id))?;
+        let sound = peer.mouth.take_press(now, INPUT_TTL)?;
+        // A lease request can complete before the next heartbeat. Apply the current
+        // trigger level with the first sound without replaying the other axes.
+        self.input.left_trigger = peer.input.left_trigger;
+        self.input.right_trigger = peer.input.right_trigger;
+        Some([
+            proto::Call::RobotMouth(proto::MouthParams {
+                open: self.input.mouth_open(),
+                ..Default::default()
+            }),
+            proto::Call::RobotSound(sound),
+        ])
+    }
+
     pub fn update_head_stick(&mut self, status: &BrowserStatus, now: Instant) {
         if let Some(axes) = self.head_stick_input(status, now) {
             self.head_stick.update(axes, fresh_head_position(status, now), now);
@@ -858,7 +916,8 @@ impl ControlState {
             self.cancel();
             self.previous = Input::default();
             if self.owner.is_some() {
-                calls.extend(self.set_mode(MotionMode::Drive));
+                // Releasing the lease lets robotd freeze a manual head position.
+                calls.extend(self.change_mode(MotionMode::Drive, false));
             }
         } else {
             if !self.armed && self.input.neutral() {
@@ -934,6 +993,53 @@ fn fresh_head_position(status: &BrowserStatus, now: Instant) -> Option<[u16; 2]>
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    #[test]
+    fn mouth_open_and_first_sound_are_forwarded_together_when_the_lease_is_granted() {
+        let now = Instant::now();
+        let mut control = ControlState { connected: true, ..Default::default() };
+        let mut peer = ControlPeer::new(ControlClient::App, "app".into());
+        peer.receive(true, Input::default(), now);
+        peer.receive(true, Input { left_trigger: 1.0, ..Default::default() }, now);
+        control.peers.insert(1, peer);
+        assert_eq!(control.claim(1, now), Ok(true));
+
+        control.human_held = true;
+        assert!(matches!(control.take_mouth_press(now), Some([
+            proto::Call::RobotMouth(proto::MouthParams { open: 1.0, repeat_sound: false }),
+            proto::Call::RobotSound(proto::SoundParams { tag: proto::SoundTag::Mouth, hold: None }),
+        ])));
+        let released = now + Duration::from_millis(15);
+        control.peers.get_mut(&1).unwrap().receive(true, Input::default(), released);
+        control.receive(Input::default(), true, released);
+        assert!(control.take_mouth_press(released).is_none());
+    }
+
+    #[test]
+    fn automatic_open_and_cancelled_press_do_not_quack() {
+        let now = Instant::now();
+        let mut peer = ControlPeer::new(ControlClient::Web, "web".into());
+        peer.receive(true, Input::default(), now);
+        peer.receive(true, Input { left_trigger: 1.0, ..Default::default() }, now);
+        peer.receive(true, Input { mouth_cancel: true, mouth_auto: true, ..Default::default() }, now);
+        assert!(peer.mouth.take_press(now, INPUT_TTL).is_none());
+    }
+
+    #[test]
+    fn mouth_slider_release_stops_repeat_at_the_current_opening() {
+        let now = Instant::now();
+        let mut peer = ControlPeer::new(ControlClient::Web, "web".into());
+        peer.receive(true, Input::default(), now);
+        let held = Input { left_trigger: 1.0, mouth_held: Some(true), ..Default::default() };
+        for tick in 0..=10 {
+            peer.receive(true, held, now + Duration::from_millis(100 * tick));
+        }
+        let later = now + Duration::from_secs(1);
+        assert!(peer.mouth.repeating(later));
+        peer.receive(true, Input { mouth_held: Some(false), ..held }, later);
+        assert_eq!(peer.input.mouth_open(), 1.0);
+        assert!(!peer.mouth.repeating(later));
+    }
 
     #[test]
     fn inactive_manual_input_keeps_autonomous_ownership_until_disconnect() {
@@ -1113,6 +1219,27 @@ mod head_stick_tests {
         control.human_held = false;
         assert!(!control.center_head(&status, now));
     }
+
+    #[test]
+    fn manual_input_timeout_does_not_command_head_home() {
+        let now = Instant::now();
+        let mut control = ControlState {
+            owner: Some(1),
+            connected: true,
+            active: true,
+            armed: true,
+            human_held: true,
+            last_input: Some(now),
+            mode: MotionMode::HeadDrive,
+            ..ControlState::default()
+        };
+        let expired = now + INPUT_TTL + CONTROL_PERIOD;
+        let (calls, _) = control.tick(expired, true);
+        assert_eq!(control.mode, MotionMode::Drive);
+        assert!(!control.armed);
+        assert!(control.release_due(expired));
+        assert!(calls.iter().all(|call| !matches!(call, proto::Call::RobotHead(_))));
+    }
 }
 fn stepped(current: f64, delta: i8, step: f64, maximum: f64) -> f64 {
     ((current + f64::from(delta) * step).clamp(0.0, maximum) * 100.0).round() / 100.0
@@ -1129,7 +1256,8 @@ fn lock_drive_axis(forward: f64, sideways: f64) -> (f64, f64) {
 }
 
 pub(super) fn control_frame(control: &ControlState, now: Instant) -> Vec<proto::Call> {
-    let input = if control.fresh(now) && control.armed {
+    let valid_input = control.fresh(now) && control.armed && !control.owner_closing;
+    let input = if valid_input {
         control.input
     } else {
         Input::default()
@@ -1214,7 +1342,10 @@ pub(super) fn control_frame(control: &ControlState, now: Instant) -> Vec<proto::
         }
     }
     calls.push(proto::Call::RobotMouth(proto::MouthParams {
-        open: input.left_trigger.max(input.right_trigger),
+        open: input.mouth_open(),
+        repeat_sound: valid_input && !input.mouth_cancel
+            && control.owner.and_then(|id| control.peers.get(&id))
+                .is_some_and(|peer| peer.fresh(now) && peer.mouth.repeating(now)),
     }));
     calls
 }

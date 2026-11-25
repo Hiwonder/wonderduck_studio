@@ -39,7 +39,7 @@ html[data-theme=dark] .servo-table tr.selected{background:#376d59;color:#f1f7f3}
 html[data-theme=dark] .servo-table tr.selected .id-label{color:#d3e8dc}
 html[data-theme=dark] .servo-table tr:hover,html[data-theme=dark] .parameter-table tr:hover{background:#344852}
 html[data-theme=dark] .parameter-table tr.selected,html[data-theme=dark] .parameter-table tr.selected:hover{background:#376d59;color:#f1f7f3}
-html[data-theme=dark] #target-value,html[data-theme=dark] #parameter-value{color:#dcebe1}
+html[data-theme=dark] #parameter-value{color:#dcebe1}
 @media(max-width:700px){
   main,#monitor,.telemetry-layout,.inspection-section,.inspection-layout{height:auto}
   .inspection-layout{grid-template-columns:minmax(0,1fr)}

@@ -185,10 +185,12 @@ class DemoHardware(ServoLayout):
                 b[56:58] = (target % 4096).to_bytes(2, "little")
             return dict(sent=True, demo=True, action=action, id=device_id, target=target)
         elif action == "offset_direct":
+            if b[40] != 1:
+                raise ValueError("请先开启所选舵机扭矩")
             if device_id not in self.offset_lock_cache:
                 raise ValueError("请先读取舵机参数以确定写保护状态")
             value = command.get("value")
-            data = encode_register(BY_ADDRESS[31], value)
+            data = encode_register(register_definition(31, servo_version=tuple(b[3:5])), value)
             b[31:33] = data
             return dict(sent=True, demo=True, action=action, id=device_id, value=value)
         elif action == "move":
@@ -205,7 +207,9 @@ class DemoHardware(ServoLayout):
             address = integer(command.get("address"), 0, 70, "地址")
             if address not in BY_ADDRESS:
                 raise ValueError("未定义的寄存器地址")
-            r = register_definition(address, b[33])
+            if address == 31 and b[40] != 1:
+                raise ValueError("请先开启所选舵机扭矩")
+            r = register_definition(address, b[33], servo_version=tuple(b[3:5]))
             value = command.get("value")
             data = encode_register(r, value)
             if address == 5 and value != device_id and value in (*self.ids, 200):

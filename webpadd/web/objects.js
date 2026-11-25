@@ -1,3 +1,5 @@
+import { personAreaReferencePixels } from './control-pages.js';
+
 (() => {
   const personClass = 0;
   const canvas = document.querySelector('#object-overlay');
@@ -113,7 +115,7 @@
     }
     const areaPx = selected ? Math.round(area(selected)) : null;
     const areaFraction = selected ? area(selected) / (frame.width * frame.height) : null;
-    areaValue.textContent = selected ? `${Math.round(areaFraction * 1280 * 720)} px²` : '--';
+    areaValue.textContent = selected ? `${Math.round(areaFraction * personAreaReferencePixels)} px²` : '--';
     if (video.srcObject && !video.paused) {
       if (canvas.width !== frame.width || canvas.height !== frame.height) {
         canvas.width = frame.width;

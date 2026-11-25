@@ -58,8 +58,8 @@
                 <div class="servo-pose-actions" role="group" aria-label="全部舵机控制"><button id="center-all" title="全部舵机回到 2048" aria-label="全部舵机中位" disabled><i data-lucide="crosshair"></i><span>中位</span></button><button id="home-all" title="原配置关节回到 Home，ID 35 和 36 回到 2048" aria-label="舵机 Home" disabled><i data-lucide="house"></i><span>Home</span></button><button id="release" class="danger" title="全部卸力" aria-label="全部卸力"><i data-lucide="power-off"></i><span>全部卸力</span></button><button id="scan-servos" title="扫描 1–253；跳过 IMU 200" disabled>扫描</button><span id="scan-progress" class="scan-progress" role="status" aria-live="polite" hidden></span></div>
                 <div class="servo-live-controls">
                   <div class="live-control-heading"><h3 id="selected-name">左髋偏航</h3><span id="selected-meta" class="muted">ID 20</span></div>
-                  <div class="slider-heading"><label for="target-slider">目标位置（编码器）</label><label class="torque-switch"><span>扭矩</span><input id="torque" type="checkbox" role="switch" aria-label="所选舵机扭矩" /></label><output id="target-value" for="target-slider">-- 步</output></div>
-                  <div class="slider-input-row"><input id="target-slider" type="range" step="1" aria-label="目标编码器位置" disabled /><input id="target-input" type="number" step="1" aria-label="输入目标编码器位置" disabled /></div>
+                  <div class="slider-heading"><label for="target-slider">目标位置（编码器）</label><label class="torque-switch"><span>扭矩</span><input id="torque" type="checkbox" role="switch" aria-label="所选舵机扭矩" /></label></div>
+                  <div class="slider-input-row"><div class="slider-control"><input id="target-slider" type="range" step="1" aria-label="目标编码器位置" disabled /></div><input id="target-input" type="number" step="1" aria-label="输入目标编码器位置" disabled /></div>
                   <div id="target-limits" class="range-label"></div>
                 </div>
               </section>
@@ -69,7 +69,7 @@
                 <div class="parameter-editor">
                   <div class="live-control-heading"><h3>参数调整</h3><button id="batch-save" title="将勾选的参数值写入勾选舵机，并逐项读回校验" disabled>批量保存</button><button id="write-parameter" class="icon primary" title="写入并校验" aria-label="写入并校验"><i data-lucide="save"></i></button></div>
                   <div class="slider-heading"><label id="parameter-name" for="parameter-slider">--</label><output id="parameter-value" for="parameter-slider">--</output></div>
-                  <div class="slider-input-row"><input id="parameter-slider" type="range" step="1" aria-label="参数新值" disabled /><input id="parameter-input" type="number" step="1" aria-label="输入参数新值" disabled /></div>
+                  <div class="slider-input-row"><div class="slider-control"><input id="parameter-slider" type="range" step="1" aria-label="参数新值" disabled /></div><input id="parameter-input" type="number" step="1" aria-label="输入参数新值" disabled /></div>
                   <div id="parameter-limit" class="range-label"></div>
                 </div>
               </section>

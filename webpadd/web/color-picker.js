@@ -12,6 +12,7 @@
   const thresholdValue = document.querySelector('#color-threshold-value');
   const fpsOutput = document.querySelector('#detection-fps');
   let phase = 'idle';
+  let phaseBeforePick = 'idle';
   let activeSource = 'color';
   let generation = 0;
   let reference = null;
@@ -118,7 +119,8 @@
     if (previous) previous.close();
   }
 
-  function clear() {
+  function clear(commit = false) {
+    const hadReference = reference !== null;
     setRecognitionActive(false);
     generation++;
     phase = 'idle';
@@ -131,7 +133,9 @@
     button.setAttribute('aria-pressed', 'false');
     frame.classList.remove('picking');
     showReference();
-    window.dispatchEvent(new CustomEvent('color-reference-changed', {detail: null}));
+    if (commit && hadReference) {
+      window.dispatchEvent(new CustomEvent('color-reference-changed', {detail: null}));
+    }
     if (socket) sendSettings();
   }
 
@@ -150,7 +154,7 @@
   }
 
   function command() {
-    if ((phase === 'choose' && !reference) || (socket && (phase === 'idle' || phase === 'paused'))) {
+    if ((phase === 'choose' && phaseBeforePick !== 'tracking') || (socket && (phase === 'idle' || phase === 'paused'))) {
       return {type: 'prepare', generation};
     }
     if (phase === 'sampling') {
@@ -169,7 +173,7 @@
     if (!socket) { connect(); return; }
     if (socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(settings));
-      setRecognitionActive(phase === 'tracking' || Boolean(reference && ['choose', 'sampling'].includes(phase)));
+      setRecognitionActive(settings.type === 'configure' || (settings.type === 'sample' && Boolean(reference)));
     }
   }
 
@@ -209,6 +213,8 @@
       else if (data.rotate === 270) [x, y] = [1 - y, x];
       return [x * data.width, y * data.height];
     };
+    const regionCenters = new Path2D();
+    const regionRadius = 4;
     output.beginPath();
     for (const {top, bottom, center, box} of data.line.regions) {
       if (box) {
@@ -218,18 +224,19 @@
       }
       if (center !== null) {
         const [x, y] = toRaw(center, (top + bottom) / 2);
-        output.moveTo(x + 6, y);
-        output.arc(x, y, 6, 0, 2 * Math.PI);
+        regionCenters.moveTo(x + regionRadius, y);
+        regionCenters.arc(x, y, regionRadius, 0, 2 * Math.PI);
       }
     }
     output.strokeStyle = recognitionColor;
     output.lineWidth = 3;
     output.stroke();
+    output.fillStyle = recognitionColor;
+    output.fill(regionCenters);
     if (data.line.center !== null) {
-      output.lineWidth = 4;
       output.beginPath();
       output.arc(...toRaw(data.line.center, 0.84), 9, 0, 2 * Math.PI);
-      output.stroke();
+      output.fill();
     }
   }
 
@@ -366,7 +373,8 @@
         } else if (data.type === 'sampling' || data.type === 'frame') {
           if (data.generation !== generation || !command()) return;
           if (data.type === 'sampling') drawSample(data);
-          else if (activeSource === 'color' && (phase === 'sampling' || phase === 'tracking' || (phase === 'choose' && reference))) drawFrame(data);
+          else if (activeSource === 'color' && (phase === 'sampling' || phase === 'tracking'
+            || (phase === 'choose' && phaseBeforePick === 'tracking'))) drawFrame(data);
         } else if (['waiting', 'recovering', 'error'].includes(data.type)) {
           const label = {waiting: '等待摄像头', recovering: '等待摄像头恢复', error: '颜色识别失败'}[data.type];
           const message = [label, data.message].filter(Boolean).join('：');
@@ -436,7 +444,7 @@
       cancelPick();
       return;
     }
-    if (phase !== 'tracking') clear();
+    phaseBeforePick = phase;
     window.dispatchEvent(new Event('color-pick-start'));
     suspendedByPage = false;
     phase = 'choose';
@@ -465,9 +473,11 @@
   function cancelPick() {
     if (!reference) { clear(); return; }
     generation++;
-    phase = 'tracking';
+    phase = phaseBeforePick;
     sample = null;
+    button.setAttribute('aria-pressed', String(phase === 'tracking'));
     frame.classList.remove('picking');
+    if (phase !== 'tracking') clearTarget();
     showReference();
     sendSettings();
   }
@@ -475,7 +485,7 @@
   frame.addEventListener('contextmenu', event => {
     event.preventDefault();
     if (phase === 'choose' || phase === 'sampling') cancelPick();
-    else if (phase !== 'paused') clear();
+    else if (phase !== 'paused') clear(true);
   });
   window.addEventListener('vision-source-change', event => {
     if (activeSource !== event.detail) {
@@ -519,6 +529,7 @@
   window.addEventListener('color-preset-load', event => {
     loadReference(event.detail.reference, event.detail.threshold, true);
   });
+  window.addEventListener('color-reference-clear', () => clear(true));
   threshold.addEventListener('input', () => {
     thresholdValue.textContent = Number(threshold.value).toFixed(2);
     sendSettings();

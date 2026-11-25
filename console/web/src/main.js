@@ -1,6 +1,6 @@
 import { createIcons, Bot, Power, PowerOff, Menu, PanelLeftClose, Crosshair, Play, SlidersHorizontal, LayoutGrid, RotateCcw, Undo2,
   Lock, LockOpen, Plus, Minus, ListPlus, RefreshCw, Download, Trash2, ArrowUp, ArrowDown, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-  FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, HandHelping, Footprints, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, Languages } from 'lucide';
+  FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, HandHelping, Footprints, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, BatteryLow, Languages } from 'lucide';
 import { SAMPLE_MAX_AGE_MS, SERVO_STATUS_MAX_AGE_MS, INDEPENDENT_IMU_MAX_AGE_MS, auxImuStatus, deviceFresh, imuFresh, imuTraceContinues, sampleFresh, servoStatus, tofStatus } from './state-status.js';
 import './style.css';
 import './simple-controls.css';
@@ -39,7 +39,7 @@ let info, state, selected = [], armed = false;
 const headImuEnabled = () => info?.head_imu_enabled !== false;
 let token = '', lastImuKey = '', lastGood = 0, responseSequence = 0, lastAuxSequence = -1;
 let auxValid = false;
-let lowVoltageActive = false, lastLowVoltageNotice = -Infinity;
+let lowVoltageActive = false;
 let connectionError = '';
 let stateRequestPending = false, stateRequestStarted = 0;
 let resourceRequestPending = false, nextResourceRequest = 0;
@@ -63,7 +63,7 @@ const fmt = (n, digits = 1) => Number.isFinite(n) ? n.toFixed(digits) : '--';
 const iconsRefresh = () => {
   createIcons({ icons: { Bot, Power, PowerOff, Menu, PanelLeftClose, Crosshair, Play,
     SlidersHorizontal, LayoutGrid, RotateCcw, Undo2, Lock, LockOpen, Plus, Minus, ListPlus, RefreshCw, Download, Trash2, ArrowUp, ArrowDown, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-    FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, HandHelping, Footprints, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, Languages }, attrs: { 'stroke-width': 1.8 } });
+    FlipHorizontal2, FolderOpen, Files, Save, Square, House, Activity, Gauge, Gamepad2, Eye, EyeOff, HandHelping, Footprints, UserRoundSearch, Radar, Settings, Wrench, Wifi, Radio, Battery, BatteryLow, Languages }, attrs: { 'stroke-width': 1.8 } });
   // Lucide retains this attribute on rendered SVGs and would otherwise replace them again.
   document.querySelectorAll('svg[data-lucide]').forEach(icon => icon.removeAttribute('data-lucide'));
 };
@@ -363,14 +363,14 @@ function pollControlAction() {
     .finally(() => { controlActionPollBusy = false; });
 }
 
-async function networkAnnouncementSetting(event) {
+async function audioToggleSetting(event, setting) {
   const { requestId, enabled } = event.data;
   if (!Number.isSafeInteger(requestId)) return;
-  const reply = data => event.source.postMessage({ type: 'studio-network-announcement-result', requestId, ...data }, event.origin);
+  const reply = data => event.source.postMessage({ type: `studio-${setting}-result`, requestId, ...data }, event.origin);
   try {
     if (workspaces.current !== 'system') throw new Error('请先打开系统设置');
     if (enabled !== undefined && typeof enabled !== 'boolean') throw new Error('设置无效');
-    const result = await request('network-announcement', enabled === undefined ? undefined : { enabled });
+    const result = await request(setting, enabled === undefined ? undefined : { enabled });
     reply({ enabled: result.enabled });
   } catch (error) {
     reply({ error: error.message });
@@ -663,7 +663,9 @@ window.addEventListener('message', event => {
     } else if (event.data?.type === 'studio-action-request') {
       controlAction(event);
     } else if (event.data?.type === 'studio-network-announcement-request') {
-      networkAnnouncementSetting(event);
+      audioToggleSetting(event, 'network-announcement');
+    } else if (event.data?.type === 'studio-mouth-audio-request') {
+      audioToggleSetting(event, 'mouth-audio');
     } else if (event.data?.type === 'studio-software-update-request') {
       checkSoftwareUpdate();
     }
@@ -831,19 +833,24 @@ function renderState() {
   const measuredVoltages = workspaces.current === 'status' && !state.device_paused
     ? state.servos.filter(servo => liveServoFresh(servo)).map(servo => servo.voltage)
     : [];
-  const lowVoltage = updateLowVoltage(state.robot?.low_voltage, measuredVoltages, performance.now());
   deviceStatus.renderHealth(connectionError ? null : state.robot?.health);
-  if (!(handoff && !connectionError && ((state.online && !fresh) || waitingForFirstSample(state)))) {
-    const voltage = displayVoltage(state, sampleElapsed(), connectionError);
-    const calibrating = !!state.calibration?.active || !!state.head_calibration?.active;
+  const lowVoltage = updateLowVoltage(state.robot?.low_voltage, measuredVoltages, performance.now());
+  const voltageAlert = $('low-voltage-alert');
+  if (!connectionError && lowVoltage) {
     const warning = lowVoltageWarning(lowVoltage);
-    renderTopbarVoltage($, { calibrating, voltage, fresh: sidebarFresh, lowVoltage });
-    if (warning && !lowVoltageActive && performance.now() - lastLowVoltageNotice >= 10000) {
-      lastLowVoltageNotice = performance.now();
-      toast(lowVoltage?.display_only ? '电压过低，请及时充电'
-        : '电压过低，请及时充电；持续低压将坐下并卸力', true);
-    }
+    if (warning && !lowVoltageActive) voltageAlert.showModal();
+    if (!warning && voltageAlert.open) voltageAlert.close();
     lowVoltageActive = warning;
+  }
+  renderTopbarVoltage($, {
+    calibrating: state.calibration?.active || state.head_calibration?.active,
+    voltage: displayVoltage(state, sampleElapsed(), connectionError),
+    fresh: sidebarFresh,
+    lowVoltage,
+    warning: lowVoltageActive,
+  });
+  if (!(handoff && !connectionError && ((state.online && !fresh) || waitingForFirstSample(state)))) {
+    const calibrating = !!state.calibration?.active || !!state.head_calibration?.active;
     const imuWorkspace = workspaces.current === 'calibration';
     const imuOnline = calibrating || valid || headImuEnabled() && auxImuStatus(state.aux_imu, sampleElapsed(), connectionError).valid;
     const connectionStatus = connectionError ? '连接中断' : imuWorkspace ? (imuOnline ? '设备在线' : '等待采样')

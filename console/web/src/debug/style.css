@@ -68,11 +68,13 @@ header{height:64px}
 .torque-switch input:checked:before{left:14px}
 .torque-switch input:disabled{opacity:.45;cursor:not-allowed}
 .slider-heading{display:flex;justify-content:space-between;align-items:center;gap:8px;min-height:24px;margin-top:12px;font-size:13px;color:var(--muted)}
-#target-value,#parameter-value{color:#243d30;font-size:14px;min-width:65px;text-align:right;flex-shrink:0}
+#parameter-value{color:#243d30;font-size:14px;min-width:65px;text-align:right;flex-shrink:0}
 #target-slider,#parameter-slider{display:block;width:100%;min-width:0;height:32px;margin:0;padding:0;accent-color:var(--green);cursor:pointer}
 #target-slider:disabled,#parameter-slider:disabled{cursor:not-allowed;opacity:.45}
 .slider-input-row{display:flex;align-items:center;gap:12px;margin-top:10px}
-.slider-input-row input[type=range]{flex:1}
+.slider-control{flex:1;min-width:0}
+.slider-control:has(input:disabled){cursor:not-allowed}
+.slider-control input:disabled{pointer-events:none}
 .slider-input-row input[type=number]{width:96px;min-height:38px;flex-shrink:0;padding:5px 8px;font-size:14px;font-variant-numeric:tabular-nums}
 .slider-input-row input[type=number]:disabled{opacity:.45;cursor:not-allowed}
 .servo-live-controls .range-label,.parameter-editor .range-label{margin-top:8px;font-size:12px}

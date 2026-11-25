@@ -1,6 +1,6 @@
 export function bindMotionInput({
   state, headStickAxes, headStickAvailable, displayMode, sticksBlocked,
-  motionUnavailable, remindMotion, sendInput, triggerRanges,
+  motionUnavailable, remindMotion, sendInput,
 }) {
   const headStickKnob = [0, 0];
   const knobs = new Map();
@@ -174,7 +174,6 @@ export function bindMotionInput({
     headStickKnob.fill(0);
     state.left_trigger = state.right_trigger = 0;
     state.buttons = [];
-    triggerRanges.forEach((range) => { range.value = "0"; });
     pads.forEach((pad) => {
       pad.classList.remove("is-active");
       if (pad.dataset.pointer) {

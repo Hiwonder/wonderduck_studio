@@ -67,11 +67,12 @@ class ModelPaletteStore:
             return dict(palette=self.value)
 
 
-class NetworkAnnouncementStore:
-    """Persist whether network details are spoken automatically at boot."""
+class AudioToggleStore:
+    """Persist an audio setting shared with the robot's playback process."""
 
-    def __init__(self, path=DEFAULT_NETWORK_ANNOUNCEMENT_PATH):
+    def __init__(self, path, invalid_message):
         self.path = Path(path)
+        self.invalid_message = invalid_message
         self.lock = threading.Lock()
 
     def snapshot(self):
@@ -81,15 +82,15 @@ class NetworkAnnouncementStore:
             except FileNotFoundError:
                 return dict(enabled=True)
             if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
-                raise ValueError("网络播报设置无效")
+                raise ValueError(self.invalid_message)
             return dict(enabled=value["enabled"])
 
     def save(self, enabled):
         if type(enabled) is not bool:
-            raise ValueError("网络播报设置无效")
+            raise ValueError(self.invalid_message)
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor, name = tempfile.mkstemp(prefix=".network-announcement-", suffix=".tmp", dir=str(self.path.parent))
+            descriptor, name = tempfile.mkstemp(prefix=f".{self.path.stem}-", suffix=".tmp", dir=str(self.path.parent))
             temporary = Path(name)
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as stream:

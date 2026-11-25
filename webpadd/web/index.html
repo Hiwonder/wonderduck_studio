@@ -45,7 +45,7 @@
 </div>
 <span class="tracking-target" id="tracking-target" hidden></span>
 </div>
-<div class="camera-fps"><span>FPS：<output id="video-fps">0</output><output id="detection-fps">0</output></span><span data-requires-tof>TOF：<output id="camera-tof">--</output></span></div>
+<div class="camera-fps"><span>FPS：<output id="video-fps">0</output><output id="detection-fps">0</output></span><span class="camera-tof" data-requires-tof>TOF：<output id="camera-tof">--</output></span></div>
 <div class="camera-placeholder" id="camera-placeholder">等待画面</div>
 <span aria-live="polite" class="camera-status" id="camera-status">正在连接</span>
 </div></div>
@@ -111,7 +111,7 @@
 <div class="operator-view operator-extras" data-operator-panel="actions" data-operator-reveal="actions" hidden=""><div class="control-action-library" hidden>
   <div class="control-action-picker"><button class="action" id="control-action-select" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="control-action-options"><span id="control-action-name">选择动作</span><svg aria-hidden="true" class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button><div class="control-action-options" id="control-action-options" role="listbox" aria-label="可用动作" hidden></div></div>
   <button class="action primary" id="control-action-run" type="button" disabled>运行</button>
-</div><div class="accessory-controls"><label class="mouth-control"><span>嘴部开合</span><input aria-label="嘴部开合" class="speed-range" data-trigger-range="left_trigger" max="1" min="0" step="0.01" type="range" value="0"/></label></div></div>
+</div><div class="accessory-controls"><label class="mouth-control" title="张嘴时叫一声，按住滑杆 1 秒后连续叫"><span>嘴部开合</span><input id="mouth-control" aria-label="嘴部开合" class="speed-range" min="0" max="1" step="0.01" type="range" value="0" disabled/></label></div></div>
 <section aria-label="自动避障" class="mode-obstacle" data-requires-tof data-operator-reveal="actions"><div class="subsection-heading"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-radar"></use></svg>自动避障</h2><label class="obstacle-switch" for="obstacle-enabled"><span>启用</span><input disabled="" id="obstacle-enabled" type="checkbox"/></label></div><div class="obstacle-controls">
 <span aria-live="polite" class="obstacle-state" id="obstacle-state"></span>
 <label for="obstacle-distance"><span>避障距离 <output id="obstacle-distance-value">500 mm</output></span><input class="speed-range" disabled="" id="obstacle-distance" max="2000" min="100" step="50" type="range" value="500"/></label>
@@ -143,11 +143,9 @@
 <input aria-label="ID31 滑杆" class="speed-range" id="head-position-slider" min="{{HEAD_PITCH_MIN}}" max="{{HEAD_PITCH_MAX}}" step="1" type="range" value="2100"/>
 <input class="speed-input" id="head-position" min="{{HEAD_PITCH_MIN}}" max="{{HEAD_PITCH_MAX}}" step="1" type="number" value="2100"/>
 </div>
-<div class="settings-section vision-target" hidden=""><div class="target-parameters"><div class="parameter coordinated-goal" hidden=""><span>目标(320×180)</span><div class="tracking-deadzones coordinated-final-point"><label class="tracking-deadzone"><span>X</span><input aria-label="最终目标 X" class="speed-input" data-coordinated-final-point="0" disabled="" max="320" min="0" required="" step="any" type="number" value="180"/><output>px</output></label><label class="tracking-deadzone"><span>Y</span><input aria-label="最终目标 Y" class="speed-input" data-coordinated-final-point="1" disabled="" max="180" min="0" required="" step="any" type="number" value="150"/><output>px</output></label></div></div><div class="parameter coordinated-goal" hidden=""><span>目标误差</span><div class="tracking-deadzones coordinated-final-point"><label class="tracking-deadzone"><span>X ±</span><input aria-label="最终目标 X 误差" class="speed-input" data-coordinated-final-tolerance="0" disabled="" min="0" required="" step="any" type="number" value="10"/><output>px</output></label><label class="tracking-deadzone"><span>Y ±</span><input aria-label="最终目标 Y 误差" class="speed-input" data-coordinated-final-tolerance="1" disabled="" min="0" required="" step="any" type="number" value="10"/><output>px</output></label></div></div>
-<label class="parameter coordinated-follow-area" hidden="" id="follow-stop-area-setting" title="面积按 1280×720 画面换算"><span>跟踪目标面积</span><input aria-label="跟踪目标面积" class="speed-input" id="follow-stop-area" min="1" required="" step="1" type="number" value="320000"/><span>px²</span></label>
-<label class="parameter coordinated-follow-area" hidden="" id="follow-area-deadzone-setting" title="面积按 1280×720 画面换算"><span>面积死区 ±</span><input aria-label="面积死区" class="speed-input" id="follow-area-deadzone" min="0" max="9007199254740991" required="" step="1" type="number" value="80000"/><span>px²</span></label>
-<label class="parameter coordinated-follow-area" hidden="" id="follow-stop-distance-setting" data-requires-tof><span>ToF 跟踪距离</span><input aria-label="ToF 跟踪距离" class="speed-input" id="follow-stop-distance" min="1" max="4294967295" required="" step="1" type="number" value="900"/><span>mm</span></label>
-<label class="parameter coordinated-follow-area" hidden="" id="follow-distance-deadzone-setting" data-requires-tof><span>ToF 距离死区 ±</span><input aria-label="ToF 距离死区" class="speed-input" id="follow-distance-deadzone" min="0" max="4294967295" required="" step="1" type="number" value="100"/><span>mm</span></label>
+<div class="settings-section vision-target" hidden=""><div class="target-parameters"><div class="parameter coordinated-goal" hidden=""><span data-recognition-grid="目标">目标 (320×180)</span><div class="tracking-deadzones coordinated-final-point"><label class="tracking-deadzone"><span>X</span><input aria-label="最终目标 X" class="speed-input" data-coordinated-final-point="0" disabled="" max="320" min="0" required="" step="any" type="number" value="180"/><output>px</output></label><label class="tracking-deadzone"><span>Y</span><input aria-label="最终目标 Y" class="speed-input" data-coordinated-final-point="1" disabled="" max="180" min="0" required="" step="any" type="number" value="150"/><output>px</output></label></div></div><div class="parameter coordinated-goal" hidden=""><span>目标误差</span><div class="tracking-deadzones coordinated-final-point"><label class="tracking-deadzone"><span>X ±</span><input aria-label="最终目标 X 误差" class="speed-input" data-coordinated-final-tolerance="0" disabled="" min="0" required="" step="any" type="number" value="10"/><output>px</output></label><label class="tracking-deadzone"><span>Y ±</span><input aria-label="最终目标 Y 误差" class="speed-input" data-coordinated-final-tolerance="1" disabled="" min="0" required="" step="any" type="number" value="10"/><output>px</output></label></div></div>
+<label class="parameter coordinated-follow-area" hidden="" id="follow-stop-area-setting" title="面积按 1280×960 画面换算"><span>跟踪目标面积</span><input aria-label="跟踪目标面积" class="speed-input" id="follow-stop-area" min="1" required="" step="1" type="number" value="426667"/><span>px²</span></label>
+<label class="parameter coordinated-follow-area" hidden="" id="follow-area-deadzone-setting" title="面积按 1280×960 画面换算"><span>面积死区 ±</span><input aria-label="面积死区" class="speed-input" id="follow-area-deadzone" min="0" max="9007199254740991" required="" step="1" type="number" value="106667"/><span>px²</span></label>
 <div class="parameter coordinated-arrival" hidden=""><label for="coordinated-arrival-skill">到位后动作</label><select class="action" data-coordinated-arrival-skill="" disabled="" id="coordinated-arrival-skill"><option value="">无</option></select><label class="coordinated-arrival-delay" for="coordinated-arrival-delay">动作延时 <input aria-label="到位动作延时" class="speed-input" disabled="" id="coordinated-arrival-delay" min="0" required="" step="any" type="number" value="1"/><span>秒</span></label></div>
 <div class="parameter coordinated-mouth" hidden=""><label class="mouth-enable"><input data-coordinated-mouth="before" data-mouth-field="enabled" disabled="" type="checkbox"/>动作前嘴部</label><label>开度 <input aria-label="动作前嘴部开度" class="speed-input" data-coordinated-mouth="before" data-mouth-field="open" disabled="" min="0" max="100" required="" step="any" type="number" value="0"/> %</label><label>时间 <input aria-label="动作前嘴部转动时间" class="speed-input" data-coordinated-mouth="before" data-mouth-field="duration_s" disabled="" min="0" required="" step="any" type="number" value="0.5"/> 秒</label></div>
 <div class="parameter coordinated-mouth" hidden=""><label class="mouth-enable"><input data-coordinated-mouth="after" data-mouth-field="enabled" disabled="" type="checkbox"/>动作后嘴部</label><label>开度 <input aria-label="动作后嘴部开度" class="speed-input" data-coordinated-mouth="after" data-mouth-field="open" disabled="" min="0" max="100" required="" step="any" type="number" value="0"/> %</label><label>时间 <input aria-label="动作后嘴部转动时间" class="speed-input" data-coordinated-mouth="after" data-mouth-field="duration_s" disabled="" min="0" required="" step="any" type="number" value="0.5"/> 秒</label></div>
@@ -178,7 +176,7 @@
 <div class="pid-control"><span>D</span><input aria-label="左右 D 滑杆" class="speed-range" data-head-pid-range-axis="1" data-head-pid-range-term="2" max="10" min="0" step="any" type="range" value="0.5"/><input aria-label="左右 D 数值" class="speed-input" data-head-pid-axis="1" data-head-pid-term="2" step="any" type="number" value="0.5"/></div>
 </fieldset>
 <div class="vision-deadzone target-parameters">
-<div class="parameter"><span>目标(320×180)</span><div class="tracking-deadzones">
+<div class="parameter"><span data-recognition-grid="目标">目标 (320×180)</span><div class="tracking-deadzones">
 <label class="tracking-deadzone"><span>X</span><input aria-label="目标 X" class="speed-input" data-head-target-point="0" min="0" max="320" step="any" type="number" value="160" required/><output>px</output></label>
 <label class="tracking-deadzone"><span>Y</span><input aria-label="目标 Y" class="speed-input" data-head-target-point="1" min="0" max="180" step="any" type="number" value="90" required/><output>px</output></label>
 </div></div>
@@ -200,7 +198,7 @@
 <div class="pid-control"><span>D</span><input aria-label="联合头部左右 D 滑杆" class="speed-range" data-coordinated-pid-range="" disabled="" max="10" min="0" step="any" type="range" value="0.01"/><input aria-label="联合头部左右 D 数值" class="speed-input" data-coordinated-pid-axis="1" data-coordinated-pid-term="2" disabled="" step="any" type="number" value="0.01"/></div>
 </fieldset>
 <div class="vision-deadzone target-parameters">
-<div class="parameter"><span>头部目标（320×180）</span><div class="tracking-deadzones">
+<div class="parameter"><span data-recognition-grid="头部目标">头部目标 (320×180)</span><div class="tracking-deadzones">
 <label class="tracking-deadzone"><span>X</span><input aria-label="头部目标 X" class="speed-input" data-head-target-point="0" min="0" max="320" step="any" type="number" value="160" required disabled/><output>px</output></label>
 <label class="tracking-deadzone"><span>Y</span><input aria-label="头部目标 Y" class="speed-input" data-head-target-point="1" min="0" max="180" step="any" type="number" value="90" required disabled/><output>px</output></label>
 </div></div>
@@ -223,7 +221,7 @@
 </div></fieldset></div>
 </div></div>
 </div>
-<div class="object-area" data-vision-fields="object" title="面积按 1280×720 画面换算" hidden="">检测框面积：<span id="object-area-value">--</span></div>
+<div class="object-area" data-vision-fields="object" title="面积按 1280×960 画面换算" hidden="">检测框面积：<span id="object-area-value">--</span></div>
 <div class="person-confidence" data-vision-fields="object" hidden="">
 <label for="person-confidence">行人检测置信度阈值</label>
 <input class="speed-range" id="person-confidence" min="0.01" max="1" step="0.01" type="range" value="0.50"/>
@@ -258,7 +256,10 @@
 <div class="panel-heading"><div class="heading-label"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-settings"></use></svg>系统设置</h2></div></div>
 <section class="settings-card audio-settings"><div class="subsection-heading"><h3>音频设置</h3></div>
 <label class="audio-volume-control" for="audio-volume"><span>系统音量 <output id="audio-volume-value" for="audio-volume">--</output></span><input class="speed-range" disabled="" id="audio-volume" max="100" min="0" step="1" type="range"/></label>
-<label class="network-announcement-control" for="network-announcement-enabled" title="开机和切换网络时播报热点名称或 IP"><span>网络播报</span><input disabled="" id="network-announcement-enabled" role="switch" type="checkbox"/></label>
+<div class="audio-toggle-controls">
+<label class="audio-toggle-control" for="network-announcement-enabled" title="开机和切换网络时播报热点名称或 IP"><span>网络播报</span><input disabled="" id="network-announcement-enabled" role="switch" type="checkbox"/></label>
+<label class="audio-toggle-control" for="mouth-audio-enabled"><span>嘴部开合音效</span><input disabled="" id="mouth-audio-enabled" role="switch" type="checkbox"/></label>
+</div>
 <div class="audio-record-controls"><button class="action" disabled="" id="audio-record" type="button" aria-pressed="false">开始录音</button><div class="audio-control-status"><span id="audio-record-status" role="status" aria-live="polite"></span></div><button class="action" hidden="" id="audio-record-delete" type="button">删除录音</button></div>
 <p class="audio-record-path" hidden="" id="audio-record-path"></p>
 <p class="parameter-note">再次点击停止并播放录音，最长录制 2 分钟。</p></section>
@@ -282,6 +283,7 @@
 
 <p class="control-busy" id="control-busy" role="status" hidden></p>
 </main>
+<dialog aria-labelledby="low-voltage-title" aria-describedby="low-voltage-message" class="relax-confirm" id="low-voltage-alert" role="alertdialog"><form method="dialog"><h2 id="low-voltage-title">低电量警报</h2><p id="low-voltage-message">电压过低，请及时充电。持续低压时，机器人将坐下并卸力。</p><div class="relax-confirm-actions"><button class="action primary" type="submit">知道了</button></div></form></dialog>
 <dialog aria-labelledby="motion-blocked-title" class="relax-confirm" id="motion-blocked"><form method="dialog"><h2 id="motion-blocked-title">请先启动</h2><p id="motion-blocked-text">机器人已休息，请点击启动后再操控。</p><div class="relax-confirm-actions"><button class="action primary" value="ok">知道了</button></div></form></dialog>
 <dialog aria-labelledby="shutdown-confirm-title" class="relax-confirm" id="shutdown-confirm"><form method="dialog"><h2 id="shutdown-confirm-title">确认关机</h2><p>机器人将先坐下并收回姿态，然后关闭系统。</p><div class="relax-confirm-actions"><button class="action" value="cancel">取消</button><button class="action primary" value="confirm">确认关机</button></div></form></dialog>
 <dialog aria-labelledby="licenses-title" class="licenses-dialog" id="licenses-dialog">

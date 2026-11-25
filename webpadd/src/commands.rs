@@ -318,9 +318,6 @@ pub(super) async fn dispatch_coordinated_tracking(session: u64, mut params: prot
     let action = params.action;
     let person_follow = params.stop_area_px.is_some();
     let response = |accepted, reason| ServerMessage::CoordinatedTrackingResult { action, accepted, reason };
-    if !state.capabilities.tof_enabled && (params.stop_distance_mm.is_some() || params.stop_distance_deadzone_mm != 0) {
-        return response(false, Some("ToF 已停用，行人跟随使用图像面积".into()));
-    }
     if !params.valid() { return response(false, Some("目标、相机或联合追踪参数无效".into())); }
     if params.action == proto::MotionTrackingAction::Start
         && let Err(reason) = acquire_human(session, state).await

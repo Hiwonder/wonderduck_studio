@@ -11,6 +11,7 @@ import time
 import uuid
 
 from app.paths import CALIBRATION_DEFAULTS, CONSOLE_ROOT
+from app.sensors.qmi_config import ACTIVE_CONFIG, LEGACY_ACTIVE_CONFIG, LEGACY_ASYNC_CONFIG
 from vendor.imu import imu_accel_calibration as accel_quality
 
 
@@ -32,7 +33,7 @@ _gyro_spec.loader.exec_module(gyro_quality)
 def empty_profile():
     return dict(schema=1, model="QMI8658", bus="unoq-i2c4" if os.environ.get("WONDERDUCK_UNOQ_ROUTER") else "/dev/i2c-3",
                 address=int(os.environ.get("WONDERDUCK_HEAD_IMU_ADDRESS", "0x6a"), 0),
-                configuration="40034300110083", revision="uncalibrated", accel=None, gyro=None)
+                configuration=ACTIVE_CONFIG.hex(), revision="uncalibrated", accel=None, gyro=None)
 
 
 def validate_profile(profile):
@@ -40,9 +41,10 @@ def validate_profile(profile):
     for key in ("schema", "model", "bus", "address"):
         if profile.get(key) != expected[key]:
             raise ValueError("头部 IMU 标定文件与传感器配置不匹配")
-    # SyncSample changes only the I2C readout protocol, not the measurement
-    # scale or filters. Existing calibrations therefore remain applicable.
-    if profile.get("configuration") not in (expected["configuration"], "40034300110003"):
+    # Prior profiles store bias in g and rad/s and scale as a unitless factor.
+    if profile.get("configuration") not in (
+        expected["configuration"], LEGACY_ACTIVE_CONFIG.hex(), LEGACY_ASYNC_CONFIG.hex(),
+    ):
         raise ValueError("头部 IMU 标定文件与传感器配置不匹配")
     if not isinstance(profile.get("revision"), str) or not profile["revision"]:
         raise ValueError("头部 IMU 标定文件版本无效")
@@ -79,7 +81,8 @@ class ProfileStore:
 
     def save(self, profile, *, backup=True):
         validate_profile(profile)
-        payload = json.dumps(profile, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        payload = json.dumps(dict(profile, configuration=ACTIVE_CONFIG.hex()),
+                             ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if backup and self.path.exists():
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")

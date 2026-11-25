@@ -32,7 +32,7 @@ from app.sensors.camera import Camera
 from app.sensors.qmi_imu import AuxiliaryImu
 from app.sensors.tof import TofReader
 from app.system import network, resources, service_control, software_update
-from app.system.runtime_config import ModelPaletteStore, NetworkAnnouncementStore, robot_root, software_version
+from app.system.runtime_config import AudioToggleStore, DEFAULT_NETWORK_ANNOUNCEMENT_PATH, ModelPaletteStore, robot_root, software_version
 from app.system.secure_transport import SecureTransport
 
 
@@ -307,6 +307,12 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError) as error:
                 logging.warning("读取开机网络播报设置失败：%s", error)
                 self.send_json(dict(error="读取开机网络播报设置失败"), 500)
+        elif path == "/api/mouth-audio":
+            try:
+                self.send_json(self.server.mouth_audio.snapshot())
+            except (OSError, ValueError) as error:
+                logging.warning("读取嘴部开合音效设置失败：%s", error)
+                self.send_json(dict(error="读取嘴部开合音效设置失败"), 500)
         elif path == "/api/resources":
             try:
                 self.send_json(resources.snapshot())
@@ -409,6 +415,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/network-announcement":
                 self.send_json(self.server.network_announcement.save(command.get("enabled")))
+                return
+            if path == "/api/mouth-audio":
+                if self.headers.get("X-Studio-Workspace") != "system":
+                    raise PermissionError("请先打开系统设置")
+                self.send_json(self.server.mouth_audio.save(command.get("enabled")))
                 return
             if path == "/api/models/restore":
                 manager = self.model_manager()
@@ -723,7 +734,8 @@ def main():
         server.actions_directory = Path(__file__).resolve().parent / "actions"
         server.action_documents = ActionDocuments(Path(__file__).resolve().parent / "action-groups")
         server.model_palette = ModelPaletteStore()
-        server.network_announcement = NetworkAnnouncementStore()
+        server.network_announcement = AudioToggleStore(DEFAULT_NETWORK_ANNOUNCEMENT_PATH, "网络播报设置无效")
+        server.mouth_audio = AudioToggleStore(Path(args.robot_root) / "target/mouth-sound.json", "嘴部开合音效设置无效")
         server.model_manager = (ModelManager(args.robot_root, controller.observer.query)
                                 if args.studio and not args.demo else None)
         server.online_model_updater = (OnlineModelUpdater(server.model_manager, lambda: UpdateControl(args.robotd_socket))

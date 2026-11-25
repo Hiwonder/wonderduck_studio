@@ -428,13 +428,12 @@ pub(super) async fn robotd_worker(
                     }
                 } else {
                     let result = if action == proto::HumanControlAction::Release {
-                        let mut zero = vec![
+                        // robotd freezes the latest manual head target on release.
+                        // A default head command here would replace that target with HOME.
+                        let zero = [
                             proto::Call::RobotMove(proto::MoveParams::default()),
                             proto::Call::RobotMouth(proto::MouthParams::default()),
                         ];
-                        if state.active && !state.fresh(Instant::now()) {
-                            zero.push(proto::Call::RobotHead(proto::HeadParams::default()));
-                        }
                         match timeout(INPUT_TTL, write_notifications(writer, &zero)).await {
                             Ok(Ok(())) => human_request(reader, writer, &mut next_id, action).await,
                             _ => Err("final zero could not be sent".into()),

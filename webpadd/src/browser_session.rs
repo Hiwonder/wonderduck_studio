@@ -96,10 +96,14 @@ pub(super) async fn serve(
                 input_acquire = None;
                 if let Err(reason) = result.unwrap_or_else(|error| Err(format!("控制权请求失败：{error}"))) {
                     input_acquire_failed = input_requested;
-                    if input_requested {
-                        if let Some(peer) = state.control.lock().await.peers.get_mut(&session) {
+                    if let Some(peer) = state.control.lock().await.peers.get_mut(&session) {
+                        if input_requested {
                             peer.require_neutral();
+                        } else {
+                            peer.cancel_mouth();
                         }
+                    }
+                    if input_requested {
                         if output.try_send(BrowserReply::error(reason)).is_err() { break; }
                     }
                 }
@@ -143,14 +147,15 @@ pub(super) async fn serve(
                         left_x,
                         left_y,
                         right_x,
-                        right_y, head_stick, left_trigger, right_trigger, buttons, active,
+                        right_y, head_stick, left_trigger, right_trigger, mouth_auto, mouth_cancel, mouth_held,
+                        buttons, active,
                     } => {
                         if leaving { continue; }
                         let input = Input {
                             left_x,
                             left_y,
                             right_x,
-                            right_y, head_stick, left_trigger, right_trigger,
+                            right_y, head_stick, left_trigger, right_trigger, mouth_auto, mouth_cancel, mouth_held,
                             buttons: buttons.into_iter().fold(0, |bits, button| bits | button.bit()),
                         };
                         if !input.valid() {
@@ -653,13 +658,12 @@ async fn handle_command(
             final_tolerance,
             stop_area_px,
             stop_area_deadzone_px,
-            stop_distance_mm,
-            stop_distance_deadzone_mm,
             arrival_delay_s,
             arrival_skill,
             mouth_before,
             mouth_after,
             pickup_after,
+            ..
         } => {
             let params = proto::CoordinatedTrackingParams {
                 action,
@@ -678,8 +682,8 @@ async fn handle_command(
                 final_tolerance,
                 stop_area_px,
                 stop_area_deadzone_px,
-                stop_distance_mm,
-                stop_distance_deadzone_mm,
+                stop_distance_mm: None,
+                stop_distance_deadzone_mm: 0,
                 arrival_delay_s,
                 arrival_skill,
                 mouth_before,

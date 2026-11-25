@@ -1,12 +1,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createElement, RotateCcw } from 'lucide';
-import { imuFresh } from './state-status.js';
+import { deviceFresh, imuFresh, SERVO_STATUS_MAX_AGE_MS } from './state-status.js';
 
 const FACES = ['+X', '-X', '+Y', '-Y', '+Z', '-Z'];
 const UP = new THREE.Vector3(0, 1, 0);
 const SENSOR_TO_BODY = new THREE.Quaternion(.5, .5, .5, .5);
 const BODY_TO_VIEW = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+// The RK3566 head QMI8658 reports +Y and +Z opposite to the CAD IMU frame.
+const HEAD_SENSOR_TO_CAD = new THREE.Quaternion(1, 0, 0, 0);
 
 function finiteVector(value, length) {
   return Array.isArray(value) && value.length === length && value.every(Number.isFinite);
@@ -112,10 +114,10 @@ function panelScene() {
   grid.position.y = -1.02;
   grid.material.transparent = true; grid.material.opacity = .3;
   scene.add(grid);
-  const body = new THREE.Group(), sensor = sensorAxes();
-  scene.add(body, sensor);
-  body.visible = false; sensor.visible = false;
-  return { scene, body, sensor };
+  const pose = new THREE.Group();
+  scene.add(pose);
+  pose.visible = false;
+  return { scene, pose, axes: null, bodySensor: null, headSensor: null, joints: new Map() };
 }
 
 function normalizedModel(model) {
@@ -129,6 +131,37 @@ function normalizedModel(model) {
   clone.position.sub(center);
   wrapper.scale.setScalar(1.65 / longest);
   return wrapper;
+}
+
+function modelSensorAxes() {
+  const axes = sensorAxes();
+  axes.scale.setScalar(.38);
+  axes.visible = false;
+  axes.traverse(object => {
+    if (!object.material) return;
+    object.material.depthTest = false;
+    object.material.depthWrite = false;
+    object.renderOrder = 2;
+  });
+  return axes;
+}
+
+const VIEW_TO_SENSOR = BODY_TO_VIEW.clone().invert();
+const BODY_SENSOR_IN_VIEW = BODY_TO_VIEW.clone().multiply(SENSOR_TO_BODY).multiply(VIEW_TO_SENSOR);
+const FORWARD = new THREE.Vector3(1, 0, 0);
+
+// A gravity-referenced six-axis IMU has no common absolute yaw with the body IMU.
+// Match the measured up direction first, then use the model's body heading reference.
+export function headCalibrationRotation(sensorRotation, sensorInModel, bodyRotation, result = new THREE.Quaternion()) {
+  const modelUp = UP.clone().applyQuaternion(sensorRotation.clone().invert()).applyQuaternion(sensorInModel);
+  result.setFromUnitVectors(modelUp.normalize(), UP);
+  const from = FORWARD.clone().applyQuaternion(result);
+  const to = bodyRotation ? FORWARD.clone().applyQuaternion(bodyRotation) : FORWARD;
+  if (Math.hypot(from.x, from.z) > 1e-4 && Math.hypot(to.x, to.z) > 1e-4) {
+    const yaw = Math.atan2(to.x * from.z - to.z * from.x, to.x * from.x + to.z * from.z);
+    result.premultiply(new THREE.Quaternion().setFromAxisAngle(UP, yaw));
+  }
+  return result;
 }
 
 export function createCalibrationView({ viewer, renderer, onError, onRelease }) {
@@ -169,6 +202,10 @@ export function createCalibrationView({ viewer, renderer, onError, onRelease }) 
   reset.addEventListener('click', resetView); resetView();
   let active = false, source = 'body', latest = {}, elapsedAtUpdate = 0, receivedAt = performance.now(), connectionError = '';
   let frame = 0, lastFrame = 0, modelReady = false;
+  const modelRotation = new THREE.Quaternion();
+  const jointRotation = new THREE.Quaternion();
+  const sensorPosition = new THREE.Vector3();
+  const sensorRotation = new THREE.Quaternion();
 
   function updateScene() {
     const elapsed = elapsedAtUpdate + Math.max(0, performance.now() - receivedAt);
@@ -176,21 +213,64 @@ export function createCalibrationView({ viewer, renderer, onError, onRelease }) 
     const calibration = source === 'head' ? latest.head_calibration : latest.calibration;
     const face = suggestedFace(calibration);
     const target = face && tiltForSensorVector(faceVector(face).toArray(), source);
+    const headSelected = source === 'head';
+    const ready = modelReady && (!headSelected || !!scenes[0].headSensor);
+    const bodyHeading = headSelected && imuFresh(latest.imu, latest, elapsed, connectionError)
+      ? orientationInView(latest.imu.quaternion_wxyz) : null;
+    const servoAgeLimit = latest.individual_device_scan || Number.isFinite(latest.device_report_age_ms)
+      ? SERVO_STATUS_MAX_AGE_MS : undefined;
     for (const [index, rotation] of [live.rotation, target].entries()) {
       const stage = scenes[index];
-      const visible = !!rotation && (source === 'head' || modelReady);
-      const bodyVisible = visible && source === 'body', sensorVisible = visible && source === 'head';
-      if (stage.body.visible !== bodyVisible || stage.sensor.visible !== sensorVisible) dirty[index] = true;
-      stage.body.visible = bodyVisible;
-      stage.sensor.visible = sensorVisible;
-      const object = source === 'body' ? stage.body : stage.sensor;
-      if (visible && !object.quaternion.equals(rotation)) { object.quaternion.copy(rotation); dirty[index] = true; }
+      const visible = !!rotation && ready;
+      if (stage.pose.visible !== visible) dirty[index] = true;
+      stage.pose.visible = visible;
+      if (visible) {
+        for (const servo of latest.servos || []) {
+          const joint = stage.joints.get(servo.name);
+          if (!joint || !Number.isFinite(servo.radians)
+            || !deviceFresh(servo, latest, elapsed, connectionError, servoAgeLimit)) continue;
+          jointRotation.setFromAxisAngle(joint.axis, servo.radians);
+          if (!joint.node.quaternion.equals(jointRotation)) {
+            joint.node.quaternion.copy(jointRotation);
+            dirty[index] = true;
+          }
+        }
+        modelRotation.copy(rotation);
+        const sensor = headSelected ? stage.headSensor : stage.bodySensor;
+        if (sensor) {
+          // The model is a child of stage.pose, so strip its last displayed rotation.
+          const unrotate = stage.pose.quaternion.clone().invert();
+          sensor.getWorldPosition(sensorPosition).applyQuaternion(unrotate);
+          if (headSelected) {
+            // Include the current neck and head joint rotations in the sensor frame.
+            sensor.getWorldQuaternion(sensorRotation).premultiply(unrotate)
+              .multiply(HEAD_SENSOR_TO_CAD).multiply(VIEW_TO_SENSOR);
+            headCalibrationRotation(rotation, sensorRotation, index === 0 ? bodyHeading : null, modelRotation);
+          } else {
+            sensorRotation.copy(BODY_SENSOR_IN_VIEW);
+          }
+          if (!stage.axes.visible || !stage.axes.position.equals(sensorPosition)
+            || !stage.axes.quaternion.equals(sensorRotation)) {
+            stage.axes.visible = true;
+            stage.axes.position.copy(sensorPosition);
+            stage.axes.quaternion.copy(sensorRotation);
+            dirty[index] = true;
+          }
+        } else if (stage.axes.visible) {
+          stage.axes.visible = false;
+          dirty[index] = true;
+        }
+        if (!stage.pose.quaternion.equals(modelRotation)) {
+          stage.pose.quaternion.copy(modelRotation);
+          dirty[index] = true;
+        }
+      }
       if (panes[index].dataset.valid !== String(visible)) panes[index].dataset.valid = String(visible);
       const pose = visible ? rotation.toArray().map(value => value.toFixed(6)).join(',') : '';
       if (panes[index].dataset.pose !== pose) panes[index].dataset.pose = pose;
     }
-    const liveLabel = source === 'body' && live.rotation && !modelReady ? '模型加载中' : live.detail;
-    const targetLabel = face && source === 'body' && !modelReady ? '模型加载中'
+    const liveLabel = live.rotation && !ready ? '模型加载中' : live.detail;
+    const targetLabel = face && !ready ? '模型加载中'
       : face ? `建议 ${face} · 传感器轴朝上` : '等待六面摆放建议';
     if (labels[0].textContent !== liveLabel) labels[0].textContent = liveLabel;
     if (labels[1].textContent !== targetLabel) labels[1].textContent = targetLabel;
@@ -257,11 +337,23 @@ export function createCalibrationView({ viewer, renderer, onError, onRelease }) 
   function update(state, elapsed = 0, error = '') {
     latest = state || {}; elapsedAtUpdate = Math.max(0, elapsed); receivedAt = performance.now(); connectionError = error;
   }
-  function setRobotModel(model) {
+  function setRobotModel(model, config) {
+    const normalized = normalizedModel(model);
+    normalized.getObjectByName(config.root_node)?.quaternion.identity();
+    const rig = config.head_imu;
     for (const stage of scenes) {
-      stage.body.clear();
-      stage.body.add(normalizedModel(model));
+      stage.pose.clear();
+      const clone = normalized.clone(true);
+      stage.pose.add(clone);
+      stage.joints = new Map(config.joints.map(joint => [joint.name, {
+        node: clone.getObjectByName(joint.node), axis: new THREE.Vector3(...joint.axis),
+      }]));
+      stage.bodySensor = clone.getObjectByName(config.root_node)?.getObjectByName('body_imu');
+      stage.headSensor = clone.getObjectByName(rig?.head_node)?.getObjectByName(rig?.sensor_node);
+      stage.axes = modelSensorAxes();
+      stage.pose.add(stage.axes);
     }
+    if (!scenes[0].headSensor) onError('模型缺少头部 IMU 节点');
     modelReady = true;
     invalidate();
   }

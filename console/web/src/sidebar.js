@@ -16,6 +16,7 @@ export function createConnectionStatus($) {
 }
 
 export function lowVoltageWarning(status) {
+  if (typeof status?.warning_active === 'boolean') return status.warning_active;
   if (Number.isFinite(status?.voltage_v) && Number.isFinite(status?.settings?.threshold_v)
       && status.voltage_v >= status.settings.threshold_v) return false;
   return status?.triggered === true || (Number.isFinite(status?.voltage_v)
@@ -63,7 +64,7 @@ export function displayVoltage(state, elapsed = 0, connectionError = '') {
 export function createLowVoltageIndicator() {
   let lowSince = null;
   return (status, voltages, now) => {
-    if (status?.triggered || Number.isFinite(status?.voltage_v)) {
+    if (typeof status?.warning_active === 'boolean' || status?.triggered || Number.isFinite(status?.voltage_v)) {
       lowSince = null;
       return status;
     }
@@ -79,20 +80,20 @@ export function createLowVoltageIndicator() {
   };
 }
 
-export function renderTopbarVoltage($, { calibrating, voltage, fresh, lowVoltage }) {
-  calibrating = Boolean(calibrating);
-  const warning = lowVoltageWarning(lowVoltage);
+export function renderTopbarVoltage($, { calibrating, voltage, fresh, lowVoltage, warning }) {
+  calibrating = Boolean(calibrating) && !warning;
   const output = $('topbar-voltage');
-  const shownVoltage = warning && Number.isFinite(lowVoltage.voltage_v) ? lowVoltage.voltage_v : voltage;
+  const shownVoltage = warning && Number.isFinite(lowVoltage?.voltage_v) ? lowVoltage.voltage_v : voltage;
   const text = calibrating ? '采集中' : (fresh || warning) && Number.isFinite(shownVoltage) ? `${shownVoltage.toFixed(1)} V` : '--';
   const label = warning ? '电压过低，请及时充电' : calibrating ? 'IMU 校准采集中' : '电池电压';
   setLocalizedText(output, text);
   setLocalizedAttribute(output, 'aria-label', label);
-  const row = $('topbar-battery'), battery = $('topbar-battery-icon'), sampling = $('topbar-sampling-icon');
+  const row = $('topbar-battery');
   setLocalizedAttribute(row, 'title', label);
   row.classList.toggle('low-voltage', warning);
-  if (battery.hasAttribute('hidden') !== calibrating) battery.toggleAttribute('hidden', calibrating);
-  if (sampling.hasAttribute('hidden') === calibrating) sampling.toggleAttribute('hidden', !calibrating);
+  $('topbar-battery-icon').toggleAttribute('hidden', calibrating || warning);
+  $('topbar-battery-low-icon').toggleAttribute('hidden', !warning);
+  $('topbar-sampling-icon').toggleAttribute('hidden', !calibrating);
 }
 
 export function createSidebar($, iconsRefresh) {

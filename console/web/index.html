@@ -56,6 +56,7 @@
       </div>
       <div id="topbar-battery" class="topbar-battery" title="电池电压">
         <i id="topbar-battery-icon" data-lucide="battery" aria-hidden="true"></i>
+        <i id="topbar-battery-low-icon" data-lucide="battery-low" aria-hidden="true" hidden></i>
         <i id="topbar-sampling-icon" data-lucide="activity" aria-hidden="true" hidden></i>
         <output id="topbar-voltage" aria-label="电池电压">--</output>
       </div>
@@ -193,7 +194,7 @@
                   <button id="frame-read" title="回读当前位置并添加帧"><i data-lucide="download"></i>回读</button><button id="frame-delete" class="danger" title="删除选中帧"><i data-lucide="trash-2"></i>删除</button><button id="frame-insert" title="在选中帧后插入当前目标"><i data-lucide="list-plus"></i>插入</button><button id="frame-down" title="下移选中帧" aria-label="下移选中帧"><i data-lucide="arrow-down"></i>下移</button>
                 </div>
                 <div class="action-footer">
-                  <div class="action-group" role="group" aria-label="舵机偏差"><button id="offset-read"><i data-lucide="download"></i>读取偏差</button><button id="offset-save"><i data-lucide="save"></i>保存偏差</button><button id="offset-load"><i data-lucide="folder-open"></i>加载偏差</button><input id="offset-file" type="file" accept=".csv,text/csv" hidden></div>
+                  <div class="action-group" role="group" aria-label="舵机偏差"><button id="offset-read"><i data-lucide="download"></i>读取偏差</button><button id="offset-save"><i data-lucide="save"></i>保存偏差</button><button id="offset-load"><i data-lucide="folder-open"></i>加载偏差</button></div>
                   <div class="action-group" role="group" aria-label="动作播放"><div class="action-playback-row"><label class="action-loop" title="循环播放"><input id="action-loop" type="checkbox" role="switch" aria-label="循环播放"><span>循环</span></label><button id="action-run" class="primary" title="运行" aria-label="运行"><i data-lucide="play"></i><span>运行</span></button></div><button id="home-all" title="可见且未锁定的舵机回 Home 姿态" disabled><i data-lucide="house"></i>Home</button><button id="center-all" title="可见且未锁定的舵机回到 2048" disabled><i data-lucide="crosshair"></i>中位</button></div>
                   <div class="action-group" role="group" aria-label="动作文件"><button id="action-open"><i data-lucide="folder-open"></i>打开动作</button><button id="action-save"><i data-lucide="save"></i>保存动作</button><button id="action-append"><i data-lucide="files"></i>串联动作</button></div>
                   <div class="action-group" role="group" aria-label="动作组"><select id="action-groups" aria-label="动作组" title="动作组"><option value="">选择动作组</option></select><button id="groups-refresh" title="刷新动作组"><i data-lucide="refresh-cw"></i>刷新动作组</button><button id="group-run" class="primary"><i data-lucide="play"></i><span>运行动作组</span></button></div>
@@ -256,8 +257,48 @@
         </div>
       </section>
     </main>
-    <dialog id="action-select"><form method="dialog"><h2 id="action-select-title"></h2><label class="field">实机动作文件<select id="action-select-name" required><option value="">请选择动作</option></select></label><div class="dialog-actions"><button value="cancel" formnovalidate>取消</button><button id="action-select-confirm" value="ok" class="primary">确认</button></div></form></dialog>
+    <input id="action-local-file" type="file" accept=".csv,text/csv" hidden>
+    <dialog id="action-location" aria-labelledby="action-location-title">
+      <form method="dialog">
+        <h2 id="action-location-title"></h2>
+        <div class="dialog-actions">
+          <button value="cancel">取消</button>
+          <button value="local">本机</button>
+          <button value="robot" class="primary">实机</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="action-local-save" aria-labelledby="action-local-save-title" aria-describedby="action-local-save-help">
+      <form method="dialog">
+        <h2 id="action-local-save-title">保存到本机</h2>
+        <p id="action-local-save-help">当前页面由浏览器下载文件。要选择文件夹，请在浏览器的下载设置中开启「下载前询问每个文件的保存位置」，再点「通过浏览器保存」。</p>
+        <div class="dialog-actions">
+          <button value="cancel">取消</button>
+          <button value="download" class="primary">通过浏览器保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="action-select" aria-labelledby="action-select-title">
+      <form method="dialog">
+        <h2 id="action-select-title"></h2>
+        <p><code id="action-select-directory"></code></p>
+        <label class="field" id="action-select-open">文件<select id="action-select-name" required></select></label>
+        <label class="field" id="action-select-save" hidden>文件名<input id="action-select-filename" type="text" list="action-select-existing" maxlength="120" required disabled></label>
+        <datalist id="action-select-existing"></datalist>
+        <div class="dialog-actions"><button value="cancel" formnovalidate>取消</button><button id="action-select-confirm" value="ok" class="primary">确认</button></div>
+      </form>
+    </dialog>
     <dialog id="confirm"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-text"></p><div class="dialog-actions"><button value="cancel">取消</button><button value="ok" class="primary">确认</button></div></form></dialog>
+    <dialog id="low-voltage-alert" role="alertdialog" aria-labelledby="low-voltage-title" aria-describedby="low-voltage-message">
+      <h2 id="low-voltage-title">低电量警报</h2>
+      <p id="low-voltage-message">电压过低，请及时充电。持续低压时，机器人将坐下并卸力。</p>
+      <form method="dialog" class="dialog-actions"><button class="primary" type="submit">知道了</button></form>
+    </dialog>
+    <dialog id="cpu-overheating-alert" role="alertdialog" aria-labelledby="cpu-overheating-title" aria-describedby="cpu-overheating-message">
+      <h2 id="cpu-overheating-title">设备过热</h2>
+      <p id="cpu-overheating-message">CPU 温度过高，已降低运行频率，部分功能可能受影响。请关机冷却几分钟，再重新开机。</p>
+      <form method="dialog" class="dialog-actions"><button class="primary" type="submit">知道了</button></form>
+    </dialog>
     <dialog id="software-update-progress" aria-labelledby="software-update-title">
       <h2 id="software-update-title">软件更新</h2>
       <p id="software-update-stage" role="status"></p>

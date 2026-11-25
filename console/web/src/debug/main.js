@@ -31,8 +31,9 @@ let connectionError = '';
 let targetInitialized = false;
 let parameterReadBusy = false, parameterReadPending = false, parameterReadTimer = null, parameterRevision = 0;
 let parameterReadError = '';
+let parameterWrite = null;
 let servoLayoutRevision = 0;
-let parameterAddress = 5, parameterDraft = null, parameterWriteBusy = false;
+let parameterAddress = 5, parameterDraft = null;
 let parameterView = 'compact';
 const parameterScrollPositions = new Map();
 let renderedParameterView = parameterView;
@@ -148,15 +149,21 @@ function refreshSession() {
   return sessionRefresh;
 }
 
+async function requestAfterParameterWrite(path, body) {
+  if (parameterWrite) await parameterWrite.catch(() => {});
+  return request(path, body);
+}
+
 async function command(action, data = {}) {
-  if ((busy || scanBusy || parameterWriteBusy || parameterSave.isRunning() || state?.parameter_batch_active) && action !== 'release_all') throw new Error('上一操作尚未完成');
+  if ((busy || scanBusy || parameterSave.isRunning() || state?.parameter_batch_active) && action !== 'release_all') throw new Error('上一操作尚未完成');
   const id = data.id ?? selected;
   liveTarget.cancel();
   liveParameter.cancel();
   busy = true;
   updateControls();
   try {
-    const result = await request('command', { action, id, ...data });
+    const send = action === 'release_all' ? request : requestAfterParameterWrite;
+    const result = await send('command', { action, id, ...data });
     if (!['registers', 'read_raw'].includes(action)) {
       const pose = action === 'center_all' ? '中位 2048' : action === 'home_all' ? 'Home' : null;
       const message = result.verified ? (pose ? `${pose} 目标已下发并读回` : '寄存器读回一致') : '部分卸力未确认';
@@ -221,7 +228,7 @@ function releaseControl() {
 
 setInterval(renewControl, 1000);
 handle('release', async () => { if (await confirmRelease()) return command('release_all'); });
-const servoControls = createServoControls({ request, command, toast,
+const servoControls = createServoControls({ request: requestAfterParameterWrite, command, toast,
   cancel: () => { stopSliderTrack(); liveTarget.cancel(); liveParameter.cancel(); },
   setBusy: value => { scanBusy = value; updateControls(); },
   // Discovery probes can delay the next telemetry snapshot. Every probe still
@@ -240,25 +247,24 @@ const servoControls = createServoControls({ request, command, toast,
 const liveTarget = createLinkedTarget({
   context: motionContext,
   isSelected: id => parameterSave.isServoSelected(id),
-  send: async data => {
-    const result = await request('command', {
-      action: 'move_direct', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
-    });
-    if (result.sent) toast(`ID ${data.id} · 目标编码器 ${data.raw} 步 · 已发送`, false, { routine: true, source: 'servo-target' });
-    return result;
-  },
+  send: data => request('command', {
+    action: 'move_direct', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
+  }),
   onError: error => { targetInitialized = false; toast(error.message, true); },
   onTarget: (id, raw) => sliderTargets.set(id, raw),
 });
 
 const liveParameter = createLiveParameter({
-  context: () => ({ ...parameterContext(), enabled: parameterAddress === 31 && parameterContext().enabled }),
+  context: parameterContext,
   send: async data => {
-    parameterWriteBusy = true;
     parameterRevision++;
-    updateControls();
-    try { return await request('command', { action: 'write_register', ...data }); }
-    finally { parameterWriteBusy = false; updateControls(); resumeParameterRead(); }
+    parameterWrite = request('command', { action: 'write_register', ...data });
+    try {
+      return await parameterWrite;
+    } finally {
+      parameterWrite = null;
+      resumeParameterRead();
+    }
   },
   onVerified: data => {
     const r = parameters?.registers.find(r => r.address === data.address);
@@ -267,7 +273,6 @@ const liveParameter = createLiveParameter({
       const cell = document.querySelector(`#parameter-rows tr[data-address="${data.address}"]`)?.children[3];
       if (cell) { cell.textContent = data.value; cell.title = cell.textContent; }
     }
-    toast(`ID ${data.id} · 位置校正 ${data.value} · 已读回`, false, { routine: true, source: 'servo-offset' });
   },
   onComplete: () => { parameterDraft = null; queueParameterRead(1200); },
   onError: error => { parameterDraft = null; queueParameterRead(); toast(error.message, true); },
@@ -278,7 +283,8 @@ function parameterContext() {
   const current = state?.servos?.find(s => s.id === selected);
   const online = stateFresh();
   return { id: selected, address: parameterAddress, min: r?.minimum, max: r?.maximum,
-    enabled: armed && !busy && !scanBusy && !parameterSave.isRunning() && !state?.parameter_batch_active && !document.hidden && online && !!current?.valid && parameterId === selected && !!r?.writable };
+    enabled: armed && !busy && !scanBusy && !parameterSave.isRunning() && !state?.parameter_batch_active && !document.hidden && online && !!current?.valid && parameterId === selected && !!r?.writable &&
+      (parameterAddress !== 31 || current.torque === 1) };
 }
 
 function encoderLimits(joint) {
@@ -294,7 +300,7 @@ function motionContext(id = selected) {
   const joint = info?.joints.find(j => j.id === id);
   const online = stateFresh();
   return { id, actual: current?.raw, ...(joint ? encoderLimits(joint) : {}),
-    enabled: armed && !busy && !scanBusy && !parameterSave.isRunning() && !state?.parameter_batch_active && !parameterWriteBusy && !document.hidden && online && !!current?.valid && current.torque === 1 };
+    enabled: armed && !busy && !scanBusy && !parameterSave.isRunning() && !state?.parameter_batch_active && !document.hidden && online && !!current?.valid && current.torque === 1 };
 }
 
 $('torque').addEventListener('change', async event => {
@@ -317,25 +323,25 @@ function updateControls() {
   const current = state?.servos?.find(s => s.id === selected);
   const operationBusy = busy || scanBusy || parameterSave.isRunning() || !!state?.parameter_batch_active;
   const online = stateFresh();
-  const poseEnabled = armed && !operationBusy && !parameterWriteBusy && !document.hidden && online &&
+  const poseEnabled = armed && !operationBusy && !document.hidden && online &&
     info?.joints.some(joint => state.servos.some(servo => servo.id === joint.id && servo.valid));
   servoControls.update({ center: poseEnabled,
-    home: armed && !operationBusy && !parameterWriteBusy && !document.hidden && online &&
+    home: armed && !operationBusy && !document.hidden && online &&
       info?.joints.some(joint => (!joint.discovered || joint.id === 35 || joint.id === 36) &&
         state.servos.some(servo => servo.id === joint.id && servo.valid)),
-    scan: canScanServos() && !operationBusy && !parameterWriteBusy && !parameterReadBusy });
-  $('torque').disabled = !armed || operationBusy || parameterWriteBusy || !online || !current?.valid;
+    scan: canScanServos() && !operationBusy && !parameterReadBusy });
+  $('torque').disabled = !armed || operationBusy || !online || !current?.valid;
   $('torque').checked = current?.torque === 1;
   $('target-slider').disabled = !liveTarget.enabled();
   if ($('target-slider').disabled) liveTarget.cancel();
-  $('parameter-slider').disabled = !parameterContext().enabled || (parameterWriteBusy && parameterAddress !== 31);
+  $('parameter-slider').disabled = !parameterContext().enabled;
   if (sliderTrackHold?.slider.disabled) stopSliderTrack();
   $('target-input').disabled = $('target-slider').disabled;
   $('parameter-input').disabled = $('parameter-slider').disabled;
   if ($('parameter-slider').disabled) liveParameter.cancel();
-  $('write-parameter').disabled = !parameterContext().enabled || parameterWriteBusy;
+  $('write-parameter').disabled = !parameterContext().enabled;
   $('refresh-params').disabled = busy || parameterSave.isRunning() || !!state?.parameter_batch_active ||
-    parameterReadBusy || parameterWriteBusy || !online;
+    parameterReadBusy || !online;
   $('export-params').disabled = !!info?.readonly || !parameters || parameterId !== selected;
   $('release').disabled = !info || !!info.readonly;
   parameterSave.update();
@@ -346,7 +352,6 @@ function setTarget(value, remember = true) {
   if (!joint || !Number.isFinite(value)) return;
   const { min, max } = encoderLimits(joint);
   value = Math.max(min, Math.min(max, Math.round(value)));
-  $('target-value').textContent = `${value} 步`;
   $('target-slider').value = value;
   if (remember) sliderTargets.set(selected, value);
   syncSliderInput('target');
@@ -356,12 +361,11 @@ function syncTarget() {
   const value = sliderTargets.has(selected) ? sliderTargets.get(selected) : state?.pose_targets?.[selected];
   const current = state?.servos?.find(servo => servo.id === selected);
   if (info?.readonly) {
-    $('target-value').textContent = Number.isInteger(value) ? `${value} 步` : '-- 步';
     $('target-input').value = Number.isInteger(value) ? value : '';
     return;
   }
   setTarget(value ?? current?.raw ?? 2048, value !== null);
-  if (value === null) { $('target-value').textContent = '-- 步'; $('target-input').value = ''; }
+  if (value === null) $('target-input').value = '';
 }
 $('target-slider').addEventListener('input', () => {
   const raw = Number($('target-slider').value);
@@ -371,6 +375,7 @@ $('target-slider').addEventListener('input', () => {
     $('target-input').value = $('target-slider').value;
     return;
   }
+  liveParameter.cancel();
   setTarget(raw);
   renderServos();
 });
@@ -447,9 +452,16 @@ for (const name of ['target', 'parameter']) {
 }
 
 for (const id of ['target-slider', 'parameter-slider']) {
-  $(id).addEventListener('pointerdown', stepSliderTrack);
-  $(id).addEventListener('touchstart', stepSliderTrack, { passive: false });
-  $(id).addEventListener('lostpointercapture', stopSliderTrack);
+  const slider = $(id);
+  slider.addEventListener('pointerdown', stepSliderTrack);
+  slider.addEventListener('touchstart', stepSliderTrack, { passive: false });
+  slider.addEventListener('lostpointercapture', stopSliderTrack);
+  slider.parentElement.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !slider.disabled || info?.readonly || !stateFresh() ||
+      (id === 'parameter-slider' && parameterAddress !== 31)) return;
+    const servo = state.servos.find(item => item.id === selected);
+    if (servo?.valid && servo.torque === 0) toast('请先开启所选舵机扭矩', true, { source: 'servo-torque' });
+  });
 }
 for (const type of ['pointerup', 'pointercancel', 'touchend', 'touchcancel', 'blur', 'pagehide']) {
   window.addEventListener(type, stopSliderTrack);
@@ -550,7 +562,7 @@ function queueParameterRead(delay = 120) {
 }
 
 function resumeParameterRead() {
-  if (parameterReadPending && !parameterReadBusy && !busy && !parameterWriteBusy) queueParameterRead();
+  if (parameterReadPending && !parameterReadBusy && !busy && !parameterWrite) queueParameterRead();
 }
 
 async function readParameters() {
@@ -566,7 +578,7 @@ async function readParameters() {
   parameterReadPending = true;
   // Scanning and reads share the serialized Studio bus queue. Read the
   // selected servo between probes instead of waiting for the full scan.
-  if (parameterReadBusy || busy || parameterWriteBusy) return;
+  if (parameterReadBusy || busy || parameterWrite) return;
   const id = selected, revision = parameterRevision;
   parameterReadBusy = true;
   parameterReadPending = false;
@@ -658,6 +670,7 @@ function updateParameterEditor() {
   const r = parameters?.registers.find(r => r.address === address) || info?.registers.find(r => r.address === address);
   if (!r) return;
   $('parameter-name').textContent = r.name;
+  $('parameter-value').hidden = address === 31;
   if (info?.readonly) {
     $('parameter-value').textContent = '未发布';
     $('parameter-input').value = '';
@@ -702,10 +715,10 @@ $('parameter-slider').addEventListener('input', () => {
   renderParameterValue(r);
   if (parameterAddress === 31) { liveTarget.cancel(); liveParameter.setValue(parameterDraft); }
 });
-const parameterSave = createParameterSave({ request, command, toast,
+const parameterSave = createParameterSave({ request: requestAfterParameterWrite, command, toast,
   context: () => ({ id: selected, address: parameterAddress, value: Number($('parameter-slider').value),
     parameterId, registers: parameters?.registers, joints: info?.joints, servos: state?.servos,
-    armed, readonly: !!info?.readonly, online: stateFresh(), busy: busy || scanBusy || !!state?.parameter_batch_active, parameterWriteBusy }),
+    armed, readonly: !!info?.readonly, online: stateFresh(), busy: busy || scanBusy || !!state?.parameter_batch_active }),
   cancelMotion: () => { stopSliderTrack(); liveTarget.cancel(); liveParameter.cancel(); },
   onServoSelectionChange: () => { renderServos(); updateControls(); },
   loaded: address => { parameterAddress = parameters.registers.find(r => compactParameterAddresses.has(r.address) && parameterSave.draft(r.address) !== undefined)?.address ?? address; parameterDraft = null; renderParameters(); updateParameterEditor(); updateControls(); },

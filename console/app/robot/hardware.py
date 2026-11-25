@@ -474,8 +474,11 @@ class Hardware(ServoLayout):
         address = integer(command.get("address"), 0, 70, "地址")
         if address not in BY_ADDRESS:
             raise ValueError("未定义的寄存器地址")
-        mode = self.read(device_id, 33, 1)[0] if address in (44, 46) else 0
-        register = register_definition(address, mode)
+        if address == 31:
+            register = self.position_offset_register(device_id)
+        else:
+            mode = self.read(device_id, 33, 1)[0] if address in (44, 46) else 0
+            register = register_definition(address, mode)
         value = command.get("value")
         data = encode_register(register, value)
         if self.offset_lock is not None and (address != 31 or self.offset_lock[0] != device_id or not self.offset_lock[3]):
@@ -545,8 +548,13 @@ class Hardware(ServoLayout):
         return dict(verified=True, id=target_id, previous_id=device_id, action="write_register",
                     address=address, value=value)
 
+    def position_offset_register(self, device_id):
+        if self.read(device_id, 40, 1) != b"\x01":
+            raise ValueError("请先开启所选舵机扭矩")
+        return register_definition(31, servo_version=tuple(self.read(device_id, 3, 2)))
+
     def write_offset_direct(self, device_id, value):
-        data = encode_register(BY_ADDRESS[31], value)
+        data = encode_register(self.position_offset_register(device_id), value)
         if self.offset_lock is not None and self.offset_lock[0] != device_id:
             self.restore_offset_lock(force=True, verify=False)
         unlock = False

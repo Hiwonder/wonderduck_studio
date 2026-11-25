@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "model": "robot-f55f098fef09.glb",
+  "model": "robot-46b9e6128a03.glb",
   "root_node": "body_trunk_base",
-  "home_trunk_height_m": 0.11185268929837174,
+  "home_trunk_height_m": 0.11153654159155098,
   "joints": [
     {
       "name": "left_hip_yaw",
@@ -139,5 +139,12 @@
         0.0
       ]
     }
-  ]
+  ],
+  "head_imu": {
+    "head_node": "body_head_roll",
+    "sensor_node": "body_head_imu"
+  },
+  "source_revision": "7133c9ab8648ace842bf38e1d4f03131d94cbff4",
+  "source_xml_sha256": "68901165dfb44ff8cc7ee8cca2f8361a83ccf3999f9aae090e4385a31ea68e51",
+  "triangles": 3323305
 }
