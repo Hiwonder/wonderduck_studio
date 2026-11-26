@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "model": "robot-46b9e6128a03.glb",
+  "model": "robot-f3ce92c68e5f.glb",
   "root_node": "body_trunk_base",
   "home_trunk_height_m": 0.11153654159155098,
   "joints": [

@@ -243,12 +243,11 @@ pub(super) fn subscription_skills(subscription: &proto::SubscribeResult) -> Vec<
 
 pub(super) fn update_status_from_state(status: &mut BrowserStatus, state: &proto::RobotState) {
     status.head_feedback_sequence = status.head_feedback_sequence.wrapping_add(1);
-    status.head_feedback = state.joints.get(6).zip(state.targets.get(6)).and_then(|(&measured, &target)| {
-        Some((duck_control::hx::encode_position(6, measured).ok()?, duck_control::hx::encode_position(6, target).ok()?))
+    status.head_positions = duck_control::manual_head::measured_position(state);
+    status.head_feedback = status.head_positions.and_then(|measured| {
+        let target = |joint| duck_control::hx::encode_position(joint, *state.targets.get(joint)?).ok();
+        Some((measured, [target(6)?, target(7)?]))
     });
-    let head_position = |joint| state.servo_status.get(joint).map(|servo: &proto::ServoStatus| servo.raw)
-        .or_else(|| duck_control::hx::encode_position(joint, *state.joints.get(joint)?).ok());
-    status.head_positions = head_position(6).zip(head_position(7)).map(|(pitch, yaw)| [pitch, yaw]);
     status.head_positions_at = status.head_positions.map(|_| Instant::now());
     status.policy = Some(state.policy.clone());
     status.tracking_phase = state.tracking_phase;

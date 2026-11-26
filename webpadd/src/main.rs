@@ -140,6 +140,7 @@ struct AppState {
     pickup_after_phases: Arc<Mutex<settings::TrackingPhaseStore>>,
     mouth_settings: Arc<Mutex<settings::MouthStore>>,
     mouth_sound_directory: PathBuf,
+    gamepad_idle_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -164,7 +165,7 @@ impl Capabilities {
 struct BrowserStatus {
     robotd_connected: bool,
     #[serde(skip)]
-    head_feedback: Option<(u16, u16)>,
+    head_feedback: Option<([u16; 2], [u16; 2])>,
     #[serde(skip)]
     head_feedback_sequence: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -540,6 +541,7 @@ async fn main() -> ExitCode {
         pickup_after_phases: Arc::new(Mutex::new(pickup_after_phases)),
         mouth_settings: Arc::new(Mutex::new(mouth_settings)),
         mouth_sound_directory: PathBuf::from(proto::SOUND_CLIPS_DIR),
+        gamepad_idle_path: robotd_params::gamepad_idle::Settings::path(&args.config),
     };
 
     let (frames, latest_frame) = watch::channel(None);
@@ -608,6 +610,9 @@ fn router(state: AppState, media_port: u16) -> Router {
                     .replace("{{APP_VERSION}}", env!("CARGO_PKG_VERSION"))
                     .replace("{{HEAD_PITCH_MIN}}", &proto::HEAD_PITCH_POSITION_RANGE.start().to_string())
                     .replace("{{HEAD_PITCH_MAX}}", &proto::HEAD_PITCH_POSITION_RANGE.end().to_string())
+                    .replace("{{GAMEPAD_IDLE_MIN}}", &robotd_params::gamepad_idle::Settings::MIN.to_string())
+                    .replace("{{GAMEPAD_IDLE_MAX}}", &robotd_params::gamepad_idle::Settings::MAX.to_string())
+                    .replace("{{GAMEPAD_IDLE_DEFAULT}}", &robotd_params::gamepad_idle::Settings::default().minutes.to_string())
                     .replace("{{TOF_ENABLED}}", if capabilities.tof_enabled { "true" } else { "false" }))
             }),
         )
@@ -632,6 +637,14 @@ fn router(state: AppState, media_port: u16) -> Router {
                 .and_then(|marker| studio_source_revision(&marker));
             axum::Json(serde_json::json!({ "revision": revision }))
         }))
+        .route("/licenses/wonderduck-3d-model.txt", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                include_str!("../../console/web/public/assets/imu-viewer-resources/NOTICE.txt"))
+        }))
+        .route("/licenses/cc-by-nc-sa-4.0.txt", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                include_str!("../../console/web/public/assets/imu-viewer-resources/CC-BY-NC-SA-4.0.txt"))
+        }))
         .route("/licenses/three.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../web/licenses/three.txt")) }))
         .route("/licenses/lucide.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../web/licenses/lucide.txt")) }))
         .route("/licenses/onnxruntime.txt", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], include_str!("../web/licenses/onnxruntime.txt")) }))
@@ -640,6 +653,7 @@ fn router(state: AppState, media_port: u16) -> Router {
         .route("/theme.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/theme.js")) }))
         .route("/objects.js", get(|| async { ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/objects.js")) }))
         .route("/audio-volume", get(audio::get_volume).put(audio::set_volume))
+        .route("/gamepad-idle", get(settings::get_gamepad_idle).put(settings::set_gamepad_idle))
         .route("/audio-recording", get(audio_record::get).delete(audio_record::delete))
         .route("/audio-recording/start", axum::routing::post(audio_record::start))
         .route("/audio-recording/stop", axum::routing::post(audio_record::stop))

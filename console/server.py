@@ -453,7 +453,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/service/restart":
                 if not getattr(self.server, "studio", False) or self.controller.demo:
                     raise PermissionError("当前服务不提供重启操作")
-                self.send_json(service_control.restart_robotd())
+                self.send_json(service_control.restart_robotd(self.controller.path))
                 return
             if path == "/api/software-update":
                 if (not getattr(self.server, "studio", False) or self.controller.demo

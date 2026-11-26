@@ -283,11 +283,16 @@ body[data-console-page="system"] .system-panel { grid-column: 1; grid-row: 1 / -
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .settings-card { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 16px 0; background: transparent; }
 .settings-card:only-child { width: 100%; max-width: 640px; }
-.audio-volume-control { display: grid; gap: 10px; margin-top: 18px; }
-.audio-volume-control span { display: flex; justify-content: space-between; gap: 12px; }
-.audio-volume-control output { color: var(--accent); font-variant-numeric: tabular-nums; }
-.audio-volume-control .speed-range { width: 100%; }
-.audio-toggle-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 16px; }
+.audio-volume-control, .gamepad-idle-inputs { display: grid; gap: 8px; align-items: center; }
+.audio-volume-control { grid-template-columns: max-content minmax(0, 1fr) 5ch; margin-top: 18px; }
+.audio-volume-control output { color: var(--accent); font-variant-numeric: tabular-nums; text-align: right; }
+.audio-volume-control .speed-range, .gamepad-idle-inputs input { width: 100%; min-width: 0; margin: 0; }
+.audio-toggle-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 12px 36px;
+  margin-top: 16px;
+}
 .audio-toggle-control { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .audio-toggle-control input { appearance: none; position: relative; flex: none; width: 38px; height: 22px; border: 0; border-radius: 11px; background: var(--line); cursor: pointer; }
 .audio-toggle-control input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
@@ -302,6 +307,10 @@ body[data-console-page="system"] .system-panel { grid-column: 1; grid-row: 1 / -
 .audio-control-status [role="status"] { color: var(--muted); font-size: var(--font-note); overflow-wrap: anywhere; }
 .audio-record-path { margin-top: 12px; color: var(--muted); font-size: var(--font-note); overflow-wrap: anywhere; }
 .audio-settings .parameter-note { margin-top: 12px; }
+.gamepad-idle-control { display: grid; gap: 8px; margin-top: 14px; }
+.gamepad-idle-inputs { grid-template-columns: max-content minmax(0, 1fr) clamp(42px, 12vw, 56px) max-content; }
+.gamepad-idle-status { color: var(--muted); font-size: var(--font-note); }
+.gamepad-idle-status:empty { display: none; }
 .obstacle-controls { display: grid; gap: 14px; margin-top: 24px; }
 .obstacle-controls label { color: var(--muted); font-size: var(--font-body); }
 .obstacle-controls output { float: right; color: var(--accent); font-size: var(--font-body); font-variant-numeric: tabular-nums; }
@@ -788,7 +797,7 @@ body[data-console-page="pickup"] .target-parameters .coordinated-goal { grid-tem
 
 .session-controls .action span { white-space: nowrap; }
 
-.system-panel { overflow-y: auto; }
+.system-panel { overflow-y: hidden; }
 .system-panel > * { flex-shrink: 0; }
 .system-panel .settings-section { min-height: auto; }
 .system-panel > .panel-heading h2 { font-size: var(--font-title); }
@@ -883,8 +892,25 @@ body[data-operator-tab="actions"] .control-panel > .mode-obstacle { display: blo
 .app { grid-template-rows: 66px minmax(0, 1fr); }
 .control-panel > .safety-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); flex: 0 0 auto; }
 .control-panel > .safety-actions .action { display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
-.reset-card .parameter-note { margin: 12px 0; }
 .reset-card .action { min-width: 140px; }
+.reset-settings-control { position: relative; display: inline-block; margin-top: 12px; }
+.reset-settings-tooltip {
+  position: absolute;
+  inset-inline-start: 0;
+  bottom: calc(100% + 6px);
+  z-index: 1;
+  width: max-content;
+  max-width: min(240px, calc(100vw - 104px));
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: var(--font-note);
+  visibility: hidden;
+  pointer-events: none;
+}
+.reset-settings-control:is(:hover, :focus-within) .reset-settings-tooltip { visibility: visible; }
 .stick { container: joystick / inline-size; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 30px; }
 .stick .pad-slot { grid-column: 1; grid-row: 1; }
 .stick .stick-speed { grid-column: 1; grid-row: 2; display: grid; grid-template-columns: auto minmax(0, 1fr) 56px auto; gap: 6px; align-items: center; }
@@ -1204,6 +1230,12 @@ body[data-vision-page] .camera-column > .stick-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
+}
+html[data-debug-mode="off"] body:is([data-console-page="target"], [data-console-page="line"], [data-console-page="person"]) .camera-column {
+  grid-template-rows: minmax(0, 1fr);
+}
+html[data-debug-mode="off"] body:is([data-console-page="target"], [data-console-page="line"], [data-console-page="person"]) .camera-column > .stick-panel {
+  display: none;
 }
 body:is([data-vision-page], [data-console-page="maze"]) .camera-viewport { flex: 1 1 0; width: 100%; }
 .pad[aria-disabled="true"] { cursor: not-allowed; opacity: .55; }
@@ -1526,10 +1558,6 @@ html[data-studio-embedded="true"] .topbar,html[data-studio-embedded="true"] .pag
 html[data-studio-embedded="true"] .workspace{grid-column:1;grid-row:1}
 html[data-studio-embedded="true"] .feedback-dock,html[data-studio-embedded="true"] .vision-notice,html[data-studio-embedded="true"] #maze-status{display:none}
 
-/* Keep the original vertical arrangement; shorter windows remain scrollable. */
-@media (min-width: 900px) and (min-height: 1000px) {
-  .system-panel { overflow-y: hidden; }
-}
 @media (min-width: 900px) and (max-height: 850px) {
   .system-panel { padding-top: 12px; padding-bottom: 12px; }
   .system-panel .settings-card { padding-top: 8px; padding-bottom: 8px; }

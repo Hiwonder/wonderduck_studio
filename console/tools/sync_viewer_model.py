@@ -19,6 +19,19 @@ HOME_MODEL = WEB / 'public/assets/imu-viewer-resources'
 JSON_CHUNK = 0x4E4F534A
 BINARY_CHUNK = 0x004E4942
 
+MODEL_ATTRIBUTION = {
+    'extras': {
+        'title': 'WonderDuck robot 3D model',
+        'license': 'CC-BY-NC-SA-4.0',
+        'licenseUrl': 'https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode',
+        'source': 'WonderDuck RL display meshes',
+        'modifications': (
+            'Studio converts the WonderDuck RL display meshes from OBJ to glTF (GLB) '
+            'and integrates servo and head IMU nodes.'
+        ),
+    },
+}
+
 
 def load_glb(path):
     raw = path.read_bytes()
@@ -96,7 +109,7 @@ def sync(source, revision):
     joint_specs = {joint['name']: joint for joint in config['joints']}
     materials = original['materials']
     material_ids = {material['name']: index for index, material in enumerate(materials)}
-    rig = dict(asset=dict(version='2.0', generator='Studio viewer model import'),
+    rig = dict(asset=dict(version='2.0', generator='Studio viewer model import', **MODEL_ATTRIBUTION),
                scene=0, scenes=[dict(nodes=[0])], nodes=[], meshes=[], materials=materials,
                accessors=[], bufferViews=[], buffers=[], extensionsUsed=['KHR_mesh_quantization'],
                extensionsRequired=['KHR_mesh_quantization'])

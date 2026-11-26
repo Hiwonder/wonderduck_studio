@@ -28,6 +28,81 @@
   window.addEventListener('console-page-changed', () => {
     if (body.dataset.consolePage !== 'system') closeLicenses();
   });
+
+  const idleRange = document.querySelector('#gamepad-idle-range');
+  const idleNumber = document.querySelector('#gamepad-idle-number');
+  const idleStatus = document.querySelector('#gamepad-idle-status');
+  let savedIdleMinutes = null;
+  let queuedIdleMinutes = null;
+  let savingIdleMinutes = false;
+  let loadingIdleMinutes = false;
+
+  async function requestIdleMinutes(minutes) {
+    const options = minutes === undefined ? { cache: 'no-store' } : {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes }),
+    };
+    const response = await fetch('/gamepad-idle', options);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return (await response.json()).minutes;
+  }
+
+  function showIdleMinutes(minutes) {
+    idleRange.value = idleNumber.value = minutes;
+  }
+
+  async function loadIdleMinutes() {
+    if (loadingIdleMinutes || savingIdleMinutes || body.dataset.consolePage !== 'system') return;
+    loadingIdleMinutes = true;
+    idleRange.disabled = idleNumber.disabled = true;
+    try {
+      savedIdleMinutes = await requestIdleMinutes();
+      showIdleMinutes(savedIdleMinutes);
+      idleStatus.textContent = '';
+      idleRange.disabled = idleNumber.disabled = false;
+    } catch {
+      idleStatus.textContent = '读取手柄空闲断开时间失败';
+    } finally {
+      loadingIdleMinutes = false;
+    }
+  }
+
+  async function saveIdleMinutes(input) {
+    if (savedIdleMinutes === null) return;
+    const minutes = input.valueAsNumber;
+    if (!Number.isInteger(minutes) || !input.validity.valid) {
+      showIdleMinutes(queuedIdleMinutes ?? savedIdleMinutes);
+      idleStatus.textContent = '请输入 1–60 分钟的整数';
+      return;
+    }
+    showIdleMinutes(minutes);
+    queuedIdleMinutes = minutes;
+    if (savingIdleMinutes) return;
+    savingIdleMinutes = true;
+    while (queuedIdleMinutes !== null) {
+      const next = queuedIdleMinutes;
+      queuedIdleMinutes = null;
+      try {
+        if (next !== savedIdleMinutes) savedIdleMinutes = await requestIdleMinutes(next);
+        idleStatus.textContent = '';
+      } catch {
+        if (queuedIdleMinutes === null) showIdleMinutes(savedIdleMinutes);
+        idleStatus.textContent = '保存手柄空闲断开时间失败';
+      }
+    }
+    savingIdleMinutes = false;
+  }
+
+  idleRange.addEventListener('input', () => { idleNumber.value = idleRange.value; });
+  idleNumber.addEventListener('input', () => {
+    if (idleNumber.validity.valid && idleNumber.value !== '') idleRange.value = idleNumber.value;
+  });
+  idleRange.addEventListener('change', () => saveIdleMinutes(idleRange));
+  idleNumber.addEventListener('change', () => saveIdleMinutes(idleNumber));
+  window.addEventListener('console-page-changed', loadIdleMinutes);
+  loadIdleMinutes();
+
   const recordButton = document.querySelector('#audio-record');
   const recordStatus = document.querySelector('#audio-record-status');
   const recordPath = document.querySelector('#audio-record-path');

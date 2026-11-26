@@ -1,15 +1,12 @@
 //! Classic control semantics; this module has no hardware or socket access.
 
 use super::*;
-use duck_control::hx::MANUAL_HEAD_POSITION_LIMITS;
+use duck_control::manual_head::{FEEDBACK_TTL, HeadStick};
 use proto::mouth_gesture::MouthGesture;
 use robotd_params::PadDriveParams;
 use std::collections::HashMap;
 
 const DRIVE_AXIS_LOCK_ANGLE: f64 = 20.0 * std::f64::consts::PI / 180.0;
-const HEAD_STEP_INTERVAL: Duration = Duration::from_millis(5);
-const HEAD_STEP_COUNTS: f64 = 10.0;
-const HEAD_FEEDBACK_TTL: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Input {
@@ -412,49 +409,6 @@ pub(super) struct ControlsView {
     pub human_connected: bool,
 }
 
-#[derive(Debug, Default)]
-struct HeadStick {
-    goal: Option<[f64; 2]>,
-    last_step: Option<Instant>,
-}
-
-impl HeadStick {
-    fn center(&mut self) {
-        let home = &duck_control::hx::PHYSICAL_HOME_ENCODER_TARGETS;
-        self.goal = Some([f64::from(home[6]), f64::from(home[7])]);
-        self.last_step = None;
-    }
-
-    fn update(&mut self, axes: [f64; 2], measured: Option<[u16; 2]>, now: Instant) {
-        // Retain the last target while idle or waiting for servo feedback.
-        let Some(measured) = measured.filter(|_| axes != [0.0; 2]) else {
-            self.last_step = None;
-            return;
-        };
-        let interval = self.last_step
-            .map_or(HEAD_STEP_INTERVAL, |last| now.saturating_duration_since(last));
-        let interval = interval.min(INPUT_TTL);
-        let step_ms = HEAD_STEP_INTERVAL.as_millis();
-        let steps = (interval.as_millis() / step_ms) as u32;
-        if steps == 0 {
-            return;
-        }
-        self.last_step = Some(now - (interval - HEAD_STEP_INTERVAL * steps));
-        let goal = self.goal.get_or_insert_with(|| measured.map(f64::from));
-        let [yaw, pitch] = axes;
-        for (axis, (deflection, (min, max))) in [pitch, yaw].into_iter()
-            .zip(MANUAL_HEAD_POSITION_LIMITS).enumerate()
-        {
-            goal[axis] = (goal[axis] + deflection * f64::from(steps) * HEAD_STEP_COUNTS)
-                .clamp(f64::from(min), f64::from(max));
-        }
-    }
-
-    fn raw_position(&self) -> Option<[u16; 2]> {
-        self.goal.map(|goal| goal.map(|position| position.round() as u16))
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ControlClient {
@@ -855,7 +809,7 @@ impl ControlState {
         if self.head_stick_input(status, now) == Some([0.0; 2])
             && fresh_head_position(status, now).is_some()
         {
-            self.head_stick.center();
+            self.head_stick = HeadStick::default();
             true
         } else {
             false
@@ -987,7 +941,7 @@ impl ControlState {
 
 fn fresh_head_position(status: &BrowserStatus, now: Instant) -> Option<[u16; 2]> {
     status.head_positions.filter(|_| status.head_positions_at
-        .is_some_and(|at| now.saturating_duration_since(at) <= HEAD_FEEDBACK_TTL))
+        .is_some_and(|at| now.saturating_duration_since(at) <= FEEDBACK_TTL))
 }
 
 #[cfg(test)]
@@ -1165,7 +1119,7 @@ mod head_stick_tests {
         control.input.head_stick = Some([1.0, 0.0]);
         control.update_head_stick(&status, at);
 
-        let later = at + HEAD_FEEDBACK_TTL + CONTROL_PERIOD;
+        let later = at + FEEDBACK_TTL + CONTROL_PERIOD;
         control.input.head_stick = Some([0.0; 2]);
         control.last_input = Some(later);
         control.update_head_stick(&status, later);
@@ -1213,9 +1167,7 @@ mod head_stick_tests {
         control.input.head_stick = Some([0.0; 2]);
         assert!(control.center_head(&status, now));
         control.update_head_stick(&status, now);
-        assert!(control_frame(&control, now).iter().any(|call| matches!(
-            call, proto::Call::RobotHead(head) if head.raw_position == Some([1820, 2048])
-        )));
+        assert_eq!(control.head_stick.raw_position(), None);
         control.human_held = false;
         assert!(!control.center_head(&status, now));
     }

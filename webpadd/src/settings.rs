@@ -6,6 +6,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use axum::{Json, extract::State, http::StatusCode};
+use robotd_params::gamepad_idle::Settings as GamepadIdle;
 
 use super::{MAX_ANGULAR, MAX_LINEAR, proto};
 
@@ -604,6 +606,38 @@ pub(super) fn list_mouth_sounds(directory: &Path) -> Result<Vec<String>, String>
     }
     sounds.sort();
     Ok(sounds)
+}
+
+pub(super) async fn get_gamepad_idle(
+    State(state): State<super::AppState>,
+) -> Result<Json<GamepadIdle>, StatusCode> {
+    let path = state.gamepad_idle_path;
+    tokio::task::spawn_blocking(move || GamepadIdle::load(&path))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .map_err(|error| {
+            tracing::warn!(%error, "could not read gamepad idle settings");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+pub(super) async fn set_gamepad_idle(
+    State(state): State<super::AppState>,
+    Json(settings): Json<GamepadIdle>,
+) -> Result<Json<GamepadIdle>, StatusCode> {
+    if !settings.valid() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let path = state.gamepad_idle_path;
+    tokio::task::spawn_blocking(move || write_json(&path, &settings))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|error| {
+            tracing::warn!(%error, "could not save gamepad idle settings");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(settings))
 }
 
 /// Lock, write, sync and replace each independent settings file.

@@ -2870,7 +2870,7 @@ import { bindMotionInput } from './motion-input.js';
         if (controlLeaseReady && session.open) {
           session.send({ type: 'studio_leave', request_id: studioLeaveRequest,
             // Release the held head position when leaving a tracking page.
-            person_follow: isVisionPage() });
+            person_follow: isVisionPage() || document.body.dataset.consolePage === 'maze' });
         } else {
           completeStudioLeave(true);
         }

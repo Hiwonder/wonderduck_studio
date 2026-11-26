@@ -538,11 +538,15 @@ $('sidebar-restart').addEventListener('click', async () => {
   sidebarRestartBusy = true;
   updateSidebarRestart();
   try {
-    if (!await confirmAction('重启服务', '重启期间操控会短暂中断，请扶稳机器。确定要重启服务吗？')) return;
+    if (!await confirmAction('重启服务', '机器人会先休息，再重启服务。确定重启吗？')) return;
     if (!info?.supports_service_restart) return;
     const previousToken = token;
-    await request('service/restart', {}, 20000);
-    toast('服务正在重启，恢复后页面将自动刷新');
+    toast('正在等待机器人休息', false, { source: 'service-restart' });
+    const result = await request('service/restart', {}, 160000);
+    toast.clearSource('service-restart');
+    toast(result.rest_warning
+      ? `休息未完成，继续重启服务：${result.rest_warning}`
+      : '服务正在重启，恢复后页面将自动刷新');
     const deadline = performance.now() + 60000;
     while (performance.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -561,6 +565,7 @@ $('sidebar-restart').addEventListener('click', async () => {
   } catch (error) {
     toast(`重启服务失败：${error.message}`, true);
   } finally {
+    toast.clearSource('service-restart');
     sidebarRestartBusy = false;
     updateSidebarRestart();
   }

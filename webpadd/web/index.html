@@ -255,7 +255,11 @@
 <section aria-label="系统设置" class="page-panel system-panel panel" data-console-panel="system" hidden="" id="console-page-system" role="tabpanel">
 <div class="panel-heading"><div class="heading-label"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-settings"></use></svg>系统设置</h2></div></div>
 <section class="settings-card audio-settings"><div class="subsection-heading"><h3>音频设置</h3></div>
-<label class="audio-volume-control" for="audio-volume"><span>系统音量 <output id="audio-volume-value" for="audio-volume">--</output></span><input class="speed-range" disabled="" id="audio-volume" max="100" min="0" step="1" type="range"/></label>
+<div class="audio-volume-control">
+<label for="audio-volume">系统音量</label>
+<input class="speed-range" disabled="" id="audio-volume" max="100" min="0" step="1" type="range"/>
+<output id="audio-volume-value" for="audio-volume">--</output>
+</div>
 <div class="audio-toggle-controls">
 <label class="audio-toggle-control" for="network-announcement-enabled" title="开机和切换网络时播报热点名称或 IP"><span>网络播报</span><input disabled="" id="network-announcement-enabled" role="switch" type="checkbox"/></label>
 <label class="audio-toggle-control" for="mouth-audio-enabled"><span>嘴部开合音效</span><input disabled="" id="mouth-audio-enabled" role="switch" type="checkbox"/></label>
@@ -263,6 +267,16 @@
 <div class="audio-record-controls"><button class="action" disabled="" id="audio-record" type="button" aria-pressed="false">开始录音</button><div class="audio-control-status"><span id="audio-record-status" role="status" aria-live="polite"></span></div><button class="action" hidden="" id="audio-record-delete" type="button">删除录音</button></div>
 <p class="audio-record-path" hidden="" id="audio-record-path"></p>
 <p class="parameter-note">再次点击停止并播放录音，最长录制 2 分钟。</p></section>
+<section class="settings-card gamepad-settings"><div class="subsection-heading"><h3>手柄设置</h3></div>
+<div class="gamepad-idle-control">
+<div class="gamepad-idle-inputs">
+<label id="gamepad-idle-label" for="gamepad-idle-number">空闲断开时间</label>
+<input aria-labelledby="gamepad-idle-label gamepad-idle-unit" class="speed-range" id="gamepad-idle-range" disabled min="{{GAMEPAD_IDLE_MIN}}" max="{{GAMEPAD_IDLE_MAX}}" step="1" type="range" value="{{GAMEPAD_IDLE_DEFAULT}}"/>
+<input aria-labelledby="gamepad-idle-label gamepad-idle-unit" class="speed-input" id="gamepad-idle-number" disabled min="{{GAMEPAD_IDLE_MIN}}" max="{{GAMEPAD_IDLE_MAX}}" step="1" type="number" value="{{GAMEPAD_IDLE_DEFAULT}}"/>
+<span id="gamepad-idle-unit">分钟</span>
+</div>
+<p class="gamepad-idle-status" id="gamepad-idle-status" role="status"></p>
+</div></section>
 <section class="settings-card software-info"><div class="subsection-heading"><h3>软件信息</h3></div>
 <dl class="software-info-rows">
 <div><dt>硬件版本</dt><dd id="device-hardware-version">--</dd></div>
@@ -272,7 +286,11 @@
 <div><dt>版权说明</dt><dd>© 2026 Hiwonder</dd></div>
 <div><dt>软件许可证</dt><dd><button class="action" id="licenses-open" type="button">查看许可证</button></dd></div>
 </dl></section>
-<section class="settings-card reset-card"><div class="subsection-heading"><h3>恢复默认</h3></div><p class="parameter-note">将所有可调参数恢复默认并自动保存。</p><button class="action" id="reset-settings" type="button" disabled="">恢复默认</button></section>
+<section class="settings-card reset-card"><div class="subsection-heading"><h3>恢复默认</h3></div>
+<div class="reset-settings-control">
+<button aria-describedby="reset-settings-tooltip" class="action" id="reset-settings" type="button" disabled="">恢复默认</button>
+<span class="reset-settings-tooltip" id="reset-settings-tooltip" role="tooltip">将所有可调参数恢复默认并自动保存。</span>
+</div></section>
 </section>
 <section aria-labelledby="robot-status-title" class="page-panel status-panel panel" data-console-panel="status" hidden="" id="console-page-status" role="tabpanel">
 <div class="panel-heading"><h2 id="robot-status-title"><svg aria-hidden="true" class="icon section-icon"><use href="#icon-activity"></use></svg>实时状态</h2></div>
@@ -292,6 +310,7 @@
 <ul class="licenses-list">
 <li><strong>WonderDuck Studio</strong><span>AGPL-3.0-only。<a href="/licenses/agpl-3.0.txt" target="_blank" rel="noopener">查看许可证</a> · 源代码：<a data-studio-source="github" href="https://github.com/Hiwonder/wonderduck_studio" target="_blank" rel="noopener">GitHub</a> / <a data-studio-source="gitee" href="https://gitee.com/hiwonder_official/wonderduck_studio" target="_blank" rel="noopener">Gitee</a></span></li>
 <li><strong>机器人控制及 Apache 组件</strong><span>Apache-2.0，版权归各贡献者所有。<a href="/licenses/apache-2.0.txt" target="_blank" rel="noopener">查看许可证</a></span></li>
+<li><strong>机器人三维模型</strong><span>CC BY-NC-SA 4.0 · WonderDuck。<a href="/licenses/cc-by-nc-sa-4.0.txt" target="_blank" rel="noopener">查看许可证</a> · <a href="/licenses/wonderduck-3d-model.txt" target="_blank" rel="noopener">来源和修改说明</a></span></li>
 <li><strong>three.js</strong><span>MIT，© 2010–2025 three.js 作者。<a href="/licenses/three.txt" target="_blank" rel="noopener">查看许可证</a></span></li>
 <li><strong>Lucide Icons</strong><span>ISC；部分 Feather 图标适用 MIT。<a href="/licenses/lucide.txt" target="_blank" rel="noopener">查看许可证</a></span></li>
 <li><strong>ONNX Runtime</strong><span>MIT，© Microsoft Corporation。<a href="/licenses/onnxruntime.txt" target="_blank" rel="noopener">查看许可证</a></span></li>

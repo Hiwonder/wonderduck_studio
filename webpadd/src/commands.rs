@@ -13,7 +13,10 @@ pub(super) async fn leave_studio_workspace(session: u64, request_id: u64, return
         control.active = false;
         control.last_input = None;
         control.head_position = None;
+        control.head_tracking_started = false;
+        control.motion_tracking = None;
         control.coordinated_tracking_started = false;
+        control.maze = None;
         control.vision_pending = None;
         control.human_generation
     };
@@ -21,32 +24,33 @@ pub(super) async fn leave_studio_workspace(session: u64, request_id: u64, return
     if return_tracking_head_home && state.status.borrow().motion_enabled != Some(false)
         && state.status.borrow().limp != Some(true) && state.status.borrow().fallen != Some(true)
     {
-        // The existing wire action stops either coordinated tracking mode before homing.
+        // The existing wire action stops autonomous motion before returning both head joints.
         match lease_request(state, session, generation, proto::HumanControlAction::PersonFollowHome).await {
             Ok(result) if result.accepted => {
-                let home = duck_control::hx::PHYSICAL_HOME_ENCODER_TARGETS[6];
-                {
-                    let mut control = state.control.lock().await;
-                    if control.owner == Some(session) && control.human_generation == generation {
-                        control.head_position = Some(home);
-                        control.head_tracking_started = true;
-                    }
-                }
+                let home = &duck_control::hx::PHYSICAL_HOME_ENCODER_TARGETS[6..8];
                 let mut status = state.status.clone();
                 let mut last_sequence = status.borrow_and_update().head_feedback_sequence;
                 let wait = async {
                     let mut arrivals = 0;
+                    let mut heartbeat = tokio::time::interval(Duration::from_millis(200));
                     loop {
-                        status.changed().await.map_err(|_| "舵机状态连接已关闭".to_owned())?;
+                        tokio::select! {
+                            _ = heartbeat.tick() => {
+                                let result = lease_request(state, session, generation, proto::HumanControlAction::Refresh).await?;
+                                if !result.accepted {
+                                    return Err("头部回位被其他操控中断".into());
+                                }
+                                continue;
+                            }
+                            result = status.changed() => result.map_err(|_| "舵机状态连接已关闭".to_owned())?,
+                        }
                         let snapshot = status.borrow_and_update().clone();
                         if !snapshot.robotd_connected { return Err("机器人状态连接已断开".into()); }
-                        if state.control.lock().await.head_position != Some(home) {
-                            return Err("头部回位被其他操控中断".into());
-                        }
                         if snapshot.head_feedback_sequence == last_sequence { continue; }
                         last_sequence = snapshot.head_feedback_sequence;
                         if snapshot.head_feedback.is_some_and(|(measured, target)|
-                            measured.abs_diff(home) <= 20 && target.abs_diff(home) <= 20)
+                            (0..2).all(|axis| measured[axis].abs_diff(home[axis]) <= 20
+                                && target[axis] == home[axis]))
                         { arrivals += 1; } else { arrivals = 0; }
                         if arrivals >= 2 { return Ok(()); }
                     }
@@ -538,13 +542,9 @@ pub(super) async fn dispatch_action(session: u64, action: Action, state: &AppSta
         }
         if action == Action::CenterHead {
             let now = Instant::now();
-            let result = if control.center_head(&state.status.borrow(), now) {
-                control.owner_idle_since = Some(now);
-                Ok(proto::IntentResult::accepted())
-            } else {
-                Err("当前无法回中，请松开头部摇杆并确认运动控制已就绪".into())
-            };
-            return action_result(action, result);
+            if !control.center_head(&state.status.borrow(), now) {
+                return action_result(action, Err("当前无法回中，请松开头部摇杆并确认运动控制已就绪".into()));
+            }
         }
         if let Some(mode) = action.mode() {
             let calls = control.set_mode(mode);
@@ -574,7 +574,13 @@ pub(super) async fn dispatch_action(session: u64, action: Action, state: &AppSta
         control.human_actions += 1;
         control.human_generation
     };
-    let result = perform_action(action, generation, state).await;
+    let result = if action == Action::CenterHead {
+        let reply = lease_request(state, session, generation, proto::HumanControlAction::CenterHead)
+            .await.map(|reply| proto::IntentResult { accepted: reply.accepted, reason: reply.reason });
+        action_result(action, reply)
+    } else {
+        perform_action(action, generation, state).await
+    };
     let mut control = state.control.lock().await;
     control.human_actions -= 1;
     if control.owner == Some(session) && control.human_generation == generation && control.input.neutral() {

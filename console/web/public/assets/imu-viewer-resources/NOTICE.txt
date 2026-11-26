@@ -1,0 +1,13 @@
+WonderDuck 机器人三维模型 / WonderDuck robot 3D model
+
+本声明适用于本目录下的 robot-*.glb 文件。转载时请署名 WonderDuck。
+Studio 使用 WonderDuck RL 的显示网格，将 OBJ 转换为 glTF（GLB），并整合舵机和头部 IMU 节点。
+模型采用知识共享署名－非商业性使用－相同方式共享 4.0 国际许可协议。
+
+This notice applies to the robot-*.glb files in this directory. Credit WonderDuck when sharing the model.
+Studio converts the WonderDuck RL display meshes from OBJ to glTF (GLB) and integrates servo and head IMU nodes.
+The model is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International.
+
+License identifier CC-BY-NC-SA-4.0
+License text CC-BY-NC-SA-4.0.txt
+Full legal code https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
