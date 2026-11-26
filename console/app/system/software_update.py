@@ -9,7 +9,7 @@ import sys
 import threading
 from pathlib import Path
 
-from app.system.runtime_config import RELEASE_VERSION, software_version
+from app.system.runtime_config import RELEASE_VERSION, SHA256, software_build, software_version
 from app.system.service_control import _run
 
 
@@ -67,16 +67,31 @@ def handle(root, socket_path, command, studio_port):
         raise ValueError("更新语言无效")
     source = "gitee" if language == "zh" else "github"
     updater = [sys.executable, str(root / "scripts" / "update.py"), "--source", source, "--lang", language]
-    current = software_version(root)
+    current, installed_sha256 = software_build(root)
     current_order = release_order(current)
     if command.get("action") == "check":
-        latest = json.loads(run_updater(updater + ["--check"], 45))["version"]
-        return {"current": current, "version": latest if release_order(latest) > current_order else None}
+        latest = json.loads(run_updater(updater + ["--check"], 45))
+        version, sha256 = latest["version"], latest.get("sha256")
+        if not isinstance(sha256, str) or not SHA256.fullmatch(sha256):
+            raise ValueError("发布包摘要无效")
+        latest_order = release_order(version)
+        if latest_order < current_order or (latest_order == current_order and sha256 == installed_sha256):
+            return {"current": current, "version": None}
+        return {"current": current, "version": version, "sha256": sha256}
     if command.get("action") != "install":
         raise ValueError("更新操作无效")
     version = command.get("version")
-    if not isinstance(version, str) or not STABLE_VERSION.fullmatch(version) or release_order(version) <= current_order:
-        raise ValueError("更新版本必须高于当前软件版本")
+    if not isinstance(version, str) or not STABLE_VERSION.fullmatch(version):
+        raise ValueError("更新版本无效或低于当前版本")
+    requested_order = release_order(version)
+    if requested_order < current_order:
+        raise ValueError("更新版本无效或低于当前版本")
+    sha256 = command.get("sha256")
+    if sha256 is not None and (not isinstance(sha256, str) or not SHA256.fullmatch(sha256)):
+        raise ValueError("发布包摘要无效")
+    if requested_order == current_order and (sha256 is None or sha256 == installed_sha256):
+        raise ValueError("请重新检查更新，确认可用的新构建")
+    build_args = ["--expected-sha256", sha256] if sha256 is not None else []
     with UPDATE_LOCK:
         if active():
             raise RuntimeError("软件更新正在进行")
@@ -84,7 +99,7 @@ def handle(root, socket_path, command, studio_port):
         job_id = secrets.token_hex(8)
         _run(["sudo", "-n", "/usr/bin/systemd-run", f"--unit={UNIT}", "--on-active=2s",
               "--timer-property=RemainAfterElapse=no", "--collect", f"--uid={os.geteuid()}",
-              *updater, "--version", version, "--job-id", job_id, "--studio-port", str(studio_port),
+              *updater, "--version", version, *build_args, "--job-id", job_id, "--studio-port", str(studio_port),
               "--robot-socket", str(socket_path)],
              "无法启动软件更新")
     return {"accepted": True, "job_id": job_id}

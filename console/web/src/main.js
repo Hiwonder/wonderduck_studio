@@ -419,18 +419,21 @@ async function checkSoftwareUpdate() {
   notifyFrames('studio-software-update-busy', { busy: true });
   try {
     toast('正在检查软件更新', false, { routine: true });
-    const { version } = await request('software-update', { action: 'check', language }, 50000);
+    const { current, version, sha256 } = await request('software-update', { action: 'check', language }, 50000);
     if (!version) {
       toast('当前已是最新版本');
       return;
     }
     if (workspaces.current !== 'system' || workspaces.busy) return;
-    if (!await confirmAction('软件更新', '发现新版本 ' + version + '，是否更新？')) return;
+    const message = version === current
+      ? '发现 ' + version + ' 的新构建，是否更新？'
+      : '发现新版本 ' + version + '，是否更新？';
+    if (!await confirmAction('软件更新', message)) return;
     if (workspaces.current !== 'system' || workspaces.busy) return;
     showUpdateStatus({ phase: 'queued' });
     $('software-update-close').disabled = true;
     updateDialog.showModal();
-    const { job_id: jobId } = await request('software-update', { action: 'install', language, version }, 150000);
+    const { job_id: jobId } = await request('software-update', { action: 'install', language, version, sha256 }, 150000);
     const deadline = performance.now() + 900000;
     let inactive = 0;
     while (performance.now() < deadline) {

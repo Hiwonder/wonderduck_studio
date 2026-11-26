@@ -11,6 +11,7 @@ import threading
 
 RELEASE_VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-dev\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))?\Z")
 REVISION = re.compile(r"[0-9a-f]{40}\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 PALETTES = frozenset(("white_orange", "yellow_black", "black_orange", "navy"))
 DEFAULT_PALETTE = "yellow_black"
 DEFAULT_PALETTE_PATH = Path.home() / ".config" / "wonderduck-studio" / "model-palette.json"
@@ -117,8 +118,8 @@ def robot_root(value=None):
     return Path(value).expanduser().resolve()
 
 
-def software_version(root=None, identity_path=Path("/run/robotd/identity.json")):
-    """Report the installed release or the version of the running local build."""
+def software_build(root=None, identity_path=Path("/run/robotd/identity.json")):
+    """Report the software version and, for an installed release, its bundle digest."""
     def read_object(path):
         try:
             with path.open("r", encoding="utf-8") as stream:
@@ -133,15 +134,23 @@ def software_version(root=None, identity_path=Path("/run/robotd/identity.json"))
     release = (version if marker.get("install_status") == "installed" and isinstance(version, str)
                and RELEASE_VERSION.fullmatch(version) and tag == "v" + version
                and isinstance(source, str) and REVISION.fullmatch(source) else None)
+    digest = marker.get("sha256")
+    if not isinstance(digest, str) or not SHA256.fullmatch(digest):
+        digest = None
     identity = read_object(Path(identity_path))
     running = identity.get("revision")
     local_version = identity.get("version")
     if not isinstance(local_version, str) or not RELEASE_VERSION.fullmatch(local_version):
         local_version = None
     if release and running == source:
-        return release
+        return release, digest
     if local_version:
-        return local_version
+        return local_version, None
     if isinstance(running, str) and REVISION.fullmatch(running):
-        return "本地构建 · " + running[:8]
-    return release
+        return "本地构建 · " + running[:8], None
+    return release, digest if release else None
+
+
+def software_version(root=None, identity_path=Path("/run/robotd/identity.json")):
+    """Report the installed release or the version of the running local build."""
+    return software_build(root, identity_path)[0]
