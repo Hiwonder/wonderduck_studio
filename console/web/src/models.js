@@ -57,7 +57,7 @@ export function createModelControls({ request, requestHeaders, refreshSession, c
     element('choose').disabled = busy || !model || !supportsUpdates();
     element('file').disabled = busy || !model || !supportsUpdates();
     element('apply').disabled = busy || !model || !supportsUpdates() || !element('file').files.length;
-    element('apply').textContent = operation === 'apply' ? '休息并更新中' : '应用更新';
+    element('apply').textContent = operation === 'apply' ? '更新中' : '应用更新';
     element('restore').disabled = busy || !supportsUpdates() || !model?.default_path || !!model?.default_error;
     element('restore').querySelector('span').textContent = operation === 'restore' ? '恢复中' : '恢复默认';
     element('online-update').disabled = busy || !supportsOnline() || !onlineReady;
@@ -108,11 +108,13 @@ export function createModelControls({ request, requestHeaders, refreshSession, c
       const progress = job.items.reduce((sum, item) => sum + (finished.has(item.state) ? 1
         : item.state === 'applying' ? .95 : item.state === 'downloaded' ? .5
           : item.state === 'downloading' && item.total > 0 ? .5 * Math.min(1, item.downloaded / item.total) : 0), 0);
-      const rest = { requesting: '准备休息', resting: '机器人休息中', rested: '休息已完成', failed: '休息未完成' }[job.rest?.state] || '休息状态未知';
+      const rest = { requesting: '准备休息', resting: '机器人休息中', rested: '休息已完成',
+        policy_disabled: '休息未完成，策略已停用', failed: '休息未完成' }[job.rest?.state] || '休息状态未知';
       const pending = job.items.some(item => item.state === 'downloaded');
       const current = job.resume?.state === 'starting' ? '初始化并开启策略'
         : currentItem ? onlineItemText(currentItem)
-        : pending ? (job.rest?.state === 'rested' ? '准备更新已下载模型' : '等待休息完成') : '准备中';
+        : pending ? (['rested', 'policy_disabled'].includes(job.rest?.state) ? '准备更新已下载模型' : '等待机器人就绪')
+          : '准备中';
       element('online-summary').textContent = `${rest}；当前：${current}；已处理 ${done} / ${job.items.length} 项`;
       element('online-bar').max = job.items.length;
       element('online-bar').value = progress;
@@ -287,9 +289,12 @@ export function createModelControls({ request, requestHeaders, refreshSession, c
     try {
       const result = await writeModel(kind, model.id, file);
       clearFile();
-      if (active) toast(result.status === 'unchanged'
+      const outcome = result.status === 'unchanged'
         ? (kind === 'apply' ? '模型内容相同，已跳过更新' : '当前已是默认模型，已跳过恢复')
-        : (kind === 'apply' ? '模型已更新，机器人已初始化并开启策略' : '已恢复默认模型，机器人已初始化并开启策略'));
+        : (kind === 'apply' ? '模型已更新' : '已恢复默认模型');
+      if (active) toast(result.policy_restarted === false
+        ? `${outcome}，休息未完成，策略保持停用`
+        : result.status === 'unchanged' ? outcome : `${outcome}，机器人已初始化并开启策略`);
     } catch (error) {
       if (active) toast(error.uncertain ? (error.message.includes('结果未知') ? error.message : `模型操作结果未知：${error.message}`)
         : `${kind === 'apply' ? '模型更新失败' : '恢复默认失败'}：${error.message}`, true);

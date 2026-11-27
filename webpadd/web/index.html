@@ -51,11 +51,6 @@
 </div></div>
 </section></div>
 <section aria-label="机器人操控" class="page-panel control-panel panel" data-console-panel="control" id="console-page-control" role="tabpanel">
-<div aria-hidden="true" class="control-divider" data-control-divider="session"></div>
-<div aria-hidden="true" class="control-divider" data-control-divider="actions"></div>
-<div aria-hidden="true" class="control-divider" data-control-divider="obstacle" data-requires-tof></div>
-<div aria-hidden="true" class="control-divider" data-control-divider="safety"></div>
-<div aria-hidden="true" class="control-divider" data-control-divider="runtime"></div>
 <div class="panel-heading"><div aria-label="操控面板" class="segmented operator-tabs" role="tablist"><button aria-selected="true" data-operator-tab="sticks" role="tab" type="button">摇杆</button><button aria-selected="false" data-operator-tab="actions" role="tab" type="button">动作</button></div></div>
 <div class="operator-view stick-panel" data-operator-panel="sticks"><div class="sticks"><div class="stick"><div class="stick-header sr-only"><span class="stick-title">左摇杆</span><span class="stick-hint" id="left-hint">移动</span></div>
 <div class="stick-speed"><label class="stick-lock" title="左摇杆位置锁定（Q）"><input aria-label="左摇杆位置锁定" aria-keyshortcuts="Q" data-stick-lock="left" disabled="" type="checkbox"/><span>锁定</span></label><input aria-label="移动速度上限" class="speed-range" id="speed-range" max="0.30" min="0" step="0.01" type="range" value="0.30"/><input aria-label="移动速度上限" class="speed-input" id="speed-input" inputmode="decimal" max="0.30" min="0" step="0.01" type="number" value="0.30"/><span class="speed-unit">m/s</span></div>
@@ -107,7 +102,12 @@
 <button class="action" type="button" data-action="kick_left" disabled><svg aria-hidden="true" class="icon"><use href="#icon-footprints"></use></svg><span class="skill-name">左踢</span></button>
 <button class="action" type="button" data-action="kick_right" disabled><svg aria-hidden="true" class="icon"><use href="#icon-footprints"></use></svg><span class="skill-name">右踢</span></button>
 </div></div>
-<div class="actions safety-actions"><button class="action primary" id="motion-power" type="button" disabled><svg aria-hidden="true" class="icon"><use href="#icon-moon"></use></svg><span>等待状态</span></button><button class="action stop" data-action="stop"><svg aria-hidden="true" class="icon"><use href="#icon-stop"></use></svg><span>停止</span></button></div>
+<div class="actions safety-actions">
+<button class="action primary" id="motion-power" type="button" disabled><svg aria-hidden="true" class="icon"><use href="#icon-moon"></use></svg><span>等待状态</span></button>
+<button class="action stop" type="button" data-action="stop"><svg aria-hidden="true" class="icon"><use href="#icon-stop"></use></svg><span>停止</span></button>
+<button class="action policy-action" type="button" data-action="enable_policy" disabled><svg aria-hidden="true" class="icon"><use href="#icon-circle-play"></use></svg><span>开启策略</span></button>
+<button class="action policy-action" type="button" data-action="disable_policy" disabled><svg aria-hidden="true" class="icon"><use href="#icon-stop"></use></svg><span>停止策略</span></button>
+</div>
 <div class="operator-view operator-extras" data-operator-panel="actions" data-operator-reveal="actions" hidden=""><div class="control-action-library" hidden>
   <div class="control-action-picker"><button class="action" id="control-action-select" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="control-action-options"><span id="control-action-name">选择动作</span><svg aria-hidden="true" class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button><div class="control-action-options" id="control-action-options" role="listbox" aria-label="可用动作" hidden></div></div>
   <button class="action primary" id="control-action-run" type="button" disabled>运行</button>

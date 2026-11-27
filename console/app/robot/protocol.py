@@ -7,7 +7,9 @@ from pathlib import Path
 from app.paths import CONSOLE_ROOT
 
 IDS = (20, 21, 22, 23, 24, 30, 31, 32, 33, 34, 10, 11, 12, 13, 14)
-ACCESSORY_SERVO_IDS = (35, 36)
+ACCESSORY_SERVO_LABELS = {35: "右翅膀", 36: "左翅膀"}
+ACCESSORY_SERVO_IDS = tuple(ACCESSORY_SERVO_LABELS)
+ACCESSORY_ACTION_LIMITS = {35: (683, 2048), 36: (2048, 3413)}
 NAMES = (
     "left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
     "neck_pitch", "head_pitch", "head_yaw", "head_roll", "mouth",
@@ -86,7 +88,7 @@ def servo_faults(status):
 
 
 def discovered_joint(device_id, full_servo_range=False):
-    joint = dict(id=device_id, name=f"servo_{device_id}", label="扫描",
+    joint = dict(id=device_id, name=f"servo_{device_id}", label=ACCESSORY_SERVO_LABELS.get(device_id, "扫描"),
                  limits=list(DISCOVERED_LIMITS), discovered=True)
     if full_servo_range:
         joint["encoder_limits"] = [0, 4096]
@@ -107,12 +109,14 @@ class ServoLayout:
         self.baud_codes = {}
         if self.layout_path and self.layout_path.exists():
             saved = json.loads(self.layout_path.read_text(encoding="utf-8"))
-            for joint in self.joints:
-                entry = saved.get(joint["name"], {})
-                joint["id"] = integer(entry.get("id", joint["id"]), 0, 253, "ID")
-                self.baud_codes[joint["id"]] = integer(entry.get("baud", 0), 0, 7, "波特率索引")
-            if len(set(self.ids)) != len(self.ids):
-                raise ValueError("保存的舵机 ID 重复")
+            # Older layouts also stored joint assignments. Only the baud setting
+            # belongs to the saved bus ID. Joint roles always come from JOINTS.
+            defaults = {joint["name"]: joint["id"] for joint in JOINTS}
+            for name, entry in saved.items():
+                device_id = integer(entry.get("id", defaults.get(name)), 0, 253, "ID")
+                if device_id in self.baud_codes:
+                    raise ValueError("保存的舵机 ID 重复")
+                self.baud_codes[device_id] = integer(entry.get("baud", 0), 0, 7, "波特率索引")
 
     @property
     def ids(self):
@@ -128,35 +132,18 @@ class ServoLayout:
         self.joints[len(JOINTS):] = sorted(self.joints[len(JOINTS):], key=lambda item: item['id'])
         return dict(joint)
 
-    def update_layout(self, device_id, new_id=None, baud=None, persist=True):
-        joint = next(j for j in self.joints if j["id"] == device_id)
-        if new_id is not None and new_id != device_id:
-            old_baud = self.baud_codes.get(device_id, 0)
-            target = next((j for j in self.joints if j["id"] == new_id), None)
-            if target is None or target.get("discovered"):
-                if target is not None:
-                    self.joints.remove(target)
-                joint["id"] = new_id
-                self.baud_codes.pop(device_id, None)
-            elif joint.get("discovered"):
-                # A scanned replacement inherits the configured joint at its new ID.
-                self.joints.remove(joint)
-                self.baud_codes.pop(device_id, None)
-                joint = target
-            else:
-                # Both IDs represent configured joints. Keep their slots, now with
-                # the old ID empty and the replacement answering at the target ID.
-                joint = target
-            self.baud_codes[new_id] = old_baud
-        if baud is not None:
-            self.baud_codes[joint["id"]] = baud
-        if persist:
-            self.save_layout()
+    def record_id_change(self, device_id, new_id):
+        self.baud_codes[new_id] = self.baud_codes.pop(device_id, 0)
+        self.joints[:] = [joint for joint in self.joints if joint["id"] != device_id or not joint.get("discovered")]
+        self.register_discovery(new_id)
+        self.save_layout()
 
     def save_layout(self):
         if self.layout_path:
-            saved = {j["name"]: dict(id=j["id"], baud=self.baud_codes.get(j["id"], 0))
-                     for j in self.joints if not j.get('discovered')}
+            saved = {joint["name"]: dict(id=joint["id"], baud=self.baud_codes.get(joint["id"], 0))
+                     for joint in JOINTS}
+            saved.update((f"servo_{device_id}", dict(id=device_id, baud=baud))
+                         for device_id, baud in self.baud_codes.items() if device_id not in IDS and baud)
             temporary = self.layout_path.with_suffix(".new")
             temporary.write_text(json.dumps(saved, indent=2) + "\n", encoding="utf-8")
             temporary.replace(self.layout_path)
@@ -213,6 +200,10 @@ def scan_id(value):
 def raw_to_degrees(raw, maximum=4095):
     integer(raw, 0, maximum, "编码器位置")
     return 180.0 - raw * 360.0 / 4096.0
+
+
+class ServoOperationError(RuntimeError):
+    """A failure confined to the addressed servo."""
 
 
 def target_values(rows, ids, maximum=4095):

@@ -1,3 +1,5 @@
+import { setLocalizedText } from '../../../webpadd/web/language.js';
+
 const viewerPages = new Set(['action', 'status', 'debug', 'calibration']);
 
 export function createWorkspaceVisuals({ request, confirmAction, toast, context, onCalibrationSourceChange }) {
@@ -5,6 +7,7 @@ export function createWorkspaceVisuals({ request, confirmAction, toast, context,
   calibrationPanel.inert = true;
   const palette = document.getElementById('model-palette');
   const resetView = document.getElementById('reset-view');
+  const modelStatus = document.getElementById('model-loading');
   palette.disabled = true;
   resetView.disabled = true;
   let page = '', calibrationActive = false, chartsActive = false;
@@ -64,6 +67,8 @@ export function createWorkspaceVisuals({ request, confirmAction, toast, context,
 
   function loadViewer() {
     if (viewerLoad || viewer) return;
+    modelStatus.hidden = false;
+    setLocalizedText(modelStatus, '模型加载中');
     viewerLoad = import('./robot-viewer.js').then(({ createRobotViewer }) => {
       if (!viewerPages.has(page)) return;
       viewer = createRobotViewer({ request, toast, context });
@@ -80,7 +85,10 @@ export function createWorkspaceVisuals({ request, confirmAction, toast, context,
       applyPage();
     }).catch(error => {
       console.error('加载模型查看器失败', error);
-      toast(`模型查看器加载失败：${error.message}`, true);
+      const message = `模型查看器加载失败：${error.message}`;
+      modelStatus.hidden = false;
+      setLocalizedText(modelStatus, message);
+      toast(message, true);
     }).finally(() => { viewerLoad = null; });
   }
 

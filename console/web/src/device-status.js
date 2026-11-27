@@ -163,7 +163,7 @@ export function createDeviceStatus({ toast }) {
       const servo = servos.get(joint.id);
       const status = servoStatus(servo, state, elapsed, connectionError, SERVO_STATUS_MAX_AGE_MS);
       const config = servo?.configuration;
-      const mismatch = status.valid && !servo?.configuration_error && !state.calibration?.active
+      const mismatch = status.valid && !joint.discovered && !servo?.configuration_error && !state.calibration?.active
         ? startupConfigurationMismatch(joint.id, config) : { pid: false, temperature: false, torque: false };
       const hasMismatch = mismatch.pid || mismatch.temperature || mismatch.torque;
       statuses.set(joint.id, state.calibration?.active ? 'paused'

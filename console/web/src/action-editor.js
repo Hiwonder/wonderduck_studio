@@ -61,10 +61,11 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
   }
 
   function validatePlaybackPositions(source, lockedIds) {
+    const available = new Set(context().state?.servos?.filter(servo => servo.valid).map(servo => servo.id));
     for (const frame of source) {
       for (const [id, { min, max }] of Object.entries(ACTION_POSITION_LIMITS)) {
         const value = frame.positions[id];
-        if (value != null && !lockedIds.includes(Number(id)) && (value < min || value > max)) {
+        if (value != null && available.has(Number(id)) && !lockedIds.includes(Number(id)) && (value < min || value > max)) {
           throw new Error(`ID ${id} 的动作位置须在 ${min}～${max} 步之间`);
         }
       }
@@ -239,15 +240,17 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
     const labels = { idle: '未播放', playing: `播放中 ${playback.frame || '…'} / ${playback.count || frames.length}`,
       stopped: `已停止${playback.error && playback.error !== '已停止' ? `：${playback.error}` : ''}`,
       completed: '播放结束，目标已下发', error: `播放失败：${playback.error || '未知错误'}` };
+    const skipped = Object.keys(playback.errors || {});
+    const skipMessage = skipped.length ? `，已跳过 ID ${skipped.join('、')}` : '';
     const statusText = stopping ? '停止中' : starting && playback.state !== 'playing'
-      ? '正在启动' : labels[playback.state] || '未播放';
+      ? '正在启动' : (labels[playback.state] || '未播放') + skipMessage;
     const terminal = ['stopped', 'completed', 'error'].includes(playback.state) && !stopping;
     $('action-status').hidden = terminal;
     const visibleStatus = terminal ? '' : statusText;
     if ($('action-status').textContent !== visibleStatus) $('action-status').textContent = visibleStatus;
     $('action-status').title = terminal ? '' : statusText;
     if (['stopped', 'completed', 'error'].includes(playback.state) && lastPlayback !== JSON.stringify(playback)) {
-      toast(statusText, playback.state === 'error');
+      toast(statusText, playback.state === 'error' || skipped.length > 0);
     }
     lastPlayback = JSON.stringify(playback);
     updatePlaybackButton('action-run', actionPlaying);
@@ -290,6 +293,8 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
     servoPanel.holdForFrame(frameGraceUntil);
     const result = await request('action-playback', { operation: 'send_frame', document, locked_ids: lockedIds });
     if (!result.sent) throw new Error('动作帧未发送完成');
+    const skipped = Object.keys(result.errors || {});
+    if (skipped.length) toast(`动作帧已发送，已跳过 ID ${skipped.join('、')}`, true);
   }
 
   async function run(source = frames, loop = $('action-loop').checked, mode = 'action') {
@@ -550,7 +555,14 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
   on('groups-refresh', refreshGroups);
   $('action-groups').addEventListener('change', update);
   on('group-run', () => playbackBusy() ? stop() : run(loadGroup, $('action-loop').checked, 'group'));
-  on('offset-read', async () => { offsets = await servoPanel.readOffsets(); update(); toast('偏差已读取'); });
+  function showOffsetResult(result, operation) {
+    const count = Object.keys(result.values).length;
+    const failures = Object.entries(result.errors).map(([id, error]) => `ID ${id}：${error}`);
+    offsets = count ? result.values : null;
+    update();
+    toast(`已${operation} ${count} 个舵机偏差${failures.length ? `。 ${failures.join('、')}` : ''}`, failures.length > 0);
+  }
+  on('offset-read', async () => showOffsetResult(await servoPanel.readOffsets(), '读取'));
   on('offset-save', () => {
     if (!offsets) throw new Error('请先读取偏差');
     const title = '保存偏差', proposed = 'servo.offsets.csv', values = servoPanel.offsetValues();
@@ -564,8 +576,7 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
   });
   async function applyOffsetProfile(values) {
     if (!await confirmAction('加载位置偏差', `将向 ${Object.keys(values).length} 个舵机写入并读回位置偏差。继续？`)) return;
-    const count = await servoPanel.applyOffsets(values);
-    offsets = values; update(); toast(`已写入并读回 ${count} 个舵机偏差`);
+    showOffsetResult(await servoPanel.applyOffsets(values), '写入并读回');
   }
   on('offset-load', () => chooseLocation('加载偏差', async () => {
     const file = await chooseLocalFile();

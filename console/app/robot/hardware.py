@@ -17,7 +17,7 @@ from app.robot.parameter_batch import save_parameters
 from app.sensors.i2c_imu import I2cImuReader, compare_samples, resolve_transport_script
 from vendor.imu.imu_accel_calibration import SensorReader
 
-from app.robot.protocol import (BAUD_RATES, BY_ADDRESS, POSE_SPEED, ServoLayout, encode_register,
+from app.robot.protocol import (BAUD_RATES, BY_ADDRESS, POSE_SPEED, ServoLayout, ServoOperationError, encode_register,
                       encode_target, integer, joint_id, motion_targets, packet, pose_targets, raw_to_degrees,
                       register_definition, scan_id, servo_faults, validate_hold_position)
 
@@ -28,6 +28,10 @@ class RegisterReadTimeout(TimeoutError):
     def __init__(self, message, *, corrupted=False):
         super().__init__(message)
         self.corrupted = corrupted
+
+
+class NoServoReply(RegisterReadTimeout, ServoOperationError):
+    """The individual request expired without any reply bytes."""
 
 
 def parse_live_imu_diagnostics(payload):
@@ -55,6 +59,7 @@ class Hardware(ServoLayout):
         self.home_policy = Path(home_policy) if home_policy is not None else None
         self.current_baud = 0
         self.offset_lock_cache = {}
+        self.pending_offset_locks = {}
         if imu_source not in ("id200", "i2c", "compare"):
             raise ValueError("IMU 来源必须是 id200、i2c 或 compare")
         self.imu_source = imu_source
@@ -91,6 +96,7 @@ class Hardware(ServoLayout):
         self.torque = {}
         self.torque_time = 0
         self.servo_timeouts = set()
+        self.action_motion_reset = set()
         self.closed = False
 
     def set_imu_source(self, source):
@@ -162,19 +168,23 @@ class Hardware(ServoLayout):
         if device_id in errors:
             error = f"ID {device_id} · 地址 0x{address:02X} · {length} 字节：{errors[device_id]}"
             if device_id not in statuses:
-                raise RegisterReadTimeout(error, corrupted=errors[device_id] != '读取超时')
-            raise RuntimeError(error)
+                if errors[device_id] == "读取超时":
+                    raise NoServoReply(error)
+                raise RegisterReadTimeout(error, corrupted=True)
+            if statuses[device_id] and errors[device_id] == f"回复长度 0，期望 {length}":
+                raise ServoOperationError(error)
+            raise RegisterReadTimeout(error, corrupted=True)
         return blocks[device_id]
 
     def read_configuration(self, device_id, address, length, phase, **options):
         for attempt in range(1, 4):
             try:
                 data = self.read(device_id, address, length, **options)
-            except RegisterReadTimeout as error:
+            except NoServoReply as error:
                 logging.warning("configuration read id=%s address=0x%02X phase=%s attempt=%s/3: %s",
                                 device_id, address, phase, attempt, error)
                 if attempt == 3:
-                    raise RuntimeError(f"{phase}失败，3 次读取均超时：{error}") from error
+                    raise NoServoReply(f"{phase}失败，3 次读取均超时：{error}") from error
                 time.sleep(.01)
             else:
                 if attempt > 1:
@@ -228,7 +238,7 @@ class Hardware(ServoLayout):
                self.read_configuration(device_id, address, len(data), configuration_phase, **options))
         if got != data:
             phase = f"{configuration_phase}：" if configuration_phase else ""
-            raise RuntimeError(phase + "已发出写入，但寄存器读回不一致；请重新读取，不要自动重发")
+            raise ServoOperationError(phase + "已发出写入，但寄存器读回不一致；请重新读取，不要自动重发")
         if address == 55 and len(data) == 1 and hasattr(self, 'offset_lock_cache'):
             self.offset_lock_cache[device_id] = data
 
@@ -236,27 +246,16 @@ class Hardware(ServoLayout):
         if type(value) is not int or value not in (15, 66):
             raise ValueError("临时位置 P 必须为 15 或 66")
         self.restore_offset_lock(force=True)
-        failures, locked = [], []
+        failures = {}
         for device_id in self.ids if ids is None else ids:
             self.check_interrupted()
             try:
+                self.require_restored_offset_lock(device_id)
                 self.write_verified(device_id, 55, b'\x01', configuration_phase="确认写保护")
-                locked.append(device_id)
-            except (OSError, RuntimeError, TimeoutError, ValueError) as error:
-                failures.append(f"ID {device_id} 写保护：{error}")
-        if failures and value == 66:
-            raise RuntimeError("调试模式写保护确认失败：" + "；".join(failures))
-
-        for device_id in locked:
-            self.check_interrupted()
-            try:
                 self.write_verified(device_id, 21, bytes((value,)), configuration_phase="位置 P 读回")
-            except (OSError, RuntimeError, TimeoutError, ValueError) as error:
-                failures.append(f"ID {device_id} 位置 P：{error}")
-                if value == 66:
-                    break
-        if failures:
-            raise RuntimeError(f"临时位置 P={value} 未全部确认：" + "；".join(failures))
+            except ServoOperationError as error:
+                failures[device_id] = str(error)
+        return failures
 
     def sample_imu(self):
         return self.sample(include_servos=False)
@@ -270,6 +269,12 @@ class Hardware(ServoLayout):
         read_i2c = imu_source in ("i2c", "compare")
         ids = ((200,) if read_id200 else ()) + (tuple(self.ids) if include_servos else ())
         blocks, errors, statuses, observed = self.individual_read(ids, 56, 12)
+        for device_id in self.pending_offset_locks.keys() & blocks.keys():
+            self.check_interrupted()
+            try:
+                self.require_restored_offset_lock(device_id)
+            except ServoOperationError as error:
+                errors[device_id] = str(error)
         id200_read_at = observed.get(200)
         replies = dict(statuses)
         now = time.monotonic()
@@ -388,13 +393,16 @@ class Hardware(ServoLayout):
                 if error.corrupted:
                     raise RuntimeError(f'扫描回复损坏：{error}') from error
                 return dict(id=device_id, found=False)
+            except ServoOperationError as error:
+                return dict(id=device_id, found=False, error=str(error))
             if identity != bytes((device_id,)):
-                raise RuntimeError(f'ID {device_id} 回复ID寄存器不一致：{identity.hex()}')
+                return dict(id=device_id, found=False, error=f'ID 寄存器读回不一致：{identity.hex()}')
             return dict(id=device_id, found=True, joint=self.register_discovery(device_id))
         if action in ("center_all", "home_all", "run_targets"):
             return self.move_pose(action, command.get("targets"))
         if action == "release_all":
             outcomes = {}
+            unanswered = []
             locked = set(command.get("locked_ids", ()))
             for device_id in self.ids:
                 if device_id in locked:
@@ -402,9 +410,13 @@ class Hardware(ServoLayout):
                 try:
                     self.write_verified(device_id, 40, b"\x00")
                     outcomes[device_id] = "已读回关闭"
+                except NoServoReply as error:
+                    unanswered.append(device_id)
+                    outcomes[device_id] = str(error)
                 except Exception as error:
                     outcomes[device_id] = str(error)
-            return dict(verified=all(v == "已读回关闭" for v in outcomes.values()), results=outcomes)
+            return dict(verified=all(v == "已读回关闭" for v in outcomes.values()),
+                        results=outcomes, unanswered_ids=unanswered)
         device_id = joint_id(command.get("id"), self.ids)
         if action == "registers":
             self.restore_offset_lock(force=True)
@@ -452,8 +464,13 @@ class Hardware(ServoLayout):
 
     def parameter_batch(self, command, check, progress):
         self.restore_offset_lock(force=True)
-        return save_parameters(command, self.ids, self.read_configuration,
-                               self.send_write, check, progress)
+
+        def read(device_id, address, length, phase):
+            if phase == "批量参数预检":
+                self.require_restored_offset_lock(device_id)
+            return self.read_configuration(device_id, address, length, phase)
+
+        return save_parameters(command, self.ids, read, self.send_write, check, progress)
 
     def check_id_available(self, device_id, target_id):
         if target_id == 200:
@@ -483,6 +500,7 @@ class Hardware(ServoLayout):
         data = encode_register(register, value)
         if self.offset_lock is not None and (address != 31 or self.offset_lock[0] != device_id or not self.offset_lock[3]):
             self.restore_offset_lock(force=True)
+        self.require_restored_offset_lock(device_id)
         id_change = address == 5 and value != device_id
         baud_options = {"baud": self.baud_codes.get(device_id, 0)} if id_change else {}
         if id_change:
@@ -507,7 +525,7 @@ class Hardware(ServoLayout):
             self.send_write(device_id, address, data)
             if address == 6:
                 termios.tcdrain(self.fd)
-                self.update_layout(device_id, baud=value, persist=False)
+                self.baud_codes[device_id] = value
             if address == 40 and value == 128:
                 if int.from_bytes(self.read(target_id, 56, 2), "little") != 2048:
                     raise RuntimeError("中位校准已发出，但当前位置未读回 2048")
@@ -519,7 +537,7 @@ class Hardware(ServoLayout):
                     raise RuntimeError("已发出写入，但寄存器读回不一致；请重新读取，不要自动重发")
             if id_change:
                 id_verified = True
-                self.update_layout(device_id, new_id=value)
+                self.record_id_change(device_id, value)
                 self.servo_timeouts.difference_update((device_id, value))
                 self.torque.pop(device_id, None)
                 self.torque.pop(value, None)
@@ -550,13 +568,14 @@ class Hardware(ServoLayout):
 
     def position_offset_register(self, device_id):
         if self.read(device_id, 40, 1) != b"\x01":
-            raise ValueError("请先开启所选舵机扭矩")
+            raise ServoOperationError("请先开启所选舵机扭矩")
         return register_definition(31, servo_version=tuple(self.read(device_id, 3, 2)))
 
     def write_offset_direct(self, device_id, value):
         data = encode_register(self.position_offset_register(device_id), value)
         if self.offset_lock is not None and self.offset_lock[0] != device_id:
-            self.restore_offset_lock(force=True, verify=False)
+            self.restore_offset_lock(force=True)
+        self.require_restored_offset_lock(device_id)
         unlock = False
         if self.offset_lock is None:
             saved_lock = self.offset_lock_cache.get(device_id)
@@ -571,7 +590,7 @@ class Hardware(ServoLayout):
             self.send_write(device_id, 31, data)
         except Exception as error:
             try:
-                self.restore_offset_lock(force=True, verify=False)
+                self.restore_offset_lock(force=True)
             except Exception as restore_error:
                 raise RuntimeError(f"偏差发送失败：{error}；恢复写保护失败：{restore_error}") from error
             raise
@@ -583,26 +602,42 @@ class Hardware(ServoLayout):
                    pose_targets(action, self.ids, self.home_policy))
         return self.move_targets(action, targets)
 
-    def prepare_action_playback(self, ids):
-        positions, torque_off = {}, []
+    def prepare_motion(self, ids, *, pose=False):
+        starts, failures = {}, {}
+        # Complete preflight before sending any new targets or enabling torque.
         for device_id in ids:
             self.check_interrupted()
-            self.ensure_position_mode(device_id)
-            torque = self.read(device_id, 40, 1)
-            if torque not in (b"\x00", b"\x01"):
-                raise ValueError(f"ID {device_id} 扭矩状态无效")
-            if torque == b"\x00":
-                positions[device_id] = integer(int.from_bytes(self.read(device_id, 56, 2), "little"),
-                                               0, 4095, "编码器位置")
-                torque_off.append(device_id)
-        try:
-            for device_id in torque_off:
-                self.check_interrupted()
-                self.write_verified(device_id, 42, positions[device_id].to_bytes(2, "little"))
+            try:
+                self.ensure_position_mode(device_id)
+                torque = self.read(device_id, 40, 1)
+                if torque not in (b"\x00", b"\x01"):
+                    raise ServoOperationError("扭矩状态无效")
+                if pose or torque == b"\x00":
+                    position = self.read(device_id, 56, 2)
+                    if int.from_bytes(position, "little") > 4095:
+                        raise ServoOperationError("编码器位置超出 0..4095")
+                    if torque == b"\x00":
+                        starts[device_id] = position
+            except ServoOperationError as error:
+                failures[device_id] = str(error)
+        for device_id, position in starts.items():
+            self.check_interrupted()
+            try:
+                if pose:
+                    # Refresh the hold position just before enabling torque.
+                    position = self.read(device_id, 56, 2)
+                    if int.from_bytes(position, "little") > 4095:
+                        raise ServoOperationError("编码器位置超出 0..4095")
+                self.write_verified(device_id, 42, position)
                 self.write_verified(device_id, 40, b"\x01")
-        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
-            raise RuntimeError(f"动作准备失败，部分舵机可能已开启扭矩：{error}") from error
-        self.action_motion_reset = set(ids)
+            except ServoOperationError as error:
+                failures[device_id] = str(error)
+        return failures
+
+    def prepare_action_playback(self, ids):
+        failures = self.prepare_motion(ids)
+        self.action_motion_reset.update(device_id for device_id in ids if device_id not in failures)
+        return failures
 
     def move_action_frame(self, targets, duration_ms):
         duration = integer(duration_ms, 1, 30000, "动作时长").to_bytes(2, "little")
@@ -624,70 +659,78 @@ class Hardware(ServoLayout):
         return dict(sent=True, action="action_frame", targets=targets, duration_ms=duration_ms)
 
     def move_targets(self, action, targets):
-        starts = {}
-        # Finish every preflight read before changing any servo register.
-        for device_id in targets:
-            self.check_interrupted()
-            self.ensure_position_mode(device_id)
-            position = integer(int.from_bytes(self.read(device_id, 56, 2), "little"), 0, 4095, "编码器位置")
-            torque = self.read(device_id, 40, 1)
-            if torque not in (b"\x00", b"\x01"):
-                raise ValueError(f"ID {device_id} 扭矩状态无效")
-            starts[device_id] = (position, torque == b"\x01")
-
         try:
-            for device_id, (position, torque_on) in starts.items():
-                self.check_interrupted()
-                if not torque_on:
-                    position = integer(int.from_bytes(self.read(device_id, 56, 2), "little"), 0, 4095, "编码器位置")
-                    starts[device_id] = (position, torque_on)
-            speeds = dict.fromkeys(targets, POSE_SPEED)
-            for device_id, (position, torque_on) in starts.items():
-                self.check_interrupted()
-                if not torque_on:
-                    self.write_verified(device_id, 42, position.to_bytes(2, "little"))
-                    self.write_verified(device_id, 40, b"\x01")
-            payloads = {device_id: raw.to_bytes(2, "little") + b"\x00\x00" + speeds[device_id].to_bytes(2, "little")
-                        for device_id, raw in targets.items()}
-            for code, group in self.baud_groups(targets, maximum=35):
-                self.check_interrupted()
-                self.select_baud(code)
-                params = bytearray((42, 6))
-                for device_id in group:
-                    params.extend((device_id, *payloads[device_id]))
-                self.live.write_all(self.fd, packet(254, 0x83, params))
-            for device_id, data in payloads.items():
-                self.check_interrupted()
-                if self.read(device_id, 42, 6) != data:
-                    raise RuntimeError(f"ID {device_id} 目标寄存器读回不一致")
+            return self.send_pose_targets(action, targets)
         except (OSError, RuntimeError, TimeoutError, ValueError) as error:
-            raise RuntimeError(f"姿态操作结果未全部确认，部分舵机可能已开启扭矩或运动；请读取状态，不要自动重发：{error}") from error
-        return dict(verified=True, action=action, targets=targets, speed=POSE_SPEED)
+            raise RuntimeError(f"姿态操作结果未全部确认，请读取状态后再操作：{error}") from error
+
+    def send_pose_targets(self, action, targets):
+        failures = self.prepare_motion(targets, pose=True)
+        selected = {device_id: raw for device_id, raw in targets.items() if device_id not in failures}
+        payloads = {device_id: raw.to_bytes(2, "little") + b"\x00\x00" + POSE_SPEED.to_bytes(2, "little")
+                    for device_id, raw in selected.items()}
+        for code, group in self.baud_groups(selected, maximum=35):
+            self.check_interrupted()
+            self.select_baud(code)
+            params = bytearray((42, 6))
+            for device_id in group:
+                params.extend((device_id, *payloads[device_id]))
+            self.live.write_all(self.fd, packet(254, 0x83, params))
+        confirmed = {}
+        for device_id, data in payloads.items():
+            self.check_interrupted()
+            try:
+                if self.read(device_id, 42, 6) != data:
+                    raise ServoOperationError("目标寄存器读回不一致")
+                confirmed[device_id] = selected[device_id]
+            except ServoOperationError as error:
+                failures[device_id] = str(error)
+        return dict(verified=not failures, action=action, targets=confirmed, speed=POSE_SPEED, errors=failures)
 
     def ensure_position_mode(self, device_id):
         if self.read(device_id, 33, 1) != b"\x00":
-            raise ValueError("当前舵机不是位置模式")
+            raise ServoOperationError("当前舵机不是位置模式")
 
-    def restore_offset_lock(self, force=False, verify=None):
+    def require_restored_offset_lock(self, device_id):
+        saved_lock = self.pending_offset_locks.get(device_id)
+        if saved_lock is None:
+            return
+        try:
+            if self.read(device_id, 55, 1) != saved_lock:
+                self.write_verified(device_id, 55, saved_lock)
+            self.offset_lock_cache[device_id] = saved_lock
+        except ServoOperationError as error:
+            raise ServoOperationError(f"偏差写保护恢复未确认：{error}") from error
+        del self.pending_offset_locks[device_id]
+
+    def restore_offset_lock(self, force=False):
         if self.offset_lock is None:
             return
-        device_id, saved_lock, deadline, verified = self.offset_lock
+        device_id, saved_lock, deadline, _ = self.offset_lock
         if not force and time.monotonic() < deadline:
             return
         if saved_lock != b"\x00":
-            verify_restore = verified if verify is None else verify
-            if verify_restore:
+            try:
                 self.write_verified(device_id, 55, saved_lock)
-            else:
-                self.send_write(device_id, 55, saved_lock)
-        if hasattr(self, 'offset_lock_cache'):
-            self.offset_lock_cache[device_id] = saved_lock
+            except ServoOperationError as error:
+                # Keep restoration local to this servo until it answers again.
+                self.pending_offset_locks[device_id] = saved_lock
+                self.offset_lock_cache.pop(device_id, None)
+                self.offset_lock = None
+                logging.warning("offset lock restore id=%s: %s", device_id, error)
+                return
+        self.offset_lock_cache[device_id] = saved_lock
         self.offset_lock = None
 
     def close(self):
         if not self.closed:
             try:
                 self.restore_offset_lock(force=True)
+                for device_id in list(self.pending_offset_locks):
+                    try:
+                        self.require_restored_offset_lock(device_id)
+                    except ServoOperationError as error:
+                        logging.warning("closing with offset lock unconfirmed id=%s: %s", device_id, error)
             finally:
                 try:
                     if self.i2c_reader is not None:

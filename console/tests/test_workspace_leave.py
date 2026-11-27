@@ -23,6 +23,8 @@ class WorkspaceLeaveTests(unittest.TestCase):
         studio.rest_transition_client = None
         studio.rest_unconfirmed = set()
         studio.unconfirmed_warnings = {}
+        studio.observer = Mock()
+        studio.observer.snapshot.return_value = {}
         studio.manual_page_guard = Mock()
         studio.manual_page_guard.leases = {}
         studio._set_status_viewer = Mock()
@@ -86,6 +88,30 @@ class WorkspaceLeaveTests(unittest.TestCase):
             self.assertEqual(self.request(1, {"workspace": "action", "rest_before": True})[0], 400)
             rest.assert_not_called()
         self.assertEqual(self.studio.client_workspaces["test-client"][0], "system")
+
+    def test_switch_from_partial_debug_to_action_keeps_the_lease(self):
+        studio = self.studio
+        studio.owner, studio.workspace = "test-client", "debug"
+        studio.client_workspaces["test-client"] = ("debug", 0)
+        studio.partial_maintenance = True
+        studio.partial_unavailable_ids = {10}
+        studio.lease = Mock()
+        studio.lease.alive.return_value = True
+        studio.controller = Mock()
+        studio.controller.snapshot.return_value = {"servos": []}
+        studio.controller.emergency_release.return_value = dict(
+            verified=False, results={10: "读取超时", 20: "已读回关闭"}, unanswered_ids=[10],
+        )
+        studio._switch_workspace = Mock(return_value=dict(workspace="action", maintenance=True))
+        with patch("app.robot.studio.ensure_rest") as rest:
+            status, result = self.request(1, {"workspace": "action", "rest_before": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(result, dict(workspace="action", maintenance=True, ready=True,
+                                      partial=True, unavailable_ids=[10]))
+        studio._switch_workspace.assert_called_once_with("test-client", "action")
+        studio.lease.request.assert_not_called()
+        studio.controller.emergency_release.assert_called_once()
+        rest.assert_not_called()
 
     def test_departure_survives_revision_expiry_and_unconfirmed_release(self):
         entered, finish_rest = threading.Event(), threading.Event()

@@ -129,7 +129,9 @@ async function request(path, body) {
       await refreshSession();
       throw new Error('服务已重启，控制会话正在恢复');
     }
-    throw Object.assign(new Error(data.error || `HTTP ${response.status}`), { status: response.status });
+    throw Object.assign(new Error(data.error || `HTTP ${response.status}`), {
+      status: response.status, servoError: data.servo_error === true,
+    });
   }
   if (previewOnly && path === 'info') data.readonly = true;
   return data;
@@ -166,7 +168,10 @@ async function command(action, data = {}) {
     const result = await send('command', { action, id, ...data });
     if (!['registers', 'read_raw'].includes(action)) {
       const pose = action === 'center_all' ? '中位 2048' : action === 'home_all' ? 'Home' : null;
-      const message = result.verified ? (pose ? `${pose} 目标已下发并读回` : '寄存器读回一致') : '部分卸力未确认';
+      const failures = Object.entries(result.errors || {}).map(([id, error]) => `ID ${id}：${error}`);
+      const message = pose
+        ? result.verified ? `${pose} 目标已下发并读回` : `${pose} 部分目标未确认。 ${failures.join('、')}`
+        : result.verified ? '寄存器读回一致' : '部分卸力未确认';
       toast(`${pose ? `${Object.keys(result.targets).length} 个舵机` : `ID ${id}`} · ${message}`, !result.verified);
       if (!result.verified) console.warn('部分卸力未确认', result.results);
     }
@@ -251,6 +256,7 @@ const liveTarget = createLinkedTarget({
     action: 'move_direct', id: data.id, degrees: 180 - data.raw * 360 / 4096, speed: data.speed,
   }),
   onError: error => { targetInitialized = false; toast(error.message, true); },
+  onFollowerError: (id, error) => toast(`ID ${id} 联动已暂停，所选舵机仍可控制。 ${error.message}`, true),
   onTarget: (id, raw) => sliderTargets.set(id, raw),
 });
 
@@ -329,7 +335,7 @@ function updateControls() {
     home: armed && !operationBusy && !document.hidden && online &&
       info?.joints.some(joint => (!joint.discovered || joint.id === 35 || joint.id === 36) &&
         state.servos.some(servo => servo.id === joint.id && servo.valid)),
-    scan: canScanServos() && !operationBusy && !parameterReadBusy });
+    scan: canScanServos() && !operationBusy });
   $('torque').disabled = !armed || operationBusy || !online || !current?.valid;
   $('torque').checked = current?.torque === 1;
   $('target-slider').disabled = !liveTarget.enabled();

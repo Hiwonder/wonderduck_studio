@@ -39,7 +39,7 @@ class ActionPlayback:
         with self.status_lock:
             self.status.update(changes)
 
-    def start(self, frames, client, loop):
+    def start(self, frames, client, loop, errors=None):
         if type(loop) is not bool:
             raise ValueError("循环选项无效")
         with self.lock:
@@ -49,9 +49,9 @@ class ActionPlayback:
                 raise PermissionError("写操作未解锁或已过期")
             self.run_id += 1
             self.job = dict(frames=frames, client=client, loop=loop, index=0, deadline=self.clock(),
-                            prepared=set(), dispatched_targets={}, dispatch=0)
+                            prepared=set(), errors=dict(errors or {}), dispatched_targets={}, dispatch=0)
             self.update_status(state="playing", frame=None, count=len(frames), error=None,
-                               run_id=self.run_id, dispatch=0, frame_targets={})
+                               run_id=self.run_id, dispatch=0, frame_targets={}, errors=dict(self.job["errors"]))
             return self.snapshot()
 
     def cancel(self, reason="已停止", client=None):
@@ -84,14 +84,23 @@ class ActionPlayback:
                 job["index"] = 0
             index = job["index"]
             duration, targets = job["frames"][index]
-            unprepared = [device_id for device_id in targets if device_id not in job["prepared"]]
+            unprepared = [device_id for device_id in targets
+                          if device_id not in job["prepared"] and device_id not in job["errors"]]
         try:
-            if unprepared:
-                hardware.prepare_action_playback(unprepared)
+            failures = (hardware.prepare_action_playback(unprepared) or {}) if unprepared else {}
             with self.lock:
                 if self.job is not job or not self.armed(job["client"]):
                     return None
-                job["prepared"].update(unprepared)
+                job["errors"].update(failures)
+                job["prepared"].update(device_id for device_id in unprepared if device_id not in failures)
+                targets = {device_id: position for device_id, position in targets.items()
+                           if device_id not in job["errors"]}
+                if job["errors"] and not job["prepared"] and not any(
+                    device_id not in job["errors"]
+                    for _, remaining in job["frames"][index + 1:] for device_id in remaining
+                ):
+                    raise RuntimeError("动作没有可用的舵机：" + "；".join(
+                        f"ID {device_id} · {error}" for device_id, error in job["errors"].items()))
                 started = self.clock()
             # The frame is committed to the bus worker. Serial dispatch checks
             # for emergency release again before sending each group.
@@ -111,7 +120,7 @@ class ActionPlayback:
             job["dispatched_targets"].update(targets)
             job["dispatch"] += 1
             self.update_status(frame=index + 1, dispatch=job["dispatch"],
-                               frame_targets=dict(job["dispatched_targets"]))
+                               frame_targets=dict(job["dispatched_targets"]), errors=dict(job["errors"]))
             job["index"] += 1
             job["deadline"] = started + duration / 1000
             return targets

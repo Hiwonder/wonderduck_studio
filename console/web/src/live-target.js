@@ -24,7 +24,7 @@ export function createLiveTarget({ context, send, onError, onComplete }) {
       if (!result.sent) throw new Error('目标未能发送');
       if (version === generation && !pending) onComplete?.(data.id);
     } catch (error) {
-      if (version === generation) { cancel(); onError(error); }
+      if (version === generation) { cancel(); onError(error, data.id); }
     }
   }
 

@@ -15,7 +15,8 @@ from app.robot.protocol import IDS
 from app.robot.workspace_rest import ensure_rest
 
 
-MAINTENANCE_WORKSPACES = frozenset(("action", "debug", "calibration"))
+SERVO_WORKSPACES = frozenset(("action", "debug"))
+MAINTENANCE_WORKSPACES = SERVO_WORKSPACES | {"calibration"}
 AUTOMATIC_WORKSPACES = frozenset(("target", "pickup", "line", "person", "maze"))
 WORKSPACES = MAINTENANCE_WORKSPACES | AUTOMATIC_WORKSPACES | frozenset(("status", "control", "system", "network", "models"))
 MANUAL_DISABLED_WORKSPACES = MAINTENANCE_WORKSPACES | frozenset(("status",))
@@ -209,8 +210,8 @@ class StudioController:
         rows = state.get("servos")
         if state.get("online") is not True or state.get("bus_waiting") or not isinstance(rows, list):
             return None
-        if (len(rows) != len(IDS) or any(not isinstance(row, dict) for row in rows)
-                or {row.get("id") for row in rows} != set(IDS)):
+        rows = [row for row in rows if isinstance(row, dict) and row.get("id") in IDS]
+        if len(rows) != len(IDS) or {row.get("id") for row in rows} != set(IDS):
             return None
         now, missing, available = time.monotonic(), [], 0
         for row in rows:
@@ -357,6 +358,16 @@ class StudioController:
             previous = self.client_workspaces.get(client)
             if previous is not None and previous[0] == workspace and client not in self.rest_unconfirmed:
                 return self.switch(client, workspace)
+            if (self.owner == client and self.workspace in SERVO_WORKSPACES and workspace in SERVO_WORKSPACES
+                    and self.partial_maintenance and self.lease is not None and self.lease.alive()
+                    and client not in self.rest_unconfirmed and self.controller is not None):
+                try:
+                    result = self._switch_partial_servo_workspace(client, workspace)
+                except (OSError, RuntimeError, ValueError) as error:
+                    logging.warning("无法沿用部分舵机维护会话：%s", error)
+                else:
+                    if result is not None:
+                        return result
             if self.owner not in (None, client):
                 return self._unconfirmed_fallback(client, workspace, "另一浏览器正在使用维护工作区；设备操作不可用")
             if any(other != client and self.manual_page_guard.status_enabled(other)
@@ -395,6 +406,10 @@ class StudioController:
                 if retry_unconfirmed:
                     raise RuntimeError("卸力尚未确认")
                 ensure_rest(self.path)
+                if workspace in MAINTENANCE_WORKSPACES and hasattr(self.observer, "snapshot"):
+                    health = self.observer.snapshot(client).get("robot", {}).get("health", {})
+                    if "串口已隔离" in (health.get("reason") or ""):
+                        raise RuntimeError("串口恢复尚未完成")
             except Exception as error:
                 logging.warning("休息未完成，准备关闭策略并卸力：%s", error)
                 try:
@@ -475,6 +490,25 @@ class StudioController:
                 if previous_status_seen is not None and not retry_unconfirmed:
                     self._set_status_viewer(client, True)
             raise
+
+    def _switch_partial_servo_workspace(self, client, workspace):
+        controller = self._require(client, SERVO_WORKSPACES)
+        missing = set(self.partial_unavailable_ids)
+        missing.update(row["id"] for row in controller.snapshot(client).get("servos", ())
+                       if row.get("valid") is False and row.get("error") == "未连接")
+        released = controller.emergency_release()
+        failures = {device_id for device_id, outcome in released.get("results", {}).items()
+                    if outcome != "已读回关闭"}
+        if not released.get("verified") and (not failures or not failures.issubset(
+            missing.intersection(released.get("unanswered_ids", ()))
+        )):
+            return None
+        if not any(outcome == "已读回关闭" for outcome in released.get("results", {}).values()):
+            return None
+        result = self._switch_workspace(client, workspace)
+        self.partial_unavailable_ids = failures
+        self.controller.partial_unavailable_ids = set(failures)
+        return dict(result, ready=True, partial=bool(failures), unavailable_ids=sorted(failures))
 
     def _switch_workspace(self, client, workspace, partial=False, unavailable_ids=()):
         if not client or workspace not in WORKSPACES:

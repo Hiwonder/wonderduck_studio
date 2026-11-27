@@ -248,6 +248,8 @@ pub(super) enum Action {
     /// A user pressed Start, so a recovered low-voltage lock may be rearmed.
     ManualPrepareDrive,
     TogglePolicy,
+    EnablePolicy,
+    DisablePolicy,
     DriveMode,
     HeadMode,
     HeadDriveMode,
@@ -309,6 +311,10 @@ impl Action {
                 on: false,
                 toggle: true,
             })],
+            Self::EnablePolicy | Self::DisablePolicy => vec![proto::Call::RobotEnable(proto::EnableParams {
+                on: self == Self::EnablePolicy,
+                toggle: false,
+            })],
             Self::Home => vec![
                 proto::Call::RobotEnable(proto::EnableParams {
                     on: false,
@@ -334,6 +340,15 @@ fn skill(name: &str) -> proto::Call {
 #[cfg(test)]
 mod action_tests {
     use super::*;
+
+    #[test]
+    fn debug_policy_actions_set_explicit_state() {
+        for (name, enabled) in [("enable_policy", true), ("disable_policy", false)] {
+            let action: Action = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert!(matches!(action.calls().as_slice(),
+                [proto::Call::RobotEnable(params)] if params.on == enabled && !params.toggle));
+        }
+    }
 
     #[test]
     fn named_web_actions_and_legacy_aliases_dispatch_the_same_skills() {

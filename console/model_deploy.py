@@ -203,10 +203,11 @@ class ModelDeployer:
                     raise ValueError(model["error"])
                 return {"status": "current", "model": model, "mode": "online"}
             updater = OnlineModelUpdater(manager, lambda: as_caller(self.control_factory))
-            with updater.manual_operation():
+            with updater.manual_operation() as (before_apply, policy_restarted):
                 result = manager.apply(slot, io.BytesIO(payload), len(payload), filename,
-                                       before_apply=updater._require_rest)
+                                       before_apply=before_apply)
             result["mode"] = "online"
+            result["policy_restarted"] = policy_restarted
             return result
 
     def _offline(self, slot, payload=None, filename=None):

@@ -1,7 +1,9 @@
 """Download and apply the six standard models, one at a time."""
 
+from concurrent.futures import ThreadPoolExecutor
 import copy
 from contextlib import ExitStack, contextmanager
+from functools import partial
 import json
 import logging
 from pathlib import Path
@@ -113,28 +115,26 @@ class OnlineModelUpdater:
             with self.control_factory() as control:
                 self.control = control
                 try:
-                    if not self._begin_rest(None):
-                        error = self._wait_rest(None, threading.Event(), threading.Event())
-                        if error is not None:
-                            raise ValueError(f"休息未完成：{error}") from error
-                    self._require_rest()
+                    rested = self._prepare_for_update(None)
                     try:
-                        yield
+                        yield partial(self._require_update_ready, rested=rested), rested
                     except ModelUncertainError as error:
                         raise ModelUncertainError(f"{error}；未自动启动，请确认模型状态") from error
                     except ValueError as error:
-                        try:
-                            self._resume()
-                        except Exception as resume_error:
-                            raise ValueError(f"{error}；重新启动失败：{resume_error}") from resume_error
+                        if rested:
+                            try:
+                                self._resume()
+                            except Exception as resume_error:
+                                raise ValueError(f"{error}；重新启动失败：{resume_error}") from resume_error
                         raise
                     except Exception as error:
                         raise ModelUncertainError(f"模型操作结果未知：{error}；未自动启动，请检查模型状态") from error
                     else:
-                        try:
-                            self._resume()
-                        except Exception as error:
-                            raise ValueError(f"模型操作已完成，但重新启动失败：{error}") from error
+                        if rested:
+                            try:
+                                self._resume()
+                            except Exception as error:
+                                raise ValueError(f"模型操作已完成，但重新启动失败：{error}") from error
                 finally:
                     self.control = None
         finally:
@@ -218,14 +218,16 @@ class OnlineModelUpdater:
             raise ValueError("无法确认机器人休息状态，请检查控制程序版本")
         return status["rest_phase"], status["motion_enabled"]
 
-    def _require_rest(self):
+    def _require_update_ready(self, *, rested):
         self.control.verify()
         phase, enabled = self._rest_status()
-        if phase != "rested" or enabled:
+        if enabled or phase == "resting":
+            raise ValueError("策略仍在运行或休息动作尚未结束")
+        if rested and phase != "rested":
             raise ValueError("机器人已离开休息状态")
 
     def _resume(self):
-        self._require_rest()
+        self._require_update_ready(rested=True)
         for method, params, label in (("robot.init", {}, "初始化"),
                                        ("robot.enable", {"on": True, "toggle": False}, "开启策略")):
             reply = self.control.query(((method, params),), timeout=RPC_TIMEOUT)[method]
@@ -254,7 +256,6 @@ class OnlineModelUpdater:
         if phase == "rested":
             if enabled:
                 raise ValueError("机器人休息状态不一致")
-            self._rest(job_id, "rested")
             return True
         if phase != "resting":
             reply = self.control.query((("robot.rest", {}),), timeout=RPC_TIMEOUT)["robot.rest"]
@@ -264,35 +265,51 @@ class OnlineModelUpdater:
                 # Another client may have started the same rest between the two requests.
                 phase, enabled = self._rest_status()
                 if phase == "rested" and not enabled:
-                    self._rest(job_id, "rested")
                     return True
                 if phase != "resting":
                     raise ValueError(f"机器人拒绝休息：{reply.get('reason') or '未知原因'}")
         self._rest(job_id, "resting")
         return False
 
-    def _wait_rest(self, job_id, done, cancelled):
+    def _wait_rest(self):
+        deadline = time.monotonic() + REST_TIMEOUT
+        while True:
+            phase, enabled = self._rest_status()
+            if phase == "rested":
+                if enabled:
+                    raise ValueError("机器人休息状态不一致")
+                return
+            if phase == "failed":
+                raise ValueError("机器人休息失败")
+            if phase != "resting":
+                raise ValueError("机器人休息被中断")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("等待机器人休息完成超时")
+            time.sleep(REST_POLL_INTERVAL)
+
+    def _prepare_for_update(self, job_id):
         try:
-            deadline = time.monotonic() + REST_TIMEOUT
-            while not cancelled.is_set():
-                phase, enabled = self._rest_status()
-                if phase == "rested":
-                    if enabled:
-                        raise ValueError("机器人休息状态不一致")
-                    self._rest(job_id, "rested")
-                    return
-                if phase == "failed":
-                    raise ValueError("机器人休息失败")
-                if phase != "resting":
-                    raise ValueError("机器人休息被中断")
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("等待机器人休息完成超时")
-                cancelled.wait(REST_POLL_INTERVAL)
+            if not self._begin_rest(job_id):
+                self._wait_rest()
+            self._require_update_ready(rested=True)
         except Exception as error:
-            self._rest(job_id, "failed", str(error) or "休息状态未确认")
-            return error
-        finally:
-            done.set()
+            reason = str(error) or "休息状态未确认"
+            try:
+                reply = self.control.query((("robot.enable", {"on": False, "toggle": False}),),
+                                           timeout=RPC_TIMEOUT)["robot.enable"]
+                if not isinstance(reply, dict) or reply.get("accepted") is not True:
+                    detail = reply.get("reason") if isinstance(reply, dict) else None
+                    raise ValueError(detail or "停用策略的请求未获确认")
+                self._require_update_ready(rested=False)
+            except Exception as disable_error:
+                message = f"休息未完成：{reason}；无法确认可更新模型：{disable_error}"
+                self._rest(job_id, "failed", message)
+                raise ValueError(message) from disable_error
+            self._rest(job_id, "policy_disabled", reason)
+            logging.warning("Model update proceeding with policies disabled after rest failed: %s", reason)
+            return False
+        self._rest(job_id, "rested")
+        return True
 
     def _skip_pending(self, job_id, reason):
         with self.lock:
@@ -302,37 +319,20 @@ class OnlineModelUpdater:
                         item.update(state="not_started", error=reason)
 
     def _run(self, job_id, urls):
-        rest_done, cancelled = threading.Event(), threading.Event()
-        rest_started = False
         uncertain = False
         control = None
         control_entered = False
         try:
             control = self.control_factory()
-            control.__enter__()
+            self.control = control.__enter__()
             control_entered = True
-            self.control = control
-            try:
-                already_rested = self._begin_rest(job_id)
-            except Exception as error:
-                reason = str(error) or "休息请求未确认"
-                self._rest(job_id, "failed", reason)
-                self._skip_pending(job_id, f"休息未完成：{reason}")
-                return
-            if already_rested:
-                rest_done.set()
-            else:
-                threading.Thread(target=self._wait_rest, args=(job_id, rest_done, cancelled),
-                                 name="model-update-rest", daemon=True).start()
-            rest_started = True
             with ExitStack() as files:
+                worker = files.enter_context(ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-update-rest"))
+                preparation = worker.submit(self._prepare_for_update, job_id)
                 candidates = []
                 for index, (slot, filename, url) in enumerate(urls):
-                    if rest_done.is_set():
-                        rest = self.status()["job"]["rest"]
-                        if rest["state"] == "failed":
-                            self._skip_pending(job_id, f"休息未完成：{rest.get('error') or '状态未确认'}")
-                            return
+                    if preparation.done() and preparation.exception() is not None:
+                        break
                     self._item(job_id, index, state="downloading")
                     try:
                         downloaded = files.enter_context(tempfile.TemporaryFile())
@@ -372,23 +372,24 @@ class OnlineModelUpdater:
                     except Exception as error:
                         logging.exception("online model download failed for %s", filename)
                         self._item(job_id, index, state="failed", error=str(error) or "下载失败")
-                rest_done.wait()
-                rest = self.status()["job"]["rest"]
-                if rest["state"] != "rested":
-                    self._skip_pending(job_id, f"休息未完成：{rest.get('error') or '状态未确认'}")
+                try:
+                    rested = preparation.result()
+                except ValueError as error:
+                    self._skip_pending(job_id, str(error))
                     return
+                before_apply = partial(self._require_update_ready, rested=rested)
                 for index, slot, filename, downloaded, size in candidates:
                     try:
-                        self._require_rest()
+                        before_apply()
                     except Exception as error:
-                        reason = str(error) or "休息状态未确认"
+                        reason = str(error) or "机器人状态未确认"
                         self._rest(job_id, "failed", reason)
-                        self._skip_pending(job_id, f"休息未完成：{reason}")
+                        self._skip_pending(job_id, f"暂不能更新模型：{reason}")
                         break
                     try:
                         downloaded.seek(0)
                         self._item(job_id, index, state="applying")
-                        result = self.manager.apply(slot, downloaded, size, filename, before_apply=self._require_rest)
+                        result = self.manager.apply(slot, downloaded, size, filename, before_apply=before_apply)
                         if (not isinstance(result, dict) or result.get("status") not in ("applied", "unchanged")
                                 or result.get("model", {}).get("id") != slot):
                             raise ModelUncertainError("模型更新结果不完整，请刷新模型列表确认")
@@ -408,29 +409,27 @@ class OnlineModelUpdater:
                         break
         except Exception as error:
             logging.exception("online model update stopped unexpectedly")
-            if not rest_started:
+            if self.status()["job"]["rest"]["state"] == "requesting":
                 self._rest(job_id, "failed", str(error) or "控制会话未就绪")
             self._skip_pending(job_id, f"更新未完成：{str(error) or '服务异常'}")
         finally:
             try:
-                if rest_started:
-                    rest_done.wait()
-                    rest = self.status()["job"]["rest"]
-                    if rest["state"] == "rested" and not uncertain:
-                        self._resume_state(job_id, "starting")
-                        try:
-                            self._resume()
-                        except Exception as error:
-                            self._resume_state(job_id, "failed", str(error) or "启动状态未确认")
-                        else:
-                            self._resume_state(job_id, "started")
+                rest = self.status()["job"]["rest"]
+                if rest["state"] == "rested" and not uncertain:
+                    self._resume_state(job_id, "starting")
+                    try:
+                        self._resume()
+                    except Exception as error:
+                        self._resume_state(job_id, "failed", str(error) or "启动状态未确认")
                     else:
-                        reason = "模型更新结果未知，请先检查模型状态" if uncertain else "机器人休息未完成"
-                        self._resume_state(job_id, "skipped", reason)
+                        self._resume_state(job_id, "started")
+                elif uncertain:
+                    self._resume_state(job_id, "skipped", "模型更新结果未知，请先检查模型状态")
+                elif rest["state"] == "policy_disabled":
+                    self._resume_state(job_id, "skipped", f"{rest['error']}，策略保持停用")
                 else:
-                    self._resume_state(job_id, "skipped", "机器人休息未完成")
+                    self._resume_state(job_id, "skipped", rest["error"] or "机器人状态未确认")
             finally:
-                cancelled.set()
                 self.control = None
                 try:
                     if control_entered:

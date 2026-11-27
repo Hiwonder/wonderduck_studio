@@ -27,7 +27,7 @@ export function createServoControls({ request, command, toast, cancel, setBusy, 
       return;
     }
     cancel(); scanning = true; stopRequested = false; setBusy(true);
-    const found = [];
+    const found = [], invalid = [];
     const total = 252;
     let completed = 0;
     const progress = get('scan-progress');
@@ -42,11 +42,13 @@ export function createServoControls({ request, command, toast, cancel, setBusy, 
         progress.title = `正在扫描 ID ${id}`;
         const result = await request('command', { action: 'scan_servo', id });
         if (result.found) { found.push(id); onDiscovery(result.joint); }
+        if (result.error) invalid.push(id);
         completed++;
         progress.textContent = `${completed}/${total} · 发现 ${found.length}`;
       }
       const message = `${stopRequested ? '扫描已停止' : '扫描完成'}：发现 ${found.length} 个舵机，ID ${found.join('、') || '无'}`;
-      toast(message, false, { source: 'servo-scan' });
+      const warning = invalid.length ? `。 ID ${invalid.join('、')} 的回复异常` : '';
+      toast(message + warning, invalid.length > 0, { source: 'servo-scan' });
     } catch (error) {
       const message = `${error.message}；已发现 ${found.length} 个舵机，扫描未完成`;
       toast(message, true, { source: 'servo-scan' });

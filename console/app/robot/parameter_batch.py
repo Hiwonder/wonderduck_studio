@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 
-from app.robot.protocol import BY_ADDRESS, encode_register, integer, joint_id
+from app.robot.protocol import BY_ADDRESS, ServoOperationError, encode_register, integer, joint_id
 
 
 EXCLUDED_ADDRESSES = {5, 6, 31, 33}
@@ -39,60 +39,55 @@ def save_parameters(command, ids, read, write, check, progress):
     total, confirmed, written = len(targets) * len(values), 0, 0
     cancelled = False
     current = '预检'
+    start = min(values)
+    end = max(address + len(data) for address, data in values.items())
     try:
         for device_id in targets:
             check()
             current = f'ID {device_id} · 参数预检'
-            raw = read(device_id, 0, 56, '批量参数预检')
-            if raw[5] != device_id:
-                raise ValueError(f'目标 ID 不一致：读到 {raw[5]}')
-            if raw[55] not in (0, 1):
-                raise ValueError('写保护锁状态无效')
-            lower = int.from_bytes(values.get(9, raw[9:11]), 'little')
-            upper = int.from_bytes(values.get(11, raw[11:13]), 'little')
-            if lower > upper:
-                raise ValueError('最小角度限制不能大于最大角度限制')
-            order = list(values)
-            if lower > int.from_bytes(raw[11:13], 'little') and 11 in order:
-                order.remove(11)
-                order.insert(0, 11)
-            elif upper < int.from_bytes(raw[9:11], 'little') and 9 in order:
-                order.remove(9)
-                order.insert(0, 9)
-            changed = [address for address in order if raw[address:address + len(values[address])] != values[address]]
-            plans.append((device_id, bytes((raw[55],)), changed))
+            try:
+                raw = read(device_id, 0, 56, '批量参数预检')
+                if raw[5] != device_id:
+                    raise ServoOperationError(f'目标 ID 不一致：读到 {raw[5]}')
+                if raw[55] not in (0, 1):
+                    raise ServoOperationError('写保护锁状态无效')
+                lower = int.from_bytes(values.get(9, raw[9:11]), 'little')
+                upper = int.from_bytes(values.get(11, raw[11:13]), 'little')
+                if lower > upper:
+                    raise ServoOperationError('最小角度限制不能大于最大角度限制')
+                order = list(values)
+                if lower > int.from_bytes(raw[11:13], 'little') and 11 in order:
+                    order.remove(11)
+                    order.insert(0, 11)
+                elif upper < int.from_bytes(raw[9:11], 'little') and 9 in order:
+                    order.remove(9)
+                    order.insert(0, 9)
+                changed = [address for address in order if raw[address:address + len(values[address])] != values[address]]
+                plans.append((device_id, bytes((raw[55],)), changed))
+            except ServoOperationError as error:
+                errors.append(f'{current}：{error}')
             progress(phase='预检', total=total, confirmed=0, written=0)
             yield
         for device_id, lock, changed in plans:
-            if not changed or lock == b'\x00':
-                continue
             check()
-            current = f'ID {device_id} · 解除写保护'
-            unlocked.append((device_id, lock))  # Even a failed write may have reached the servo.
-            write(device_id, 55, b'\x00')
-            if read(device_id, 55, 1, '批量解除写保护') != b'\x00':
-                raise RuntimeError('写保护锁未解除')
-            progress(phase='解锁')
-            yield
-        for device_id, _, changed in plans:
-            for address in changed:
-                check()
-                current = f"ID {device_id} · {BY_ADDRESS[address]['name']}"
-                write(device_id, address, values[address])
-                written += 1
-                progress(phase='写入', written=written)
-                yield
-    except InterruptedError as error:
-        cancelled = True
-        errors.append(str(error))
-    except Exception as error:
-        errors.append(f'{current}：{error}')
-    # Verification and cleanup always finish, including after cancellation or write failure.
-    if len(plans) == len(targets):
-        start = min(values)
-        end = max(address + len(data) for address, data in values.items())
-        for device_id, _, _ in plans:
             try:
+                if changed and lock != b'\x00':
+                    current = f'ID {device_id} · 解除写保护'
+                    unlocked.append((device_id, lock))  # The write can reach a servo even if verification fails.
+                    write(device_id, 55, b'\x00')
+                    if read(device_id, 55, 1, '批量解除写保护') != b'\x00':
+                        raise ServoOperationError('写保护锁未解除')
+                    progress(phase='解锁')
+                    yield
+                for address in changed:
+                    check()
+                    current = f"ID {device_id} · {BY_ADDRESS[address]['name']}"
+                    write(device_id, address, values[address])
+                    written += 1
+                    progress(phase='写入', written=written)
+                    yield
+                check()
+                current = f'ID {device_id} · 统一读回'
                 raw = read(device_id, start, end - start, '批量统一读回')
                 for address, expected in values.items():
                     actual = raw[address - start:address - start + len(expected)]
@@ -100,10 +95,16 @@ def save_parameters(command, ids, read, write, check, progress):
                         confirmed += 1
                     else:
                         errors.append(f"ID {device_id} · {BY_ADDRESS[address]['name']}：请求 {int.from_bytes(expected, 'little')}，读回 {int.from_bytes(actual, 'little')}")
-            except Exception as error:
-                errors.append(f'ID {device_id} · 统一读回：{error}')
+            except ServoOperationError as error:
+                errors.append(f'{current}：{error}')
             progress(phase='统一校验', confirmed=confirmed, total=total, written=written)
             yield
+    except InterruptedError as error:
+        cancelled = True
+        errors.append(str(error))
+    except Exception as error:
+        errors.append(f'{current}：{error}')
+    # Restore every lock that was touched, even after cancellation or a bus fault.
     lock_errors = []
     for device_id, lock in unlocked:
         try:

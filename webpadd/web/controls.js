@@ -38,7 +38,7 @@ import { bindMotionInput } from './motion-input.js';
       let studioActive = !embeddedStudio;
       let driveControlReady = false;
       let restPhase = null, motionEnabled = null, motionHomed = null, powerSequence = 0;
-      let powerPending = null, powerAcknowledged = false, powerRequestSequence = 0;
+      let powerPending = null, powerAcknowledged = false, powerRequestSequence = 0, powerTimer = null;
       let pendingFeatureStart = null;
       const skillLabels = { sit_toggle: "坐下 / 站起", ground_pick: "地面拾取", roulade: "翻滚", headstand: "倒立", kick_left: "左踢", kick_right: "右踢" };
       let linearSpeed = 0.30;
@@ -70,7 +70,8 @@ import { bindMotionInput } from './motion-input.js';
         },
       };
       const actionNames = {
-        init: "初始化机器人", prepare_drive: "初始化并启用行走策略", toggle_policy: "启用 / 停止策略", drive_mode: "移动控制",
+        init: "初始化机器人", prepare_drive: "初始化并启用行走策略", toggle_policy: "启用 / 停止策略",
+        enable_policy: "开启策略", disable_policy: "停止策略", drive_mode: "移动控制",
         head_mode: "头部控制", body_pose_mode: "躯干姿态", ground_pick: "地面拾取",
         sit_toggle: "坐下 / 站起", kick_left: "左踢", kick_right: "右踢", roulade: "翻滚",
         headstand: "倒立", home: "回HOME", center_head: "头部回中", rest: "休息卸力", shutdown: "关机", sit_on_loss: "失联后坐下", stop: "停止当前动作", relax: "关闭所有关节扭矩",
@@ -117,6 +118,8 @@ import { bindMotionInput } from './motion-input.js';
       const connection = document.querySelector("#connection");
       const notice = document.querySelector("#notice");
       const motionPower = document.querySelector('#motion-power');
+      const enablePolicy = document.querySelector('[data-action="enable_policy"]');
+      const disablePolicy = document.querySelector('[data-action="disable_policy"]');
       const motionBlockedDialog = document.querySelector('#motion-blocked');
       const shutdownConfirm = document.querySelector('#shutdown-confirm');
       const leftHint = document.querySelector("#left-hint");
@@ -449,6 +452,11 @@ import { bindMotionInput } from './motion-input.js';
       const motionUnavailable = () => powerPending !== null || restPhase !== 'idle'
         || motionEnabled !== true || motionHomed !== true;
       const headCenterUnavailable = () => motionUnavailable() || sticksBlocked() || mode === 'body_pose';
+      function clearPowerRequest() {
+        clearTimeout(powerTimer);
+        powerTimer = powerActionRequestId = powerPending = null;
+        powerAcknowledged = false;
+      }
       const remindMotion = () => {
         if (motionBlockedDialog.open || shutdownConfirm.open) return;
         const text = restPhase === 'resting' || powerPending === 'rest'
@@ -473,6 +481,9 @@ import { bindMotionInput } from './motion-input.js';
         motionPower.querySelector('use').setAttribute('href', icon);
         motionPower.disabled = !connected || powerPending !== null || restPhase === 'resting'
           || motionEnabled === null || motionHomed === null;
+        const policyReady = connected && powerPending === null && restPhase !== 'resting';
+        enablePolicy.disabled = !policyReady || motionEnabled !== false;
+        disablePolicy.disabled = !policyReady || motionEnabled !== true;
         updateSticksAvailability();
       };
       const updatePowerState = status => {
@@ -485,8 +496,8 @@ import { bindMotionInput } from './motion-input.js';
           ? status.motion_homed : null;
         powerSequence = Number.isSafeInteger(status.power_status_sequence) ? status.power_status_sequence : 0;
         if (powerPending && powerAcknowledged && powerSequence > powerRequestSequence) {
-          if (powerPending === 'rest' && ['resting', 'rested', 'failed'].includes(restPhase)) powerPending = null;
-          if (powerPending === 'start' && restPhase === 'idle' && motionEnabled && motionHomed) powerPending = null;
+          if (powerPending === 'rest' && ['resting', 'rested', 'failed'].includes(restPhase)) clearPowerRequest();
+          if (powerPending === 'start' && restPhase === 'idle' && motionEnabled && motionHomed) clearPowerRequest();
         }
         if (wasAvailable && motionUnavailable()) { keys.clear(); zero(); stopAllTracking(false); stopMaze(false); }
         if (previousPending === 'start' && powerPending === null && !motionUnavailable()) setNotice('行走控制已就绪。');
@@ -2164,8 +2175,7 @@ import { bindMotionInput } from './motion-input.js';
       };
       function sendActionRequest(name) {
         const requestId = ++nextActionRequestId;
-        session.send({ type: 'action', name, request_id: requestId });
-        return requestId;
+        return session.send({ type: 'action', name, request_id: requestId }) ? requestId : null;
       }
       const sendAction = (name) => {
         if (!studioActive) return;
@@ -2183,6 +2193,7 @@ import { bindMotionInput } from './motion-input.js';
         if (!controlLeaseReady || !availableSkills.includes(name)
             || activeSkill === name || pendingSkills.has(name)) return;
         const id = sendActionRequest(name);
+        if (id === null) return;
         const timer = setTimeout(() => {
           const pending = pendingSkills.get(name);
           if (pending?.id !== id) return;
@@ -2195,14 +2206,25 @@ import { bindMotionInput } from './motion-input.js';
         return id;
       };
       function requestMotionPower(operation) {
+        keys.clear();
+        zero();
+        const requestId = sendAction(operation === 'rest' ? 'rest' : 'manual_prepare_drive');
+        if (requestId == null) {
+          cancelFeatureStart();
+          setNotice('操作未发送，请重试。', true);
+          return;
+        }
+        powerActionRequestId = requestId;
         powerPending = operation;
         powerAcknowledged = false;
         powerRequestSequence = powerSequence;
-        keys.clear();
-        zero();
         renderMotionPower();
-        powerActionRequestId = sendAction(operation === 'rest' ? 'rest' : 'manual_prepare_drive');
-        return powerActionRequestId;
+        powerTimer = setTimeout(() => {
+          clearPowerRequest();
+          cancelFeatureStart();
+          setNotice(operation === 'rest' ? '等待机器人休息完成超时' : '等待机器人启动超时，请重试。', true);
+          renderMotionPower();
+        }, 30000);
       }
       function cancelFeatureStart() {
         if (!pendingFeatureStart) return;
@@ -2225,7 +2247,7 @@ import { bindMotionInput } from './motion-input.js';
         } else if (!powerPending && restPhase !== 'resting' && restPhase !== null
             && motionEnabled !== null && motionHomed !== null && !pending.requested) {
           pending.requested = true;
-          pending.requestId = requestMotionPower('start');
+          requestMotionPower('start');
           updateMazeButton();
         }
       }
@@ -2233,15 +2255,10 @@ import { bindMotionInput } from './motion-input.js';
         if (!studioActive || !state.active || !session.open || pendingFeatureStart) return;
         if (!motionUnavailable()) { start(); return; }
         if (restPhase === null || motionEnabled === null || motionHomed === null) { remindMotion(); return; }
-        const pending = { page: selectedPage, start, requested: false, requestId: null };
+        const pending = { page: selectedPage, start, requested: false };
         pending.timer = setTimeout(() => {
           if (pendingFeatureStart !== pending) return;
-          if (pending.requested && powerPending === 'start'
-              && (powerActionRequestId === pending.requestId || powerActionRequestId === null)) {
-            powerPending = powerActionRequestId = null;
-            powerAcknowledged = false;
-            renderMotionPower();
-          }
+          if (pending.requested && powerPending === 'start') return;
           cancelFeatureStart();
           setNotice('等待机器人启动超时，请重试。', true);
         }, 30000);
@@ -2662,7 +2679,7 @@ import { bindMotionInput } from './motion-input.js';
             if (powerPending === operation) {
               powerAcknowledged = message.accepted;
               if (!message.accepted) {
-                powerPending = null;
+                clearPowerRequest();
                 cancelFeatureStart();
               }
               else powerRequestSequence = powerSequence;
@@ -2700,9 +2717,7 @@ import { bindMotionInput } from './motion-input.js';
             updateActionAvailability(controlLeaseReady);
           }
           if (powerActionRequestId !== null && message.request_id === powerActionRequestId) {
-            powerActionRequestId = null;
-            powerPending = null;
-            powerAcknowledged = false;
+            clearPowerRequest();
             cancelFeatureStart();
             renderMotionPower();
           }
@@ -2724,8 +2739,7 @@ import { bindMotionInput } from './motion-input.js';
         window.__visionControlToken = null;
         window.dispatchEvent(new Event('vision-control-token'));
         driveControlReady = false;
-        powerActionRequestId = null;
-        powerPending = null; powerAcknowledged = false;
+        clearPowerRequest();
         restPhase = motionEnabled = motionHomed = null;
         cancelFeatureStart();
         if (colorPresetPending) {

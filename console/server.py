@@ -25,7 +25,7 @@ from app.models.model_management import ModelManager, ModelUncertainError
 from app.models.online_update import OnlineModelUpdater, device_versions
 from app.models.update_control import UpdateControl
 from app.robot.controller import Controller, DemoHardware
-from app.robot.protocol import REGISTERS, ACCESSORY_SERVO_IDS
+from app.robot.protocol import REGISTERS, ACCESSORY_SERVO_IDS, ServoOperationError
 from app.robot.robotd_state import query_robotd
 from app.robot.studio import WORKSPACES
 from app.sensors.camera import Camera
@@ -397,12 +397,12 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("模型文件名无效")
                 self.connection.settimeout(60)
                 try:
-                    with self.model_operation():
+                    with self.model_operation() as (before_apply, policy_restarted):
                         result = manager.apply(slots[0], body, length, names[0] if names else None,
-                                               before_apply=self.server.online_model_updater._require_rest)
+                                               before_apply=before_apply)
                 finally:
                     self.connection.settimeout(10)
-                self.send_json(result)
+                self.send_json({**result, "policy_restarted": policy_restarted})
                 return
             maximum = 16 * 1024 * 1024 if path in ("/api/action-document", "/api/action-playback") else 65536
             if not 0 < length <= maximum:
@@ -423,10 +423,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/models/restore":
                 manager = self.model_manager()
-                with self.model_operation():
-                    result = manager.restore(command.get("slot"),
-                                             before_apply=self.server.online_model_updater._require_rest)
-                self.send_json(result)
+                with self.model_operation() as (before_apply, policy_restarted):
+                    result = manager.restore(command.get("slot"), before_apply=before_apply)
+                self.send_json({**result, "policy_restarted": policy_restarted})
                 return
             if path == "/api/models/online":
                 updater = self.online_model_updater()
@@ -577,6 +576,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_post_error(dict(error="同名文件已存在，请修改名称"), 409, body)
         except ModelUncertainError as error:
             self.send_post_error(dict(error=str(error), uncertain=True), 503, body)
+        except ServoOperationError as error:
+            self.send_post_error(dict(error=str(error), servo_error=True), 409, body)
         except (FutureTimeout, RuntimeError, OSError) as error:
             self.send_post_error(dict(error=str(error) or "操作超时；执行结果未知，请读取确认"), 503, body)
 

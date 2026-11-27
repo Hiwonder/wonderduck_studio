@@ -232,11 +232,6 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     visibility.replaceChildren();
     const register = context().info?.registers.find(item => item.address === 31);
     const ordered = [...joints];
-    for (const [index, joint] of ordered.entries()) {
-      if (joint.discovered && ACCESSORY_SERVO_IDS.includes(joint.id)) {
-        ordered[index] = { ...joint, label: '舵机' };
-      }
-    }
     if (previousOrder.size) ordered.sort((a, b) => (previousOrder.get(a.id) ?? Infinity) - (previousOrder.get(b.id) ?? Infinity) || a.id - b.id);
     for (const joint of ordered) {
       const row = makeRow(joint, register);
@@ -390,7 +385,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     operation++;
     update();
     try {
-      const excluded = id => locked.has(id) || !!rows.get(id)?.element.hidden || !servo(id)?.valid;
+      const excluded = id => locked.has(id) || !!rows.get(id)?.element.hidden;
       const joints = context().info.joints;
       const lockedIds = joints.filter(joint => locked.has(joint.id)).map(joint => joint.id);
       let command = { action };
@@ -405,14 +400,17 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
         command = { action: 'run_targets', targets: joints.map(joint => [joint.id, excluded(joint.id) ? null : 2048]) };
       }
       const result = await request('command', command);
-      if (!result.verified) throw new Error(`操作未全部确认：${JSON.stringify(result.results)}`);
       if (result.targets) for (const [id, value] of Object.entries(result.targets)) targets.set(Number(id), value);
       const message = action === 'center_all' ? '中位目标已下发并读回' : action === 'home_all'
         ? 'Home 目标已下发并读回' : command.action === 'release_unlocked'
           ? lockedIds.length === joints.length ? '全部舵机均已上锁，未执行卸力' : '未锁定舵机已卸力并读回'
           : '全部卸力已读回';
-      toast(message);
-      if (action !== 'release_all') onPose(result.targets);
+      if (action !== 'release_all' && result.targets) onPose(result.targets);
+      const failures = Object.entries(result.errors || result.results || {})
+        .filter(([, outcome]) => outcome !== '已读回关闭')
+        .map(([id, outcome]) => `ID ${id}：${outcome}`);
+      toast(result.verified ? message
+        : `操作未全部确认，已读回 ${Object.keys(result.targets || {}).length} 个目标${failures.length ? `。 ${failures.join('、')}` : ''}`, !result.verified);
     } catch (error) { toast(error.message, true); }
     finally { operation--; update(); }
   }
@@ -461,68 +459,85 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
   async function readOffsets() {
     if (operation || offsetRead || offsetWriting || context().state?.action_playback?.state === 'playing') throw new Error('设备正在执行其他操作');
     cancel(); operation++; update();
-    const result = {};
+    const values = {}, errors = {};
     try {
       for (const [id, row] of rows) {
-        if (row.element.hidden || !servo(id)?.valid) continue;
-        const data = await request('command', { action: 'registers', id });
-        showOffsetRegister(row, data.registers.find(item => item.address === 31));
-        row.revision++;
-        result[id] = row.offsetValue;
+        if (row.element.hidden) continue;
+        if (!servo(id)?.valid) {
+          errors[id] = '未连接或数据已过期';
+          continue;
+        }
+        try {
+          const data = await request('command', { action: 'registers', id });
+          showOffsetRegister(row, data.registers.find(item => item.address === 31));
+          row.revision++;
+          values[id] = row.offsetValue;
+        } catch (error) {
+          if (!error.servoError) throw error;
+          errors[id] = error.message;
+        }
       }
-      return result;
+      return { values, errors };
     } finally { operation--; update(); }
   }
 
   async function applyOffsets(values) {
     const { info, state, armed, fresh } = context();
     if (!armed || !fresh || info?.readonly || operation || state?.action_playback?.state === 'playing') throw new Error('设备尚未就绪');
-    const allEntries = Object.entries(values);
+    const entries = Object.entries(values);
     const register = info.registers.find(item => item.address === 31);
-    if (!allEntries.length || allEntries.some(([id, value]) => !rows.has(Number(id)) || !Number.isInteger(value) || value < register.minimum || value > register.maximum)) {
-      throw new Error('偏差文件包含未知舵机或无效数值');
+    if (!entries.length || entries.some(([, value]) => !Number.isInteger(value) || value < register.minimum || value > register.maximum)) {
+      throw new Error('偏差文件包含无效数值');
     }
-    const entries = allEntries.filter(([id]) => servo(Number(id))?.valid);
-    if (!entries.length) throw new Error('没有可用的舵机偏差');
-    const excludedEntry = entries.find(([id]) => locked.has(Number(id)) || rows.get(Number(id)).element.hidden);
-    if (excludedEntry) throw new Error(`ID ${excludedEntry[0]} 已锁定或隐藏，请先启用`);
-    if (entries.some(([id]) => servo(Number(id))?.torque !== 1)) throw new Error('请先开启所选舵机扭矩');
     cancel(); operation++; update();
-    let completed = 0;
+    const confirmed = {}, errors = {}, ready = [];
     try {
       for (const [key, value] of entries) {
         const id = Number(key), row = rows.get(id);
-        if (row.offsetValue === null) {
-          const data = await request('command', { action: 'registers', id });
-          showOffsetRegister(row, data.registers.find(item => item.address === 31));
+        if (!row || !servo(id)?.valid || locked.has(id) || row.element.hidden || servo(id)?.torque !== 1) {
+          errors[id] = '未连接、已锁定、隐藏或扭矩未开启';
+          continue;
         }
-        const { min, max } = row.offsetSlider;
-        if (value < Number(min) || value > Number(max)) {
-          throw new Error(`ID ${id} 的位置校正须在 ${min}～${max} 步之间`);
+        try {
+          if (row.offsetValue === null) {
+            const data = await request('command', { action: 'registers', id });
+            showOffsetRegister(row, data.registers.find(item => item.address === 31));
+          }
+          const { min, max } = row.offsetSlider;
+          if (value < Number(min) || value > Number(max)) {
+            errors[id] = `位置偏差须在 ${min}～${max} 步之间`;
+            continue;
+          }
+          ready.push([id, value]);
+        } catch (error) {
+          if (!error.servoError) throw error;
+          errors[id] = error.message;
         }
       }
-      for (const [key, value] of entries) {
-        const id = Number(key), row = rows.get(id);
+      for (const [id, value] of ready) {
+        const row = rows.get(id);
         try {
           const result = await request('command', { action: 'write_register', id, address: 31, value });
           if (!result.verified) throw new Error('写入未确认');
           row.offsetValue = value; row.offsetError = ''; row.revision++;
           syncInputs(row.offsetSlider, row.offsetInput, value);
-          completed++;
+          confirmed[id] = value;
         } catch (error) {
           row.offsetValue = null; row.nextRead = 0; row.revision++;
-          throw new Error(`ID ${id} 写入失败，已确认 ${completed} 个；后续未写入：${error.message}`);
+          if (!error.servoError) {
+            throw new Error(`ID ${id} 写入失败，已确认 ${Object.keys(confirmed).length} 个：${error.message}`);
+          }
+          errors[id] = error.message;
         }
       }
-      return completed;
+      return { values: confirmed, errors };
     } finally { operation--; update(); }
   }
 
   function offsetValues() {
     const values = {};
     for (const [id, row] of rows) {
-      if (row.element.hidden || !servo(id)?.valid) continue;
-      if (!Number.isInteger(row.offsetValue)) throw new Error(`ID ${id} 的偏差尚未读取`);
+      if (row.element.hidden || !servo(id)?.valid || !Number.isInteger(row.offsetValue)) continue;
       values[id] = Number(row.offsetSlider.value);
     }
     if (!Object.keys(values).length) throw new Error('没有可保存的舵机偏差');
@@ -539,6 +554,6 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
 
   return { reset, update, cancel, flushTarget: liveTarget.flush, positions, setTargets, setPlaybackPending, holdForFrame, layout: cardLayout.layout, setLayout: cardLayout.setLayout, readOffsets, applyOffsets, offsetValues,
     lockedIds: () => (context().info?.joints || []).map(joint => joint.id)
-      .filter(id => locked.has(id) || rows.get(id)?.element.hidden || !servo(id)?.valid),
+      .filter(id => locked.has(id) || rows.get(id)?.element.hidden),
     scale: cardLayout.scale };
 }

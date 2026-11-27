@@ -25,10 +25,12 @@ export function createServoDebugMode({ request, toast, confirmAction, context })
       }
       const result = await request('command', { action: 'servo_debug', enabled });
       const expected = enabled ? 'on' : 'off';
-      if (result.servo_debug !== expected) throw new Error('舵机调试模式状态未确认');
+      const skipped = [...new Set([...Object.keys(result.errors || {}), ...(result.unavailable_ids || []).map(String)])];
+      const warning = skipped.length ? `，ID ${skipped.join('、')} 未确认` : '';
+      if (result.servo_debug !== expected) throw new Error(`舵机调试模式状态未确认${warning}`);
       status = result.servo_debug;
       if (context().state) context().state.servo_debug = status;
-      toast(enabled ? '舵机调试模式已开启，P=66' : '舵机调试模式已关闭，P=15');
+      toast((enabled ? '舵机调试模式已开启，P=66' : '舵机调试模式已关闭，P=15') + warning, !!warning);
     } catch (error) {
       try {
         const current = await request('state');

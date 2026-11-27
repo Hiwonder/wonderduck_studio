@@ -133,7 +133,7 @@ async function request(path, body, timeoutMs = null, signal = null) {
       await refreshSession();
       throw new Error('服务已重启，控制会话正在恢复');
     }
-    throw Object.assign(new Error(data.error || `HTTP ${response.status}`), { status: response.status });
+    throw Object.assign(new Error(data.error || `HTTP ${response.status}`), { status: response.status, servoError: data.servo_error === true });
   }
   if (path === 'state') {
     // The server computes each age after acquiring its snapshot; request wait time is not sample age.

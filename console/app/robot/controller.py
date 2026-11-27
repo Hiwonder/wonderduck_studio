@@ -12,7 +12,8 @@ from app.paths import CONSOLE_ROOT
 from app.actions.action_documents import document_from_json
 from app.actions.action_playback import ActionPlayback, action_frames
 from app.robot.parameter_batch import ParameterBatch, save_parameters
-from app.robot.protocol import (IDS, POSE_SPEED, ServoLayout, encode_register, integer,
+from app.robot.protocol import (ACCESSORY_ACTION_LIMITS, ACCESSORY_SERVO_IDS, IDS, POSE_SPEED, ServoLayout,
+                                ServoOperationError, encode_register, integer,
                                 motion_targets, parse_registers, pose_targets,
                                 register_definition, scan_id, servo_faults, target_values)
 from app.sensors.calibration import Calibration
@@ -83,7 +84,10 @@ class DemoHardware(ServoLayout):
         angle = math.sin(t * .7) * .23
         servos = []
         for joint in self.joints if include_servos else ():
-            b = self.raw[joint["id"]]
+            b = self.raw.get(joint["id"])
+            if b is None:
+                servos.append(dict(joint, online=False, valid=False, error="未连接", observed_monotonic=sampled))
+                continue
             raw = int.from_bytes(b[56:58], "little")
             degrees = 180 - raw * 360 / 4096
             servos.append(dict(joint, online=True, valid=raw <= 4095, raw=raw, degrees=degrees,
@@ -113,10 +117,15 @@ class DemoHardware(ServoLayout):
     def set_temporary_position_p_gain(self, value, ids=None):
         if type(value) is not int or value not in (15, 66):
             raise ValueError("临时位置 P 必须为 15 或 66")
-        for device_id in self.ids if ids is None else ids:
+        failures = {}
+        for device_id in self.raw if ids is None else ids:
+            if device_id not in self.raw:
+                failures[device_id] = "未连接"
+                continue
             self.raw[device_id][55] = 1
             self.offset_lock_cache[device_id] = b'\x01'
             self.raw[device_id][21] = value
+        return failures
 
     def execute(self, command):
         from app.robot.protocol import encode_target, integer, joint_id, BY_ADDRESS
@@ -145,6 +154,7 @@ class DemoHardware(ServoLayout):
         if action in ("center_all", "home_all", "run_targets"):
             targets = (motion_targets(command.get("targets"), self.ids, self.full_servo_range)
                        if action == "run_targets" else pose_targets(action, self.ids, self.home_policy))
+            targets = {device_id: raw for device_id, raw in targets.items() if device_id in self.raw}
             for device_id in targets:
                 b = self.raw[device_id]
                 if b[33] != 0:
@@ -165,6 +175,8 @@ class DemoHardware(ServoLayout):
                     b[40] = 0
             return dict(verified=True)
         device_id = joint_id(command.get("id"), self.ids)
+        if device_id not in self.raw:
+            raise ServoOperationError(f"ID {device_id} 未连接")
         b = self.raw[device_id]
         if action == "registers":
             self.offset_lock_cache[device_id] = b[55]
@@ -212,14 +224,16 @@ class DemoHardware(ServoLayout):
             r = register_definition(address, b[33], servo_version=tuple(b[3:5]))
             value = command.get("value")
             data = encode_register(r, value)
-            if address == 5 and value != device_id and value in (*self.ids, 200):
+            if address == 5 and value != device_id and (value in self.raw or value == 200):
                 raise ValueError("总线设备 ID 必须唯一")
             b[address:address + r["size"]] = data
-            if address == 5:
+            if address == 5 and value != device_id:
                 self.raw[value] = self.raw.pop(device_id)
-                self.update_layout(device_id, new_id=value)
+                self.offset_lock_cache.pop(device_id, None)
+                self.offset_lock_cache.pop(value, None)
+                self.record_id_change(device_id, value)
             elif address == 6:
-                self.update_layout(device_id, baud=value)
+                self.baud_codes[device_id] = value
             elif address == 40 and value == 128:
                 b[56:58] = (2048).to_bytes(2, "little")
                 b[40] = 0
@@ -249,6 +263,7 @@ class DemoHardware(ServoLayout):
                 b[42:44] = b[56:58]
                 b[40] = 1
         self.action_motion_reset = set(ids)
+        return {}
 
     def move_action_frame(self, targets, duration_ms):
         duration = integer(duration_ms, 1, 30000, "动作时长").to_bytes(2, "little")
@@ -375,7 +390,7 @@ class Controller:
             raise ValueError("未知操作")
         if (action in {"torque", "move", "move_direct", "write_register", "offset_direct"}
                 and command.get("id") in self.unavailable_servo_ids()):
-            raise ValueError(f"ID {command.get('id')} 未连接或数据已过期")
+            raise ServoOperationError(f"ID {command.get('id')} 未连接或数据已过期")
         if action == "release_all":
             return self.enqueue_emergency_release()
         if action == "servo_debug":
@@ -498,54 +513,33 @@ class Controller:
     def _set_servo_debug(self, enabled):
         with self.lock:
             previous = self.servo_debug
-        if (enabled and previous == "on") or (not enabled and previous == "off"):
+            pending = set(self.servo_debug_ids)
+        if (enabled and previous == "on") or (not enabled and previous == "off" and not pending):
             return dict(servo_debug=previous)
-        if enabled and previous == "restore_failed":
-            raise RuntimeError("位置 P 尚未恢复，请先关闭调试模式")
         if self.hardware is None:
             if previous != "off":
                 with self.lock:
                     self.servo_debug = "restore_failed"
             raise RuntimeError("串口未就绪，无法设置临时位置 P")
-        ids = None
-        if enabled:
-            unavailable = self.unavailable_servo_ids()
-            if self.partial_maintenance or unavailable:
-                ids = [joint["id"] for joint in self.joints if joint["id"] not in unavailable]
-                if not ids:
-                    raise RuntimeError("没有可用的舵机")
-        elif self.servo_debug_ids:
-            ids = list(self.servo_debug_ids)
-        def set_gain(value):
-            if ids is None:
-                self.hardware.set_temporary_position_p_gain(value)
-            else:
-                self.hardware.set_temporary_position_p_gain(value, ids=ids)
+        if enabled and previous == "restore_failed":
+            raise RuntimeError("请先关闭调试模式以确认此前的位置 P 恢复结果")
+        unavailable = self.unavailable_servo_ids() if enabled else set()
+        ids = ([joint["id"] for joint in self.joints if joint["id"] not in unavailable]
+               if enabled else sorted(pending))
+        if enabled and not ids:
+            raise RuntimeError("没有可用的舵机")
         with self.lock:
             self.servo_debug = "restore_failed"
-            if enabled and ids is not None:
-                self.servo_debug_ids = set(ids)
-        try:
-            set_gain(66 if enabled else 15)
-        except SerialOperationCancelled:
-            # Leave restoration pending. The next bus operation must be release.
-            raise
-        except Exception as error:
-            if not enabled:
-                raise RuntimeError(f"恢复位置 P=15 失败：{error}") from error
-            try:
-                set_gain(15)
-            except Exception as restore_error:
-                raise RuntimeError(f"开启调试模式失败：{error}；恢复位置 P=15 失败：{restore_error}") from error
-            with self.lock:
-                self.servo_debug = "off"
-                self.servo_debug_ids.clear()
-            raise RuntimeError(f"开启调试模式失败，已恢复位置 P=15：{error}") from error
+            if enabled:
+                self.servo_debug_ids.update(ids)
+        failures = self.hardware.set_temporary_position_p_gain(66 if enabled else 15, ids=ids) or {}
         with self.lock:
-            self.servo_debug = "on" if enabled else "off"
-            if not enabled:
-                self.servo_debug_ids.clear()
-            return dict(servo_debug=self.servo_debug)
+            if enabled:
+                self.servo_debug = "on" if len(failures) < len(ids) else "off"
+            else:
+                self.servo_debug_ids.intersection_update(failures)
+                self.servo_debug = "off"
+            return dict(servo_debug=self.servo_debug, errors=failures, unavailable_ids=sorted(unavailable))
 
     def parameter_task(self, command, client):
         operation = command.get('operation')
@@ -600,12 +594,22 @@ class Controller:
         locked = command.get("locked_ids", [])
         if not isinstance(locked, list) or any(type(item) is not int for item in locked):
             raise ValueError("锁定舵机列表无效")
-        known_ids = {joint["id"] for joint in self.joints} | (set(IDS) if self.partial_maintenance else set())
+        detected_ids = {joint["id"] for joint in self.joints}
+        known_ids = detected_ids | set(ACCESSORY_SERVO_IDS)
+        if self.partial_maintenance:
+            known_ids.update(IDS)
         if not set(locked).issubset(known_ids):
             raise ValueError("锁定列表包含未知舵机")
-        locked = list(set(locked) | self.unavailable_servo_ids()
-                      | (set(IDS) - {joint["id"] for joint in self.joints} if self.partial_maintenance else set()))
-        available_frames = action_frames(document, [joint["id"] for joint in self.joints], locked)
+        unavailable = self.unavailable_servo_ids() | (known_ids - detected_ids)
+        frames = action_frames(document, known_ids, locked)
+        errors = {device_id: "未连接或数据已过期" for _, targets in frames
+                  for device_id in targets if device_id in unavailable}
+        available_frames = [(duration, {device_id: target for device_id, target in targets.items()
+                                       if device_id not in errors}) for duration, targets in frames]
+        for _, targets in available_frames:
+            for device_id in targets.keys() & ACCESSORY_ACTION_LIMITS.keys():
+                minimum, maximum = ACCESSORY_ACTION_LIMITS[device_id]
+                integer(targets[device_id], minimum, maximum, f"ID {device_id} 动作位置")
         if not any(targets for _, targets in available_frames):
             raise ValueError("动作没有可用的舵机")
         if operation == "send_frame":
@@ -619,10 +623,10 @@ class Controller:
         with self.action_request_lock:
             if generation != self.action_generation or self.closing.is_set():
                 raise RuntimeError("动作播放请求已取消")
-            queued = (dict(action="send_action_frame", duration_ms=duration, targets=targets, generation=generation)
+            queued = (dict(action="send_action_frame", duration_ms=duration, targets=targets, generation=generation, errors=errors)
                       if operation == "send_frame" else
                       dict(action="start_action_playback", frames=available_frames, loop=command.get("loop", False),
-                           generation=generation))
+                           generation=generation, errors=errors))
             self.commands.put_nowait((queued, client, time.monotonic() + 3, future))
         return future
 
@@ -761,7 +765,7 @@ class Controller:
                                 raise RuntimeError("动作播放请求已取消")
                             with self.lock:
                                 self.maintenance_voltage_ready = False
-                            result = self.playback.start(command["frames"], client, command["loop"])
+                            result = self.playback.start(command["frames"], client, command["loop"], command["errors"])
                     elif command["action"] == "send_action_frame":
                         with self.action_request_lock:
                             if command["generation"] != self.action_generation:
@@ -773,12 +777,19 @@ class Controller:
                         targets = command["targets"]
                         with self.lock:
                             self.maintenance_voltage_ready = False
-                        self.hardware.prepare_action_playback(list(targets))
+                        failures = dict(command["errors"])
+                        failures.update(self.hardware.prepare_action_playback(list(targets)) or {})
+                        targets = {device_id: target for device_id, target in targets.items()
+                                   if device_id not in failures}
+                        if not targets:
+                            raise RuntimeError("本帧没有可用的舵机：" + "；".join(
+                                f"ID {device_id} · {error}" for device_id, error in failures.items()))
                         with self.action_request_lock:
                             if command["generation"] != self.action_generation:
                                 raise RuntimeError("动作帧请求已取消")
                         self._check_serial_interrupt()
                         result = self.hardware.move_action_frame(targets, command["duration_ms"])
+                        result["errors"] = failures
                         if not result.get("sent"):
                             raise RuntimeError("动作帧未发送完成")
                         with self.lock:
@@ -792,6 +803,7 @@ class Controller:
                         continue
                     else:
                         actual_command = command
+                        skipped = {}
                         if command["action"] in ("center_all", "home_all", "run_targets"):
                             unavailable = self.unavailable_servo_ids()
                             if unavailable:
@@ -799,15 +811,20 @@ class Controller:
                                 values = (target_values(command.get("targets"), ids, 4096 if self.full_servo_range else 4095)
                                           if command["action"] == "run_targets" else
                                           pose_targets(command["action"], ids, self.hardware.home_policy))
+                                skipped = {device_id: "未连接或数据已过期"
+                                           for device_id in unavailable if values.get(device_id) is not None}
+                                if skipped and not any(device_id not in unavailable and value is not None
+                                                       for device_id, value in values.items()):
+                                    raise ValueError("没有可用的目标舵机：" + "、".join(map(str, sorted(skipped))))
                                 actual_command = dict(action="run_targets", targets=[
                                     [device_id, None if device_id in unavailable else values.get(device_id)] for device_id in ids])
                         result = self.hardware.execute(actual_command)
+                        if skipped:
+                            result.setdefault("errors", {}).update(skipped)
+                            result["verified"] = False
                     if command["action"] == "set_imu_source":
                         self.imu_source = result["imu_source"]
-                    if command["action"] in ("center_all", "home_all") and result.get("verified"):
-                        with self.lock:
-                            self.pose_targets.update(result["targets"])
-                    elif command["action"] == "run_targets" and result.get("verified"):
+                    if command["action"] in ("center_all", "home_all", "run_targets") and result.get("targets"):
                         with self.lock:
                             self.pose_targets.update(result["targets"])
                     elif command["action"] == "move_direct" and result.get("sent"):
@@ -822,6 +839,14 @@ class Controller:
                             self.maintenance_voltage_ready = False
                     elif (command["action"] == "write_register" and result.get("address") == 5
                           and result.get("verified") and result["id"] != result["previous_id"]):
+                        changed_ids = {result["previous_id"], result["id"]}
+                        with self.lock:
+                            for device_id in changed_ids:
+                                self.pose_targets.pop(device_id, None)
+                            servos = [servo for servo in self.state.get("servos", []) if servo["id"] not in changed_ids]
+                            self.state = dict(self.state, servos=servos)
+                            self.maintenance_voltage_ready = False
+                        next_sample = time.monotonic()
                         result["joints"] = [dict(joint) for joint in self.joints]
                     if command["action"] == "registers":
                         result["registers"] = parse_registers(bytes(result["raw"]))
@@ -907,10 +932,12 @@ class Controller:
                 self.playback.cancel("服务关闭")
             if not self.stop.is_set():
                 with self.lock:
-                    needs_restore = self.servo_debug != "off" or bool(self.servo_debug_pending)
+                    needs_restore = self.servo_debug != "off" or bool(self.servo_debug_pending or self.servo_debug_ids)
                 if needs_restore:
                     self.batch.cancel("服务关闭")
-                    self._finish_servo_debug(self._queue_servo_debug(False, None, internal=True))
+                    result = self._finish_servo_debug(self._queue_servo_debug(False, None, internal=True))
+                    if result.get("errors"):
+                        logging.warning("close with temporary position P unconfirmed: %s", result["errors"])
                 self.stop.set()
             self.worker.join(timeout=8)
             if self.worker.is_alive():

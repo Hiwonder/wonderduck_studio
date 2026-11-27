@@ -84,15 +84,31 @@ def optional_servo_observations(rows, now):
         if row.get("valid") is not True or type(raw) is not int or not 0 <= raw <= 4095:
             continue
         try:
-            sampled, _, _ = device_observation(row, now)
+            sampled, observed, _ = device_observation(row, now)
         except ValueError:
             continue
         item = dict(id=row["id"], online=True, valid=True, raw=raw,
-                    degrees=raw_to_degrees(raw), sampled_monotonic=sampled)
+                    degrees=raw_to_degrees(raw), sampled_monotonic=sampled, observed_monotonic=observed,
+                    diagnostics_available=True, encoder_reconstructed=False)
         for key in ("speed_rad_s", "load_percent", "voltage", "temperature"):
             value = row.get(key)
             if type(value) in (int, float) and math.isfinite(value):
                 item[key] = value
+        for key in ("torque", "packet_status", "register_status"):
+            value = row.get(key)
+            if type(value) is int and 0 <= value <= 255:
+                item[key] = value
+        if "packet_status" in item and "register_status" in item:
+            item["status"] = item["packet_status"] | item["register_status"]
+            item["faults"] = servo_faults(item["status"])
+        if type(row.get("moving")) is bool:
+            item["moving"] = row["moving"]
+        try:
+            item["configuration"] = device_configuration(row.get("configuration"))
+            if isinstance(row.get("configuration_error"), str):
+                item["configuration_error"] = row["configuration_error"]
+        except ValueError as error:
+            item["configuration_error"] = str(error)
         result[row["id"]] = item
     return list(result.values())
 
