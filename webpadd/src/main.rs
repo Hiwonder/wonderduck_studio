@@ -143,7 +143,7 @@ struct AppState {
     gamepad_idle_path: PathBuf,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy)]
 struct Capabilities {
     tof_enabled: bool,
     head_imu_enabled: bool,
@@ -164,6 +164,7 @@ impl Capabilities {
 #[derive(Debug, Clone, Default, Serialize)]
 struct BrowserStatus {
     robotd_connected: bool,
+    wing_flap_enabled: bool,
     #[serde(skip)]
     head_feedback: Option<([u16; 2], [u16; 2])>,
     #[serde(skip)]
@@ -175,6 +176,8 @@ struct BrowserStatus {
     skills: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_skill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sitting: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_skill_timeout: Option<proto::SkillTimeout>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -429,6 +432,7 @@ async fn main() -> ExitCode {
         }
     };
     let mut control = ControlState::default();
+    let capabilities = Capabilities::from_environment();
     let audio = audio::AudioVolume::new(&params.audio.device);
     let settings = match settings::Store::load(&args.config) {
         Ok(settings) => settings,
@@ -516,7 +520,7 @@ async fn main() -> ExitCode {
     let recorder = Arc::new(audio_record::Recorder::new(params.audio.capture_device(), Arc::clone(&voice), recording_dir));
     let state = AppState {
         socket: args.socket.clone(),
-        capabilities: Capabilities::from_environment(),
+        capabilities,
         control: Arc::new(Mutex::new(control)),
         commands: commands.clone(),
         status: status_rx,
@@ -605,7 +609,7 @@ fn router(state: AppState, media_port: u16) -> Router {
         .route("/health", get(browser_control_health))
         .route(
             "/",
-            get(move || async move {
+            get(move |State(state): State<AppState>| async move {
                 Html(PAGE.replace("{{MEDIA_PORT}}", &media_port.to_string())
                     .replace("{{APP_VERSION}}", env!("CARGO_PKG_VERSION"))
                     .replace("{{HEAD_PITCH_MIN}}", &proto::HEAD_PITCH_POSITION_RANGE.start().to_string())
@@ -613,11 +617,22 @@ fn router(state: AppState, media_port: u16) -> Router {
                     .replace("{{GAMEPAD_IDLE_MIN}}", &robotd_params::gamepad_idle::Settings::MIN.to_string())
                     .replace("{{GAMEPAD_IDLE_MAX}}", &robotd_params::gamepad_idle::Settings::MAX.to_string())
                     .replace("{{GAMEPAD_IDLE_DEFAULT}}", &robotd_params::gamepad_idle::Settings::default().minutes.to_string())
+                    .replace("{{WING_FLAP_ENABLED}}", if state.status.borrow().wing_flap_enabled { "true" } else { "false" })
+                    .replace("{{WING_FLAP_MIN_MS}}", &proto::WingFlapParams::MIN_MS.to_string())
+                    .replace("{{WING_FLAP_MAX_MS}}", &proto::WingFlapParams::MAX_MS.to_string())
+                    .replace("{{WING_FLAP_SLOW_MS}}", &proto::WingFlapParams::SLOW_MS.to_string())
+                    .replace("{{WING_FLAP_FAST_MS}}", &proto::WingFlapParams::FAST_MS.to_string())
                     .replace("{{TOF_ENABLED}}", if capabilities.tof_enabled { "true" } else { "false" }))
             }),
         )
         .route("/control", get(control_upgrade))
-        .route("/capabilities", get(move || async move { axum::Json(capabilities) }))
+        .route("/capabilities", get(|State(state): State<AppState>| async move {
+            axum::Json(serde_json::json!({
+                "tof_enabled": state.capabilities.tof_enabled,
+                "head_imu_enabled": state.capabilities.head_imu_enabled,
+                "wing_flap_enabled": state.status.borrow().wing_flap_enabled,
+            }))
+        }))
         .route("/objects", get(object_detection::upgrade))
         .route("/object-models", get(object_detection::available_models))
         .route("/colors", get(color_detection::upgrade))
@@ -851,6 +866,7 @@ async fn control_loop(
         let (actions, generation, owner, release) = {
             let mut control = state.control.lock().await;
             control.roller = state.status.borrow().uses_roller();
+            control.wing_flap_supported = state.status.borrow().wing_flap_enabled;
             let now = Instant::now();
             control.update_head_stick(&state.status.borrow(), now);
             let (mut calls, actions) = control.tick(now, *connected.borrow());

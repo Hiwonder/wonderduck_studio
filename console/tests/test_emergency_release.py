@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 from app.robot.controller import Controller, DemoHardware, SerialOperationCancelled
 from app.robot.hardware import Hardware
+from app.robot.protocol import IDS
 from app.robot.studio import StudioController
 from server import Handler
 
@@ -64,6 +65,7 @@ class EmergencyReleaseTests(unittest.TestCase):
         self.studio = StudioController.__new__(StudioController)
         self.studio.lock = threading.RLock()
         self.studio.controller = self.controller
+        self.studio._action_position_limits = {}
         self.studio.owner = "test"
         self.studio.workspace = "action"
         self.studio.lease = SimpleNamespace(alive=lambda: True)
@@ -82,6 +84,16 @@ class EmergencyReleaseTests(unittest.TestCase):
         self.studio._sync_status = lambda: None
         self.pool = ThreadPoolExecutor(max_workers=3)
         self.addCleanup(self.pool.shutdown)
+
+    def test_action_card_limits_survive_missing_health_response(self):
+        bounds = {str(device_id): [1000, 3000] for device_id in IDS}
+        bounds["13"] = [1252, 2889]
+        bounds["23"] = [1207, 2844]
+        self.studio.action_position_limits({"action_position_limits": bounds})
+        self.assertEqual(self.studio.action_position_limits({})[13], (1252, 2889))
+        joints = {joint["id"]: joint for joint in self.studio.snapshot("test")["joints"]}
+        self.assertEqual(joints[13]["encoder_limits"], (1252, 2889))
+        self.assertEqual(joints[23]["encoder_limits"], (1207, 2844))
 
     def test_http_release_and_status_can_enter_during_serial_read(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

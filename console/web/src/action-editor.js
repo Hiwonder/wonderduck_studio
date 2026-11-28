@@ -1,4 +1,4 @@
-import { ACTION_POSITION_LIMITS } from './servo-panel.js';
+import { actionPositionLimits } from './servo-panel.js';
 
 const $ = id => document.getElementById(id);
 const csvPickerType = { description: 'CSV', accept: { 'text/csv': ['.csv'] } };
@@ -61,12 +61,15 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
   }
 
   function validatePlaybackPositions(source, lockedIds) {
-    const available = new Set(context().state?.servos?.filter(servo => servo.valid).map(servo => servo.id));
+    const { info, state } = context();
+    const available = new Set(state?.servos?.filter(servo => servo.valid).map(servo => servo.id));
     for (const frame of source) {
-      for (const [id, { min, max }] of Object.entries(ACTION_POSITION_LIMITS)) {
-        const value = frame.positions[id];
-        if (value != null && available.has(Number(id)) && !lockedIds.includes(Number(id)) && (value < min || value > max)) {
-          throw new Error(`ID ${id} 的动作位置须在 ${min}～${max} 步之间`);
+      for (const [key, value] of Object.entries(frame.positions)) {
+        const id = Number(key);
+        const limits = actionPositionLimits(info, id);
+        if (limits && value != null && available.has(id) && !lockedIds.includes(id) &&
+            (value < limits.min || value > limits.max)) {
+          throw new Error(`ID ${id} 的动作位置须在 ${limits.min}～${limits.max} 步之间`);
         }
       }
     }
@@ -155,7 +158,7 @@ export function createActionEditor({ request, toast, confirmAction, context, ser
       durationCell.append(duration); row.append(durationCell);
       for (const id of ids) {
         const cell = document.createElement('td');
-        const { min, max } = ACTION_POSITION_LIMITS[id] ?? { min: 0, max: 4095 };
+        const { min, max } = actionPositionLimits(context().info, id) ?? { min: 0, max: 4095 };
         const input = document.createElement('input'); input.type = 'number'; input.min = min; input.max = max; input.step = '1';
         input.placeholder = '-';
         input.value = frame.positions[id] ?? '';

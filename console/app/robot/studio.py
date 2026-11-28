@@ -109,6 +109,7 @@ class StudioController:
         self.owner = None
         self.workspace = None
         self.controller = None
+        self._action_position_limits = {}
         self.lease = None
         self.partial_maintenance = False
         self.partial_unavailable_ids = set()
@@ -127,7 +128,22 @@ class StudioController:
 
     @property
     def joints(self):
-        return self.controller.joints if self.controller else self.observer.joints
+        joints = self.controller.joints if self.controller else self.observer.joints
+        return self._action_joints(joints)
+
+    def action_position_limits(self, health):
+        reported = health.get("action_position_limits", {})
+        limits = {int(device_id): tuple(bounds) for device_id, bounds in reported.items()}
+        if set(IDS).issubset(limits):
+            self._action_position_limits = limits
+        return self._action_position_limits
+
+    def _action_joints(self, joints):
+        if self.workspace != "action":
+            return joints
+        limits = self._action_position_limits
+        return [dict(joint, encoder_limits=limits[joint["id"]])
+                if joint["id"] in limits else joint for joint in joints]
 
     @property
     def imu_source(self):
@@ -538,6 +554,13 @@ class StudioController:
                 self._discard_lease("robotd 维护会话已断开")
             if self.owner not in (None, client):
                 raise PermissionError("另一浏览器正在使用维护工作区")
+            if workspace == "action" and not self._action_position_limits:
+                try:
+                    health = self.observer.query((("robot.health", {}),), timeout=.5)["robot.health"]
+                except (OSError, ValueError, KeyError) as error:
+                    raise RuntimeError("暂时无法读取控制器动作限位，请重试") from error
+                if not self.action_position_limits(health):
+                    raise RuntimeError("控制器未提供动作限位")
             if self.owner == client and self.workspace == workspace and self.controller:
                 # A close which timed out may have already stopped accepting work.
                 # Finish closing it before the user retries the same workspace.
@@ -578,6 +601,8 @@ class StudioController:
             self.last_seen = time.monotonic()
             try:
                 self.controller = self.controller_factory(workspace)
+                if workspace == "action":
+                    self.controller.set_action_position_limits(self._action_position_limits)
                 # A lease can be reused across maintenance workspaces. Keep its
                 # partial-release semantics on every replacement controller.
                 self.controller.partial_maintenance = self.partial_maintenance
@@ -969,6 +994,8 @@ class StudioController:
                         state["sampled_monotonic"] = time.monotonic() - age / 1000
             else:
                 state = self.controller.snapshot(client) if self.controller else observed
+            if self.controller is not None and self.workspace == "action":
+                state["joints"] = self._action_joints(state["joints"])
             state.update(robot=observed.get("robot", {}), tof=observed.get("tof"),
                          workspace=self.workspace, maintenance_owner=self.owner == client,
                          maintenance_active=self.owner is not None, maintenance_error=self.error)

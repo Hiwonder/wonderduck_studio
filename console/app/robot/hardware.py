@@ -438,7 +438,8 @@ class Hardware(ServoLayout):
                 self.write_verified(device_id, 42, position.to_bytes(2, "little"))
             self.write_verified(device_id, 40, bytes((int(on),)))
         elif action == "move_direct":
-            target = encode_target(device_id, command.get("degrees"), self.ids, self.full_servo_range)
+            target = encode_target(device_id, command.get("degrees"), self.ids, self.full_servo_range,
+                                   position_limits=getattr(self, "action_position_limits", None))
             speed = integer(command.get("speed", 0), 0, 3400, "速度")
             data = target.to_bytes(2, "little") + b"\x00\x00" + speed.to_bytes(2, "little")
             self.send_write(device_id, 42, data)

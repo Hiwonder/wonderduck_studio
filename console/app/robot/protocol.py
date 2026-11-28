@@ -261,10 +261,16 @@ def mirror_action_targets(targets, joints, full_servo_range=False):
     return mirrored
 
 
-def encode_target(device_id, degrees, ids=IDS, full_servo_range=False):
+def encode_target(device_id, degrees, ids=IDS, full_servo_range=False, *, position_limits=None):
     index = ids.index(joint_id(device_id, ids))
     if type(degrees) not in (int, float) or not math.isfinite(degrees):
         raise ValueError("目标角度必须是有限数值")
+    if position_limits and device_id in position_limits:
+        minimum, maximum = position_limits[device_id]
+        if not -180 <= degrees <= 180:
+            raise ValueError(f"ID {device_id} 目标角度超出编码器范围")
+        raw = math.floor(4096 * (180 - degrees) / 360 + .5)
+        return integer(raw, minimum, maximum, f"ID {device_id} 动作位置")
     limits = DISCOVERED_LIMITS if full_servo_range or index >= len(LIMITS) else LIMITS[index]
     if not limits[0] <= degrees <= limits[1]:
         raise ValueError(f"ID {device_id} 机械限位 {limits}")

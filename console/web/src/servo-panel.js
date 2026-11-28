@@ -13,13 +13,19 @@ const SERVO_DIRECTIONS = {
 };
 const DIRECTION_LABELS = { up: '上', down: '下', left: '左', right: '右' };
 const ACCESSORY_SERVO_IDS = [35, 36];
-export const ACTION_POSITION_LIMITS = {
+const ACCESSORY_POSITION_LIMITS = {
   35: { min: 683, max: 2048 },
   36: { min: 2048, max: 3413 },
 };
 
-function encoderLimits(joint) {
-  if (Object.hasOwn(ACTION_POSITION_LIMITS, joint.id)) return ACTION_POSITION_LIMITS[joint.id];
+export function actionPositionLimits(info, id) {
+  const bounds = info?.action_position_limits?.[id];
+  return bounds ? { min: bounds[0], max: bounds[1] } : ACCESSORY_POSITION_LIMITS[id];
+}
+
+function encoderLimits(joint, info) {
+  const actionLimits = actionPositionLimits(info, joint.id);
+  if (actionLimits) return actionLimits;
   if (joint.encoder_limits) return { min: joint.encoder_limits[0], max: joint.encoder_limits[1] };
   return {
     min: Math.max(0, Math.ceil((180 - joint.limits[1]) * 4096 / 360)),
@@ -158,7 +164,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
     element.querySelector('.servo-id').textContent = `ID ${joint.id}`;
     element.querySelector('.servo-row-heading').title = joint.label;
     const [targetSlider, targetInput, offsetSlider, offsetInput] = element.querySelectorAll('input');
-    const limits = encoderLimits(joint);
+    const limits = encoderLimits(joint, context().info);
     targetSlider.min = targetInput.min = limits.min;
     targetSlider.max = targetInput.max = limits.max;
     if (register) {
@@ -345,7 +351,7 @@ export function createServoPanel({ request, toast, context, select, iconsRefresh
       if (!holdPresentation) row.lastPresentation = presentation;
       const reportedTarget = state?.pose_targets?.[id];
       if (!targets.has(id) && Number.isInteger(reportedTarget) &&
-          (!Object.hasOwn(ACTION_POSITION_LIMITS, id) || (reportedTarget >= row.limits.min && reportedTarget <= row.limits.max))) {
+          reportedTarget >= row.limits.min && reportedTarget <= row.limits.max) {
         targets.set(id, reportedTarget);
       }
       if (row.initialTarget === null && !targets.has(id) && !holdPresentation && presentation.fresh) {

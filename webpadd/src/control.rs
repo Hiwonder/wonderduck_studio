@@ -20,6 +20,8 @@ pub(super) struct Input {
     pub mouth_auto: bool,
     pub mouth_cancel: bool,
     pub mouth_held: Option<bool>,
+    pub wing_flap: proto::WingFlapMode,
+    pub wing_flap_duration_ms: Option<u16>,
     pub buttons: u16,
 }
 
@@ -37,6 +39,7 @@ impl Input {
     }
     pub fn neutral(self) -> bool {
         self.buttons == 0
+            && self.wing_flap == proto::WingFlapMode::Off
             && self.left_trigger < 0.05
             && self.right_trigger < 0.05
             && self.head_stick.is_none_or(|axes| axes == [0.0; 2])
@@ -119,6 +122,10 @@ pub(super) enum BrowserMessage {
         mouth_cancel: bool,
         #[serde(default)]
         mouth_held: Option<bool>,
+        #[serde(default)]
+        wing_flap: proto::WingFlapMode,
+        #[serde(default)]
+        wing_flap_duration_ms: Option<u16>,
         buttons: Vec<Button>,
         active: bool,
     },
@@ -524,6 +531,7 @@ pub(super) struct ControlState {
     pub armed: bool,
     pub connected: bool,
     pub roller: bool,
+    pub wing_flap_supported: bool,
     pub obstacle: Option<proto::ObstacleParams>,
     pub human_owner: Option<proto::HumanControlSource>,
     pub human_held: bool,
@@ -570,6 +578,7 @@ impl Default for ControlState {
             active: true,
             armed: false,
             connected: false,
+            wing_flap_supported: false,
             roller: false,
             obstacle: None,
             human_owner: None,
@@ -964,6 +973,32 @@ mod ownership_tests {
     use super::*;
 
     #[test]
+    fn stale_wing_input_sends_off() {
+        let now = Instant::now();
+        let input = Input {
+            wing_flap: proto::WingFlapMode::Fast,
+            wing_flap_duration_ms: Some(240),
+            ..Input::default()
+        };
+        assert!(!input.neutral());
+        let control = ControlState {
+            owner: Some(1),
+            last_input: Some(now),
+            human_held: true,
+            armed: true,
+            wing_flap_supported: true,
+            input,
+            ..ControlState::default()
+        };
+        for (time, mode, duration_ms) in [(now, proto::WingFlapMode::Fast, Some(240)),
+            (now + INPUT_TTL + CONTROL_PERIOD, proto::WingFlapMode::Off, None)] {
+            assert!(control_frame(&control, time).into_iter().any(|call| {
+                matches!(call, proto::Call::RobotWingFlap(p) if p.mode == mode && p.duration_ms == duration_ms)
+            }));
+        }
+    }
+
+    #[test]
     fn mouth_open_and_first_sound_are_forwarded_together_when_the_lease_is_granted() {
         let now = Instant::now();
         let mut control = ControlState { connected: true, ..Default::default() };
@@ -1314,5 +1349,11 @@ pub(super) fn control_frame(control: &ControlState, now: Instant) -> Vec<proto::
             && control.owner.and_then(|id| control.peers.get(&id))
                 .is_some_and(|peer| peer.fresh(now) && peer.mouth.repeating(now)),
     }));
+    if control.wing_flap_supported {
+        calls.push(proto::Call::RobotWingFlap(proto::WingFlapParams {
+            mode: input.wing_flap,
+            duration_ms: input.wing_flap_duration_ms.filter(|_| input.wing_flap != proto::WingFlapMode::Off),
+        }));
+    }
     calls
 }

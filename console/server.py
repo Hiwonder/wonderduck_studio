@@ -198,7 +198,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 versions = None
             versions = dict(versions or {}, software_version=software_version(getattr(self.server, "robot_root", None)))
+            action_position_limits = {}
             if getattr(self.server, "studio", False):
+                health = {}
                 try:
                     health = query_robotd(self.controller.path, (("robot.health", {}),), timeout=.5)["robot.health"]
                     firmware = health.get("imu_firmware_version")
@@ -206,8 +208,10 @@ class Handler(BaseHTTPRequestHandler):
                         firmware = None
                 except (OSError, ValueError, AttributeError):
                     firmware = None
+                action_position_limits = self.controller.action_position_limits(health)
                 versions = dict(versions or {}, imu_firmware_version=firmware)
             self.send_json(dict(joints=self.controller.joints, registers=registers, token=self.controller.token,
+                                action_position_limits=action_position_limits,
                                 demo=self.controller.demo, hz=self.controller.hz,
                                 imu_source=self.controller.imu_source, readonly=readonly, device_versions=versions,
                                 studio=getattr(self.server, "studio", False),

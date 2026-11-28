@@ -154,12 +154,19 @@ async function request(path, body, timeoutMs = null, signal = null) {
   return data;
 }
 
+function applySessionInfo(updated) {
+  if (updated.token === info?.token && info.action_position_limits) {
+    updated.action_position_limits = { ...info.action_position_limits, ...updated.action_position_limits };
+  }
+  info = updated;
+  token = updated.token;
+}
+
 function refreshSession() {
   if (!sessionRefresh) {
     setArmed(false);
     sessionRefresh = request('info').then(updated => {
-      info = updated;
-      token = updated.token;
+      applySessionInfo(updated);
       applyMode();
       servoPanel.reset(updated.joints);
       actionEditor.render();
@@ -698,8 +705,7 @@ const workspaces = createWorkspaceController({
   refreshInfo: async signal => {
     const updated = await request('info', undefined, null, signal);
     signal.throwIfAborted();
-    info = updated;
-    token = updated.token;
+    applySessionInfo(updated);
   },
   revise: advanceHeadSubscription,
   toast,

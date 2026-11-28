@@ -190,7 +190,8 @@ class DemoHardware(ServoLayout):
                 raise ValueError("扭矩状态无效")
             b[40] = int(command["on"])
         elif action == "move_direct":
-            target = encode_target(device_id, command.get("degrees"), self.ids, self.full_servo_range)
+            target = encode_target(device_id, command.get("degrees"), self.ids, self.full_servo_range,
+                                   position_limits=getattr(self, "action_position_limits", None))
             speed = integer(command.get("speed", 0), 0, 3400, "速度")
             b[42:48] = target.to_bytes(2, "little") + b"\x00\x00" + speed.to_bytes(2, "little")
             if b[40] == 1:
@@ -287,6 +288,7 @@ class Controller:
         self.hardware, self.hz, self.demo = hardware, hz, demo
         self.imu_source = getattr(hardware, "imu_source", "id200")
         self.full_servo_range = full_servo_range
+        self.action_position_limits = ACCESSORY_ACTION_LIMITS
         self.hardware_factory = hardware_factory
         self.joints = hardware.joints
         self.calibration = Calibration(calibration_script or
@@ -572,6 +574,10 @@ class Controller:
                 raise TimeoutError("动作帧排队超时，未发送") from None
             raise TimeoutError("动作帧仍在发送，结果尚未确认") from None
 
+    def set_action_position_limits(self, limits):
+        self.action_position_limits = {**ACCESSORY_ACTION_LIMITS, **limits}
+        self.hardware.action_position_limits = self.action_position_limits
+
     def enqueue_action(self, command, client):
         operation = command.get("operation")
         if operation == "status":
@@ -607,8 +613,8 @@ class Controller:
         available_frames = [(duration, {device_id: target for device_id, target in targets.items()
                                        if device_id not in errors}) for duration, targets in frames]
         for _, targets in available_frames:
-            for device_id in targets.keys() & ACCESSORY_ACTION_LIMITS.keys():
-                minimum, maximum = ACCESSORY_ACTION_LIMITS[device_id]
+            for device_id in targets.keys() & self.action_position_limits.keys():
+                minimum, maximum = self.action_position_limits[device_id]
                 integer(targets[device_id], minimum, maximum, f"ID {device_id} 动作位置")
         if not any(targets for _, targets in available_frames):
             raise ValueError("动作没有可用的舵机")

@@ -9,7 +9,7 @@
 <script>(()=>{const options=new URLSearchParams(location.search);if(options.has('studio'))document.documentElement.dataset.studioEmbedded='true';document.documentElement.dataset.debugMode=options.get('debug')==='1'?'on':'off';})();</script>
 <script src="/theme.js"></script><link href="/console.css" rel="stylesheet"/>
 </head>
-<body data-compact-view="control" data-console-page="control" data-media-port="{{MEDIA_PORT}}" data-tof-enabled="{{TOF_ENABLED}}" data-operator-tab="sticks">
+<body data-compact-view="control" data-console-page="control" data-media-port="{{MEDIA_PORT}}" data-tof-enabled="{{TOF_ENABLED}}" data-wing-flap-enabled="{{WING_FLAP_ENABLED}}" data-operator-tab="sticks">
 <svg aria-hidden="true" class="svg-sprite">
 <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"></path></symbol>
 <symbol id="icon-gamepad" viewBox="0 0 24 24"><line x1="6" x2="10" y1="11" y2="11"></line><line x1="8" x2="8" y1="9" y2="13"></line><line x1="15" x2="15.01" y1="12" y2="12"></line><line x1="18" x2="18.01" y1="10" y2="10"></line><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"></path></symbol>
@@ -97,7 +97,7 @@
 <p class="stick-summary sr-only" id="right-summary">当前模式仅使用左右转向。</p>
 </div></div><p class="keyboard-hint sr-only">W A S D / 方向键 · 松手归零</p></div>
 <div class="operator-view action-bank" data-operator-panel="actions" hidden=""><div class="panel-heading subsection-heading"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-blocks"></use></svg>动作库</h2></div><div class="actions skill-actions">
-<button class="action" type="button" data-action="sit_toggle" disabled><svg aria-hidden="true" class="icon"><use href="#icon-armchair"></use></svg><span class="skill-name">坐下 / 站起</span></button>
+<button class="action" type="button" data-action="sit_toggle" disabled><svg aria-hidden="true" class="icon"><use href="#icon-armchair"></use></svg><span class="skill-name">坐下</span></button>
 <button class="action" type="button" data-action="ground_pick" disabled><svg aria-hidden="true" class="icon"><use href="#icon-hand-helping"></use></svg><span class="skill-name">地面拾取</span></button>
 <button class="action" type="button" data-action="kick_left" disabled><svg aria-hidden="true" class="icon"><use href="#icon-footprints"></use></svg><span class="skill-name">左踢</span></button>
 <button class="action" type="button" data-action="kick_right" disabled><svg aria-hidden="true" class="icon"><use href="#icon-footprints"></use></svg><span class="skill-name">右踢</span></button>
@@ -111,7 +111,16 @@
 <div class="operator-view operator-extras" data-operator-panel="actions" data-operator-reveal="actions" hidden=""><div class="control-action-library" hidden>
   <div class="control-action-picker"><button class="action" id="control-action-select" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="control-action-options"><span id="control-action-name">选择动作</span><svg aria-hidden="true" class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button><div class="control-action-options" id="control-action-options" role="listbox" aria-label="可用动作" hidden></div></div>
   <button class="action primary" id="control-action-run" type="button" disabled>运行</button>
-</div><div class="accessory-controls"><label class="mouth-control" title="张嘴时叫一声，按住滑杆 1 秒后连续叫"><span>嘴部开合</span><input id="mouth-control" aria-label="嘴部开合" class="speed-range" min="0" max="1" step="0.01" type="range" value="0" disabled/></label></div></div>
+</div><div class="accessory-controls"><label class="mouth-control" title="张嘴时叫一声，按住滑杆 1 秒后连续叫"><span>嘴部开合</span><input id="mouth-control" aria-label="嘴部开合" class="speed-range" min="0" max="1" step="0.01" type="range" value="0" disabled/></label>
+  <div id="wing-flap-controls" class="actions" hidden>
+    <button class="action" type="button" data-wing-flap="slow" aria-pressed="false" disabled>慢扇动</button>
+    <button class="action" type="button" data-wing-flap="fast" aria-pressed="false" disabled>快扇动</button>
+  </div>
+  <div class="wing-flap-timing" id="wing-flap-timing" hidden>
+    <label><span>慢扇动时间</span><input class="speed-range" data-wing-duration="slow" min="{{WING_FLAP_MIN_MS}}" max="{{WING_FLAP_MAX_MS}}" step="10" type="range" value="{{WING_FLAP_SLOW_MS}}"/><output data-wing-time="slow">{{WING_FLAP_SLOW_MS}} ms</output></label>
+    <label><span>快扇动时间</span><input class="speed-range" data-wing-duration="fast" min="{{WING_FLAP_MIN_MS}}" max="{{WING_FLAP_MAX_MS}}" step="10" type="range" value="{{WING_FLAP_FAST_MS}}"/><output data-wing-time="fast">{{WING_FLAP_FAST_MS}} ms</output></label>
+  </div>
+</div></div>
 <section aria-label="自动避障" class="mode-obstacle" data-requires-tof data-operator-reveal="actions"><div class="subsection-heading"><h2><svg aria-hidden="true" class="icon section-icon"><use href="#icon-radar"></use></svg>自动避障</h2><label class="obstacle-switch" for="obstacle-enabled"><span>启用</span><input disabled="" id="obstacle-enabled" type="checkbox"/></label></div><div class="obstacle-controls">
 <span aria-live="polite" class="obstacle-state" id="obstacle-state"></span>
 <label for="obstacle-distance"><span>避障距离 <output id="obstacle-distance-value">500 mm</output></span><input class="speed-range" disabled="" id="obstacle-distance" max="2000" min="100" step="50" type="range" value="500"/></label>

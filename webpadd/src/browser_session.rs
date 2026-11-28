@@ -148,7 +148,7 @@ pub(super) async fn serve(
                         left_y,
                         right_x,
                         right_y, head_stick, left_trigger, right_trigger, mouth_auto, mouth_cancel, mouth_held,
-                        buttons, active,
+                        wing_flap, wing_flap_duration_ms, buttons, active,
                     } => {
                         if leaving { continue; }
                         let input = Input {
@@ -156,6 +156,8 @@ pub(super) async fn serve(
                             left_y,
                             right_x,
                             right_y, head_stick, left_trigger, right_trigger, mouth_auto, mouth_cancel, mouth_held,
+                            wing_flap: if state.status.borrow().wing_flap_enabled { wing_flap } else { proto::WingFlapMode::Off },
+                            wing_flap_duration_ms,
                             buttons: buttons.into_iter().fold(0, |bits, button| bits | button.bit()),
                         };
                         if !input.valid() {

@@ -12,6 +12,7 @@ pub(super) async fn policy_status_worker(socket: PathBuf, status_tx: watch::Send
             status.motion_enabled = None;
             status.motion_homed = None;
             status.active_skill = None;
+            status.sitting = None;
             status.last_skill_timeout = None;
         });
         tokio::time::sleep(CONNECT_RETRY).await;
@@ -34,6 +35,7 @@ async fn run_policy_status_stream(socket: &Path, status_tx: &watch::Sender<Brows
             status.motion_enabled = policies.motion_enabled;
             status.motion_homed = policies.homed;
             status.active_skill = policies.active_skill;
+            status.sitting = policies.sitting;
             status.last_skill_timeout = policies.last_skill_timeout;
             status.power_status_sequence = status.power_status_sequence.wrapping_add(1);
         });
@@ -297,6 +299,7 @@ async fn read_health(socket: &Path) -> Result<(proto::HealthResult, Result<proto
 }
 
 pub(super) fn update_status_from_health(status: &mut BrowserStatus, health: &proto::HealthResult) {
+    status.wing_flap_enabled = health.wing_flap_enabled;
     status.healthy = Some(health.healthy);
     status.health_degraded = Some(health.degraded);
     status.health_reason = health.reason.clone();
@@ -322,6 +325,7 @@ pub(super) fn update_status_mode(status: &mut BrowserStatus, mode: Option<String
 }
 
 pub(super) fn clear_status_health(status: &mut BrowserStatus) {
+    status.wing_flap_enabled = false;
     status.healthy = None;
     status.health_degraded = None;
     status.health_reason = None;

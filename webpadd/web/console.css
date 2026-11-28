@@ -1628,6 +1628,15 @@ html[data-theme="light"] .battery-indicator.low-voltage { --battery-warning: #a1
 .stick-panel .pad[data-stick="right"] .axis.right::before { content: "→"; }
 
 .control-panel .accessory-controls { grid-template-columns: minmax(0, 1fr); }
+#wing-flap-controls .action { min-width: 0; }
+html:not([data-debug-mode="on"]) .wing-flap-timing { display: none; }
+.wing-flap-timing:not([hidden]) { display: grid; gap: 8px; }
+.wing-flap-timing > label {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) 6ch;
+  align-items: center; gap: 8px; color: var(--muted); font-size: var(--font-body);
+}
+.wing-flap-timing .speed-range { width: 100%; min-width: 0; }
+.wing-flap-timing output { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Keep stop accessible on both compact tabs; place it below the skill buttons. */
 .control-panel { --action-row-gap: 12px; }

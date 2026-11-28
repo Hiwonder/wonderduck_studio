@@ -41,6 +41,7 @@ import { bindMotionInput } from './motion-input.js';
       let powerPending = null, powerAcknowledged = false, powerRequestSequence = 0, powerTimer = null;
       let pendingFeatureStart = null;
       const skillLabels = { sit_toggle: "坐下 / 站起", ground_pick: "地面拾取", roulade: "翻滚", headstand: "倒立", kick_left: "左踢", kick_right: "右踢" };
+      const sitToggleLabel = document.querySelector('[data-action="sit_toggle"] .skill-name');
       let linearSpeed = 0.30;
       let turnSpeed = 1;
       const modeCopy = {
@@ -158,6 +159,18 @@ import { bindMotionInput } from './motion-input.js';
       const turnInput = document.querySelector("#turn-input");
       const turnRange = document.querySelector("#turn-range");
       const mouthRange = document.querySelector('#mouth-control');
+      const wingFlapControls = document.querySelector('#wing-flap-controls');
+      const wingFlapButtons = wingFlapControls.querySelectorAll('[data-wing-flap]');
+      const wingFlapTiming = document.querySelector('#wing-flap-timing');
+      const wingFlapRanges = {
+        slow: wingFlapTiming.querySelector('[data-wing-duration="slow"]'),
+        fast: wingFlapTiming.querySelector('[data-wing-duration="fast"]'),
+      };
+      let wingFlapSupported = document.body.dataset.wingFlapEnabled === 'true';
+      wingFlapControls.hidden = !wingFlapSupported;
+      wingFlapTiming.hidden = !wingFlapSupported;
+      let wingFlap = 'off';
+      let wingMotionReady = false;
       let mouthCancelPending = false;
       let mouthPointer = null;
       const mouthKeys = new Set();
@@ -425,6 +438,17 @@ import { bindMotionInput } from './motion-input.js';
       let volumeBusy = false, volumeTimer = null, volumeRevision = 0;
       const sticksBlocked = () => !manualControlPage() || !controlLeaseReady || !driveControlReady || otherController || !session.open || pendingFeatureStart !== null || mazeRun.active || mazeRun.pending || vision.awaitingTarget
         || lineRun.active || lineRun.pending || coordinatedOwner !== null;
+      const wingFlapUnavailable = () => !wingFlapSupported || !state.active || !wingMotionReady
+        || document.body.dataset.consolePage !== 'control' || motionUnavailable() || sticksBlocked();
+      function renderWingFlap() {
+        wingFlapControls.hidden = !wingFlapSupported;
+        wingFlapTiming.hidden = !wingFlapSupported;
+        const disabled = wingFlapUnavailable();
+        for (const button of wingFlapButtons) {
+          button.disabled = disabled;
+          button.setAttribute('aria-pressed', String(wingFlap === button.dataset.wingFlap));
+        }
+      }
       const updateSticksAvailability = () => {
         const disabled = sticksBlocked();
         motion.setDisabled(disabled);
@@ -433,10 +457,17 @@ import { bindMotionInput } from './motion-input.js';
           resetMouthOpening();
           sendInput();
         }
+        if (wingFlap !== 'off' && wingFlapUnavailable()) {
+          wingFlap = 'off';
+          sendInput();
+        }
+        renderWingFlap();
         headCenterButton.disabled = headCenterUnavailable();
       };
       const zero = () => {
         resetMouthOpening();
+        wingFlap = 'off';
+        renderWingFlap();
         cancelPickMouth();
         headCenterPending = false;
         clearTimeout(headPitchTimer);
@@ -1973,6 +2004,9 @@ import { bindMotionInput } from './motion-input.js';
         const previous = skillStatusSequence;
         skillStatusSequence = sequence;
         const skill = typeof status.active_skill === 'string' ? status.active_skill : null;
+        if (skill !== 'sit_toggle' && status.policy !== 'rise' && typeof status.sitting === 'boolean') {
+          setText(sitToggleLabel, status.sitting ? '站起' : '坐下');
+        }
         if (skill !== activeSkill) {
           activeSkill = skill;
           if (skill) setNotice(`正在执行动作：${skillLabels[skill] || skill}`);
@@ -2100,6 +2134,8 @@ import { bindMotionInput } from './motion-input.js';
           updateActionAvailability(session.open);
         }
         robotConnected = connected;
+        wingFlapSupported = status.wing_flap_enabled === true;
+        wingMotionReady = connected && status.fallen !== true && status.limp !== true;
         if (!connected) cancelFeatureStart();
         updatePowerState(status);
         updateSkillStatus(status);
@@ -2167,7 +2203,10 @@ import { bindMotionInput } from './motion-input.js';
           headPositionWanted = false;
           reconcileHeadPosition();
         }
+        const requestedWingFlap = wingFlapSupported ? (wingFlapUnavailable() ? 'off' : wingFlap) : undefined;
+        const wingDuration = document.documentElement.dataset.debugMode === 'on' ? wingFlapRanges[requestedWingFlap]?.valueAsNumber : undefined;
         if (session.send({ type: "input", seq: ++sequence, ...state, head_stick,
+          wing_flap: requestedWingFlap, wing_flap_duration_ms: wingDuration,
           mouth_auto: pickMouthOpened || undefined, mouth_cancel: mouthCancelPending || undefined,
           mouth_held: mouthPointer !== null || mouthKeys.size > 0 })) {
           mouthCancelPending = false;
@@ -2801,6 +2840,22 @@ import { bindMotionInput } from './motion-input.js';
           sendAction(action);
         });
       });
+      for (const button of wingFlapButtons) {
+        button.addEventListener('click', () => {
+          if (wingFlapUnavailable()) return;
+          const mode = button.dataset.wingFlap;
+          wingFlap = wingFlap === mode ? 'off' : mode;
+          renderWingFlap();
+          sendInput();
+        });
+      }
+      for (const [mode, range] of Object.entries(wingFlapRanges)) {
+        const output = wingFlapTiming.querySelector(`[data-wing-time="${mode}"]`);
+        range.addEventListener('input', () => {
+          output.value = `${range.value} ms`;
+          if (wingFlap === mode) sendInput();
+        });
+      }
       mouthRange.addEventListener('input', () => {
         if (!state.active || mouthRange.disabled) {
           mouthRange.value = state.left_trigger;
